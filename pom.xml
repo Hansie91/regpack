@@ -153,6 +153,36 @@
           <version>${maven-enforcer-plugin.version}</version>
         </plugin>
         <plugin>
+          <groupId>org.cyclonedx</groupId>
+          <artifactId>cyclonedx-maven-plugin</artifactId>
+          <version>${cyclonedx-maven-plugin.version}</version>
+          <configuration>
+            <projectType>application</projectType>
+            <outputFormat>json</outputFormat>
+            <outputName>bom</outputName>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>license-maven-plugin</artifactId>
+          <version>${license-maven-plugin.version}</version>
+          <configuration>
+            <acceptPomPackaging>true</acceptPomPackaging>
+            <excludedGroups>dev\.regpack</excludedGroups>
+            <failOnMissing>true</failOnMissing>
+            <failOnBlacklist>true</failOnBlacklist>
+            <includedLicenses>Apache-2.0|EPL-2.0|MIT|BSD-2-Clause|BSD-3-Clause</includedLicenses>
+            <licenseMerges>
+              <licenseMerge>Apache-2.0|The Apache Software License, Version 2.0|Apache License, Version 2.0|The Apache License, Version 2.0|Apache License 2.0|Apache 2.0</licenseMerge>
+              <licenseMerge>EPL-2.0|Eclipse Public License v2.0|Eclipse Public License - v 2.0|Eclipse Public License 2.0</licenseMerge>
+              <licenseMerge>MIT|The MIT License|MIT License</licenseMerge>
+              <licenseMerge>BSD-2-Clause|BSD 2-Clause License|The BSD 2-Clause License</licenseMerge>
+              <licenseMerge>BSD-3-Clause|BSD 3-Clause License|The BSD 3-Clause License|BSD-3-Clause License</licenseMerge>
+            </licenseMerges>
+            <missingFile>${maven.multiModuleProjectDirectory}/governance/THIRD-PARTY.missing.properties</missingFile>
+          </configuration>
+        </plugin>
+        <plugin>
           <groupId>com.diffplug.spotless</groupId>
           <artifactId>spotless-maven-plugin</artifactId>
           <version>${spotless.version}</version>
