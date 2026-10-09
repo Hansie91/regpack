@@ -120,6 +120,38 @@ class FaultInjectorTest {
   }
 
   @Test
+  void singleArgumentConstructorRejectsPlansWithClockFaults() {
+    FaultPlan advance = FaultPlan.advanceClockAt("X.y:AFTER", 1, Duration.ofSeconds(1));
+    assertThatThrownBy(() -> new FaultInjector(advance))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new FaultInjector(FaultPlan.crashAt("X.y:BEFORE", 1).then(advance)))
+        .isInstanceOf(IllegalArgumentException.class);
+    // The same plans are fine with a clock to move.
+    assertThat(new FaultInjector(advance, new ManualClock(START))).isNotNull();
+  }
+
+  @Test
+  void whenFaultsShareAPointTheFirstThrowingFaultWinsAndClockAdvancesStillApply() {
+    IllegalStateException boom = new IllegalStateException("boom");
+    ManualClock clock = new ManualClock(START);
+    FaultPlan crashFirst =
+        FaultPlan.crashAt("Counter.incr:BEFORE", 1)
+            .then(FaultPlan.failAt("Counter.incr:BEFORE", 1, boom))
+            .then(FaultPlan.advanceClockAt("Counter.incr:BEFORE", 1, Duration.ofSeconds(30)));
+    Counter crashing = new FaultInjector(crashFirst, clock).wrap(Counter.class, delegate);
+    assertThatThrownBy(crashing::incr).isInstanceOf(SimulatedCrash.class);
+    assertThat(clock.now()).isEqualTo(START.plusSeconds(30));
+    assertThat(count.get()).isZero();
+
+    FaultPlan failFirst =
+        FaultPlan.failAt("Counter.incr:BEFORE", 1, boom)
+            .then(FaultPlan.crashAt("Counter.incr:BEFORE", 1));
+    Counter failing = new FaultInjector(failFirst).wrap(Counter.class, delegate);
+    assertThatThrownBy(failing::incr).isSameAs(boom);
+    assertThat(count.get()).isZero();
+  }
+
+  @Test
   void wrapRejectsClasses() {
     FaultInjector injector = new FaultInjector(FaultPlan.none());
     assertThatThrownBy(() -> injector.wrap(AtomicInteger.class, new AtomicInteger()))

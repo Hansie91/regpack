@@ -1,8 +1,11 @@
 package dev.regpack.testkit.enrichment;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.regpack.model.Sha256;
+import dev.regpack.model.json.Json;
 import dev.regpack.ports.connector.EnrichmentSource;
 import dev.regpack.ports.connector.EnrichmentSource.Context;
 import dev.regpack.ports.connector.EnrichmentSource.KeyOutcome;
@@ -98,6 +101,76 @@ class ScriptedEnrichmentSourceLookupContractTest implements LookupContract {
             });
     assertThat(limited.lookup(request("K1")).outcomes()).hasSize(1);
     assertThat(limited.requestCount()).isEqualTo(3);
+  }
+
+  @Test
+  void failureAsOfIsTheRequestStartEvenWhenLatencyAdvancesTheClock() {
+    ManualClock own = new ManualClock(START);
+    ScriptedEnrichmentSource slow =
+        ScriptedEnrichmentSource.builder(own, "slow-failing")
+            .limits(LIMITS)
+            .failure("F1", "E_UPSTREAM", true)
+            .latency(Duration.ofMillis(250))
+            .build();
+    KeyOutcome outcome = slow.lookup(request("F1")).outcomes().get(0);
+    assertThat(outcome).isInstanceOf(KeyOutcome.Failure.class);
+    assertThat(outcome.asOf()).isEqualTo(START);
+    assertThat(own.now()).isEqualTo(START.plusMillis(250));
+  }
+
+  @Test
+  void armedTimeoutAdvancesTheClockByTheTimeoutExactlyOnceAndIsOneShot() {
+    ManualClock own = new ManualClock(START);
+    ScriptedEnrichmentSource armed =
+        ScriptedEnrichmentSource.builder(own, "armed-timeout")
+            .limits(LIMITS)
+            .hit("K1", Map.of("lei", "LEI-K1"))
+            .build();
+    armed.armTimeout();
+    long before = own.monotonicNanos();
+    assertThatThrownBy(() -> armed.lookup(request("K1")))
+        .isInstanceOfSatisfying(
+            LookupUnavailableException.class,
+            e -> assertThat(e.kind()).isEqualTo(LookupUnavailableException.Kind.TIMEOUT));
+    assertThat(own.monotonicNanos() - before).isEqualTo(2_000_000_000L);
+    assertThat(armed.requestCount()).isEqualTo(1);
+    // One-shot: the next lookup is answered, and without a further timeout advance.
+    assertThat(armed.lookup(request("K1")).outcomes()).hasSize(1);
+    assertThat(own.monotonicNanos() - before).isEqualTo(2_000_000_000L);
+    assertThat(armed.lookup(request("K1")).outcomes()).hasSize(1);
+    assertThat(own.monotonicNanos() - before).isEqualTo(2_000_000_000L);
+  }
+
+  @Test
+  void armedRateLimitIsOneShotAndAdvancesNothing() {
+    ManualClock own = new ManualClock(START);
+    ScriptedEnrichmentSource armed =
+        ScriptedEnrichmentSource.builder(own, "armed-rate-limit")
+            .limits(LIMITS)
+            .hit("K1", Map.of("lei", "LEI-K1"))
+            .build();
+    armed.armRateLimit(Duration.ofSeconds(7));
+    assertThatThrownBy(() -> armed.lookup(request("K1")))
+        .isInstanceOfSatisfying(
+            LookupUnavailableException.class,
+            e -> {
+              assertThat(e.kind()).isEqualTo(LookupUnavailableException.Kind.RATE_LIMITED);
+              assertThat(e.retryAfter()).isEqualTo(Optional.of(Duration.ofSeconds(7)));
+            });
+    assertThat(own.monotonicNanos()).isZero();
+    assertThat(armed.lookup(request("K1")).outcomes()).hasSize(1);
+    assertThat(armed.lookup(request("K1")).outcomes()).hasSize(1);
+  }
+
+  @Test
+  void anUnscriptedKeyIsAMissWithTheCanonicalMissBytes() {
+    KeyOutcome outcome = source.lookup(request("UNKNOWN")).outcomes().get(0);
+    assertThat(outcome).isInstanceOf(KeyOutcome.Miss.class);
+    assertThat(outcome.key()).isEqualTo("UNKNOWN");
+    assertThat(outcome.asOf()).isEqualTo(context.asOf());
+    byte[] expected = Json.canonical(Map.of("key", "UNKNOWN", "outcome", "MISS")).getBytes(UTF_8);
+    assertThat(outcome.canonical()).isEqualTo(expected);
+    assertThat(outcome.responseHash()).isEqualTo(Sha256.of(expected));
   }
 
   @Test

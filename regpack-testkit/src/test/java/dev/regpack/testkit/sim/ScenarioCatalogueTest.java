@@ -36,6 +36,10 @@ class ScenarioCatalogueTest {
             Set.of("ACPT", "SILENCE_RECEIVED_UNANSWERED", "SKEWED_CLOCK", "FAULT_INJECTION"));
     assertThat(names(all, e -> e.kind() == Kind.MECHANISM))
         .isEqualTo(Set.of("SKEWED_CLOCK", "FAULT_INJECTION"));
+    // The MECHANISM entries say where the scenario content (P8) and the fault matrix (P4) land.
+    assertThat(ScenarioCatalogue.byName("SKEWED_CLOCK").orElseThrow().specSource()).contains("P8");
+    assertThat(ScenarioCatalogue.byName("FAULT_INJECTION").orElseThrow().specSource())
+        .contains("P4");
     assertThat(all.stream().filter(e -> e.status() == Status.PLANNED))
         .isNotEmpty()
         .allSatisfy(e -> assertThat(e.owningPlan()).isEqualTo("P8"));

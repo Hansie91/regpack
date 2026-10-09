@@ -92,6 +92,57 @@ public interface KmsContract {
   }
 
   @Test
+  default void hmacIsDeniedToIdentitiesNotAllowedOnTheKey() {
+    byte[] data = bytes("data");
+    assertThatThrownBy(() -> signer().hmac(trnKey(), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    assertThatThrownBy(() -> signer().hmac(trnKey2(), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    // The allowed identity still works on the same keys.
+    assertThat(application().hmac(trnKey(), data)).hasSize(32);
+  }
+
+  @Test
+  default void unwrapIsDeniedToIdentitiesNotAllowedOnTheKek() {
+    byte[] dataKey = bytes("0123456789abcdef0123456789abcdef");
+    byte[] aad = bytes("aad");
+    WrappedKey wrapped = application().wrap(kek(), dataKey, aad);
+    // signer is not allowed on kek-1, so it cannot unwrap what the application wrapped.
+    assertThatThrownBy(() -> signer().unwrap(kek(), wrapped, aad))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    // application is not allowed on kek-2, even for a well-formed wrapped key naming kek-2.
+    byte[] ciphertext = wrapped.ciphertext();
+    assertThatThrownBy(() -> application().unwrap(kek2(), new WrappedKey("kek-2", ciphertext), aad))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    WrappedKey underKek2 = signer().wrap(kek2(), dataKey, aad);
+    assertThatThrownBy(() -> application().unwrap(kek2(), underKek2, aad))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    assertThat(signer().unwrap(kek2(), underKek2, aad)).isEqualTo(dataKey);
+    assertThat(application().unwrap(kek(), wrapped, aad)).isEqualTo(dataKey);
+  }
+
+  @Test
+  default void verifyRejectsSignaturesOfAnotherKeyOrWithAlteredMetadata() {
+    byte[] message = bytes("pack-bytes");
+    KmsSignature signature = signer().sign(packKey(), message);
+    assertThat(application().verify(packKey(), message, signature)).isTrue();
+    // The signature was made by pack-key: it does not verify under manifest-key, as issued or
+    // relabelled.
+    assertThat(application().verify(manifestKey(), message, signature)).isFalse();
+    KmsSignature relabelled = new KmsSignature(manifestKey().keyId(), "Ed25519", signature.value());
+    assertThat(application().verify(manifestKey(), message, relabelled)).isFalse();
+    // A signature that names another key or algorithm is rejected under the right key.
+    assertThat(application().verify(packKey(), message, relabelled)).isFalse();
+    KmsSignature otherAlgorithm = new KmsSignature(packKey().keyId(), "RSA", signature.value());
+    assertThat(application().verify(packKey(), message, otherAlgorithm)).isFalse();
+    // The signature of manifest-key over the same bytes is its own and does not verify under
+    // pack-key either.
+    KmsSignature manifestSignature = signer().sign(manifestKey(), message);
+    assertThat(application().verify(packKey(), message, manifestSignature)).isFalse();
+    assertThat(application().verify(manifestKey(), message, manifestSignature)).isTrue();
+  }
+
+  @Test
   default void kekNotPermittedToTheApplicationIsDenied() {
     byte[] data = bytes("data");
     assertThatThrownBy(() -> application().wrap(kek2(), data, data))

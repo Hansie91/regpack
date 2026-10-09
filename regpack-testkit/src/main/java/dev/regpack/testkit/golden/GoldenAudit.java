@@ -3,13 +3,15 @@ package dev.regpack.testkit.golden;
 import dev.regpack.testkit.golden.GoldenCase.Provenance;
 import dev.regpack.testkit.golden.GoldenCase.ProvenanceKind;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Applies the spec 14.2 oracle rules mechanically: a golden case counts for traceability only with
  * a real source, a registered named human reviewer, a review date, and an author who differs from
- * the author of every rule the case hits.
+ * the author of every rule the case hits. The reviewer-is-author check needs a known rule author,
+ * so a hit rule id that is not in the author map yields {@code UNKNOWN_RULE} only.
  */
 public final class GoldenAudit {
   /** The audit verdict for one case; {@code reviewerId} is empty when the case names none. */
@@ -77,7 +79,8 @@ public final class GoldenAudit {
       problems.add("NO_REVIEW_DATE");
     }
     boolean reviewerIsAuthor = !reviewerId.isBlank() && reviewerId.equals(golden.author());
-    for (String ruleId : golden.expected().ruleIdsHit()) {
+    // A rule id listed twice yields each problem token once; first occurrence fixes the order.
+    for (String ruleId : new LinkedHashSet<>(golden.expected().ruleIdsHit())) {
       String ruleAuthor = ruleAuthorById.get(ruleId);
       if (ruleAuthor == null) {
         problems.add("UNKNOWN_RULE:" + ruleId);

@@ -117,6 +117,9 @@ public interface EvidenceStoreContract {
     assertThat(store().list("a/", Optional.empty(), 10))
         .containsExactly(upperB, underscore, lowerA);
     assertThat(store().list("a/", Optional.of(upperB), 1)).containsExactly(underscore);
+    // The limit applies without an after key too, and keeps the first keys in order.
+    assertThat(store().list("a/", Optional.empty(), 2)).containsExactly(upperB, underscore);
+    assertThat(store().list("a/", Optional.empty(), 0)).isEmpty();
     assertThat(store().list("zzz", Optional.empty(), 10)).isEmpty();
   }
 
@@ -131,6 +134,15 @@ public interface EvidenceStoreContract {
     assertThatThrownBy(() -> store().extendRetention(K, earlier))
         .isInstanceOf(EvidenceRetentionException.class);
     assertThat(store().get(K).orElseThrow().retention().retainUntil()).isEqualTo(later);
+    // Extending to the current retain-until is not a shortening and changes nothing.
+    store().extendRetention(K, later);
+    assertThat(store().get(K).orElseThrow().retention().retainUntil()).isEqualTo(later);
+    // Extending touches the retain-until only; everything else of the object is kept.
+    StoredObject extended = store().get(K).orElseThrow();
+    assertThat(extended.bytes()).isEqualTo(utf8("hello"));
+    assertThat(extended.mediaType()).isEqualTo("text/plain");
+    assertThat(extended.retention().retentionClass()).isEqualTo(original.retentionClass());
+    assertThat(extended.writtenAt()).isEqualTo(clock().now());
   }
 
   @Test
@@ -141,6 +153,22 @@ public interface EvidenceStoreContract {
     StoredObject got = store().get(K).orElseThrow();
     assertThat(got.legalHold()).isTrue();
     assertThat(got.retention()).isEqualTo(original);
+    // Extending retention keeps the hold and the bytes.
+    Instant later = original.retainUntil().plus(Duration.ofDays(365));
+    store().extendRetention(K, later);
+    StoredObject extended = store().get(K).orElseThrow();
+    assertThat(extended.legalHold()).isTrue();
+    assertThat(extended.bytes()).isEqualTo(utf8("hello"));
+    assertThat(extended.mediaType()).isEqualTo("text/plain");
+    assertThat(extended.retention().retainUntil()).isEqualTo(later);
+    // Setting the hold keeps retention and bytes, and false clears the flag.
+    store().setLegalHold(K, false);
+    StoredObject released = store().get(K).orElseThrow();
+    assertThat(released.legalHold()).isFalse();
+    assertThat(released.retention().retainUntil()).isEqualTo(later);
+    assertThat(released.bytes()).isEqualTo(utf8("hello"));
+    store().setLegalHold(K, true);
+    assertThat(store().get(K).orElseThrow().legalHold()).isTrue();
   }
 
   @Test
@@ -151,6 +179,13 @@ public interface EvidenceStoreContract {
     assertThatThrownBy(() -> store().get(K)).isInstanceOf(EvidenceUnavailableException.class);
     assertThatThrownBy(() -> store().list("landing/", Optional.empty(), 10))
         .isInstanceOf(EvidenceUnavailableException.class);
+    // The port rule is that every method throws during an outage.
+    assertThatThrownBy(() -> store().extendRetention(K, clock().now().plus(Duration.ofDays(1))))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    assertThatThrownBy(() -> store().setLegalHold(K, true))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    assertThatThrownBy(() -> store().grade()).isInstanceOf(EvidenceUnavailableException.class);
+    assertThatThrownBy(() -> store().durability()).isInstanceOf(EvidenceUnavailableException.class);
     simulateOutage(false);
     assertThat(store().get(K)).isEmpty();
   }

@@ -159,8 +159,12 @@ public final class DestinationSimulator implements Transport {
     Handling handling =
         new Handling(
             endpointNow, Duration.between(platformNow, endpointNow), List.copyOf(stored.values()));
-    Scenario.Disposition disposition = scenario.onReceive(received, handling);
-    handling.close();
+    Scenario.Disposition disposition;
+    try {
+      disposition = scenario.onReceive(received, handling);
+    } finally {
+      handling.close();
+    }
     return switch (disposition) {
       case ACCEPT -> {
         stored.put(received.fileId(), received);
@@ -218,6 +222,9 @@ public final class DestinationSimulator implements Transport {
         throw new IllegalStateException("emitAckAt is valid only during Scenario.onReceive");
       }
       Objects.requireNonNull(visibleAt, "visibleAt");
+      if (visibleAt.getNano() % 1000 != 0) {
+        throw new IllegalArgumentException("visibleAt is not whole microseconds: " + visibleAt);
+      }
       Objects.requireNonNull(fileId, "fileId");
       Objects.requireNonNull(status, "status");
       Map<String, Object> body = new LinkedHashMap<>(details);

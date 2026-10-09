@@ -97,6 +97,45 @@ public interface DecisionLedgerContract {
   }
 
   @Test
+  default void batchWithTwoDecisionsOnOneChainNumbersThemConsecutively() {
+    List<Committed> committed =
+        ledger()
+            .commitDecisions(
+                batch(
+                    decision(body("E1", "ctx", "d1", Outcome.REPORT), 0),
+                    decision(body("E1", "ctx", "d2", Outcome.DO_NOT_REPORT), 1)));
+    assertThat(committed).extracting(Committed::status).containsOnly(CommitStatus.INSERTED);
+    DecisionRecord first = committed.get(0).record();
+    DecisionRecord second = committed.get(1).record();
+    assertThat(first.decisionSeq()).isEqualTo(1);
+    assertThat(first.supersedesDecisionId()).isEmpty();
+    assertThat(second.decisionSeq()).isEqualTo(2);
+    assertThat(second.supersedesDecisionId()).contains(first.decisionId());
+    assertThat(second.decisionId().value()).isGreaterThan(first.decisionId().value());
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1")))
+        .containsExactly(first, second);
+    assertThat(ledger().currentDecision(new Regime(MIFIR), event("E1"))).contains(second);
+    // The head after the batch is 2, so the next decision expects 2.
+    assertThat(commitOne(body("E1", "ctx", "d3", Outcome.REPORT), 2).record().decisionSeq())
+        .isEqualTo(3);
+  }
+
+  @Test
+  default void duplicateKeyInsideOneBatchIsNoopRedeliveryOfTheEarlierDecision() {
+    DecisionBody b = body("E1", "ctx", "d1", Outcome.REPORT);
+    List<Committed> committed =
+        ledger().commitDecisions(batch(decision(b, 0), decision(b, 0), decision(b, 7)));
+    assertThat(committed)
+        .extracting(Committed::status)
+        .containsExactly(
+            CommitStatus.INSERTED, CommitStatus.NOOP_REDELIVERY, CommitStatus.NOOP_REDELIVERY);
+    assertThat(committed.get(1).record()).isEqualTo(committed.get(0).record());
+    assertThat(committed.get(2).record()).isEqualTo(committed.get(0).record());
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1")))
+        .containsExactly(committed.get(0).record());
+  }
+
+  @Test
   default void staleExpectedHeadSeqIsRejectedAndRollsBackWholeBatch() {
     commitOne(body("E1", "ctx", "d1", Outcome.REPORT), 0);
     BatchCommit bad =

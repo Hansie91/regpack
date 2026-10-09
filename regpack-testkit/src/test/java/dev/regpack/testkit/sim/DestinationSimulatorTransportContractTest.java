@@ -2,6 +2,7 @@ package dev.regpack.testkit.sim;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.connector.Transport;
@@ -15,7 +16,9 @@ import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.TransportContract;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -51,6 +54,16 @@ class DestinationSimulatorTransportContractTest implements TransportContract {
   public void throwingGateLeavesNothingVisibleAndPropagates() {
     TransportContract.super.throwingGateLeavesNothingVisibleAndPropagates();
     assertThat(simulator.receivedFiles()).isEmpty();
+  }
+
+  @Override
+  @Test
+  public void failureBeforeFirstByteDoesNotInvokeGate() {
+    TransportContract.super.failureBeforeFirstByteDoesNotInvokeGate();
+    // The armed failure applies to one send only: the next send of the same file goes through.
+    assertThat(simulator.send(file("F-1", "<a/>"), () -> true).status())
+        .isEqualTo(SendStatus.DELIVERED);
+    assertThat(simulator.probe("F-1").status()).isEqualTo(ProbeStatus.PRESENT);
   }
 
   @Override
@@ -118,6 +131,83 @@ class DestinationSimulatorTransportContractTest implements TransportContract {
     assertThat(dropper.probe("F-1").status()).isEqualTo(ProbeStatus.ABSENT);
     clock.advance(Duration.ofDays(30));
     assertThat(dropper.pollAcks(AckCursor.start(), 10).acks()).isEmpty();
+  }
+
+  @Test
+  void acksOfARejectedDuplicateStayDiscarded() {
+    Scenario rejecting =
+        new Scenario() {
+          @Override
+          public String name() {
+            return "REJECT_WITH_ACK";
+          }
+
+          @Override
+          public Disposition onReceive(ReceivedFile file, ScenarioContext context) {
+            context.emitAckAt(context.endpointNow(), file.fileId(), "ACPT", Map.of());
+            return Disposition.REJECT_DUPLICATE;
+          }
+        };
+    DestinationSimulator rejector = DestinationSimulator.withScenario(clock, rejecting);
+    assertThat(rejector.send(file("F-1", "<a/>"), () -> true).status())
+        .isEqualTo(SendStatus.REJECTED_DUPLICATE);
+    clock.advance(Duration.ofDays(30));
+    assertThat(rejector.pollAcks(AckCursor.start(), 10).acks()).isEmpty();
+    assertThat(rejector.receivedFiles()).isEmpty();
+  }
+
+  @Test
+  void emitAckAtRejectsVisibleAtThatIsNotWholeMicroseconds() {
+    Scenario nanos =
+        new Scenario() {
+          @Override
+          public String name() {
+            return "NANOS";
+          }
+
+          @Override
+          public Disposition onReceive(ReceivedFile file, ScenarioContext context) {
+            context.emitAckAt(context.endpointNow().plusNanos(1), file.fileId(), "ACPT", Map.of());
+            return Disposition.ACCEPT;
+          }
+        };
+    DestinationSimulator sim = DestinationSimulator.withScenario(clock, nanos);
+    assertThatThrownBy(() -> sim.send(file("F-1", "<a/>"), () -> true))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("microsecond");
+    assertThat(sim.receivedFiles()).isEmpty();
+    clock.advance(Duration.ofDays(1));
+    assertThat(sim.pollAcks(AckCursor.start(), 10).acks()).isEmpty();
+  }
+
+  @Test
+  void aThrowingScenarioClosesItsContext() {
+    List<ScenarioContext> seen = new ArrayList<>();
+    Scenario throwing =
+        new Scenario() {
+          @Override
+          public String name() {
+            return "THROWS";
+          }
+
+          @Override
+          public Disposition onReceive(ReceivedFile file, ScenarioContext context) {
+            seen.add(context);
+            context.emitAckAt(context.endpointNow(), file.fileId(), "ACPT", Map.of());
+            throw new IllegalStateException("scenario failed");
+          }
+        };
+    DestinationSimulator sim = DestinationSimulator.withScenario(clock, throwing);
+    assertThatThrownBy(() -> sim.send(file("F-1", "<a/>"), () -> true))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("scenario failed");
+    assertThat(seen).hasSize(1);
+    // A scenario that kept the context cannot use it after the exception either.
+    assertThatThrownBy(() -> seen.get(0).emitAckAt(START, "F-1", "ACPT", Map.of()))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(sim.receivedFiles()).isEmpty();
+    clock.advance(Duration.ofDays(1));
+    assertThat(sim.pollAcks(AckCursor.start(), 10).acks()).isEmpty();
   }
 
   @Test

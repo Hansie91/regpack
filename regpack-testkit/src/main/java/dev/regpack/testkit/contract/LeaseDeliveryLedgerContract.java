@@ -259,12 +259,20 @@ public interface LeaseDeliveryLedgerContract {
     DeliveryId v2 = queuedDelivery(ledger(), E1, "bk", 2);
     DeliveryId v3 = queuedDelivery(ledger(), E1, "bk", 3);
     applied(begin(ledger(), v1, t1));
-    toState(v1, DeliveryState.SENDING, DeliveryState.AWAITING_ACK);
+    // Moving within the in-flight states is never blocked by a QUEUED sibling.
+    assertThat(ledger().transition(v1, DeliveryState.SENDING, DeliveryState.AWAITING_ACK))
+        .isEqualTo(TransitionStatus.APPLIED);
     assertThat(begin(ledger(), v2, t1).status()).isEqualTo(SendingStatus.IN_FLIGHT_CONFLICT);
-    toState(v1, DeliveryState.AWAITING_ACK, DeliveryState.IN_DOUBT);
+    assertThat(ledger().transition(v1, DeliveryState.AWAITING_ACK, DeliveryState.IN_DOUBT))
+        .isEqualTo(TransitionStatus.APPLIED);
+    assertThat(stateOf(v1)).isEqualTo(DeliveryState.IN_DOUBT);
+    assertThat(stateOf(v2)).isEqualTo(DeliveryState.QUEUED);
     assertThat(begin(ledger(), v2, t1).status()).isEqualTo(SendingStatus.IN_FLIGHT_CONFLICT);
     toState(v3, DeliveryState.QUEUED, DeliveryState.REJECTED);
+    // Entering the in-flight set from outside it is guarded for both targets.
     assertThat(ledger().transition(v3, DeliveryState.REJECTED, DeliveryState.IN_DOUBT))
+        .isEqualTo(TransitionStatus.IN_FLIGHT_CONFLICT);
+    assertThat(ledger().transition(v3, DeliveryState.REJECTED, DeliveryState.AWAITING_ACK))
         .isEqualTo(TransitionStatus.IN_FLIGHT_CONFLICT);
     assertThat(stateOf(v3)).isEqualTo(DeliveryState.REJECTED);
   }
@@ -315,11 +323,21 @@ public interface LeaseDeliveryLedgerContract {
     DeliveryId d1 = queuedDelivery(ledger(), E1, "bk1", 1);
     DeliveryId d2 = queuedDelivery(ledger(), E1, "bk2", 1);
     AttemptId a1 = applied(begin(ledger(), d1, t1));
+    // The takeover is scoped to the endpoint and to SENDING: another endpoint's SENDING delivery
+    // and an AWAITING_ACK delivery of this endpoint must stay as they are.
+    DeliveryId awaiting = queuedDelivery(ledger(), E1, "bk-awaiting", 1);
+    applied(begin(ledger(), awaiting, t1));
+    toState(awaiting, DeliveryState.SENDING, DeliveryState.AWAITING_ACK);
+    LeaseToken otherEndpointToken = acquire(E2, "A");
+    DeliveryId otherEndpointSending = queuedDelivery(ledger(), E2, "bk-other", 1);
+    applied(begin(ledger(), otherEndpointSending, otherEndpointToken));
     // holder A has checked its token and now stalls before the marker commit
     clock().advance(Duration.ofSeconds(61));
     LeaseToken t2 = acquire(E1, "B");
     assertThat(t2).isNotEqualTo(t1);
     assertThat(stateOf(d1)).isEqualTo(DeliveryState.IN_DOUBT);
+    assertThat(stateOf(awaiting)).isEqualTo(DeliveryState.AWAITING_ACK);
+    assertThat(stateOf(otherEndpointSending)).isEqualTo(DeliveryState.SENDING);
     assertThat(ledger().markCommitIssued(a1, t1)).isFalse();
     assertThat(ledger().attempt(a1).orElseThrow().commitIssued()).isFalse();
     assertThat(begin(ledger(), d2, t1).status()).isEqualTo(SendingStatus.STALE_LEASE);

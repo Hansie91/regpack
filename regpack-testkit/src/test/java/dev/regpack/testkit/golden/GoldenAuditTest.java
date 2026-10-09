@@ -5,9 +5,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.testkit.golden.GoldenAudit.Row;
 import dev.regpack.testkit.golden.GoldenCase.ProvenanceKind;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class GoldenAuditTest {
   private static final ReviewerRegistry REGISTRY =
@@ -190,6 +195,114 @@ class GoldenAuditTest {
     Row second = GoldenAudit.audit(List.of(byRuleAuthor), ruleAuthorRegistry, RULE_AUTHORS).get(0);
     assertThat(second.countsForTraceability()).isFalse();
     assertThat(second.problems()).containsExactly("REVIEWER_IS_AUTHOR");
+  }
+
+  @Test
+  void separationAndReviewerIsAuthorAreCheckedOnEveryHitRule() {
+    Map<String, String> authors = Map.of("R-1", "agent:other", "R-2", "agent:rules");
+
+    // Only the second hit rule shares the case author.
+    GoldenCase secondRuleSameAuthor =
+        GoldenCaseLoader.parse(
+            caseJson(
+                "GC-20",
+                "agent:rules",
+                "\"R-1\",\"R-2\"",
+                provenance("ESMA_QA", "Q&A 1699", "rev-1", "2026-10-09")));
+    Row separation = GoldenAudit.audit(List.of(secondRuleSameAuthor), REGISTRY, authors).get(0);
+    assertThat(separation.countsForTraceability()).isFalse();
+    assertThat(separation.problems()).containsExactly("SEPARATION:R-2");
+
+    // The offending rule comes first and later problems are still reported.
+    GoldenCase bothRulesSameAuthor =
+        GoldenCaseLoader.parse(
+            caseJson(
+                "GC-21",
+                "agent:same",
+                "\"R-1\",\"R-2\"",
+                provenance("ESMA_QA", "Q&A 1699", "rev-1", "2026-10-09")));
+    Row both =
+        GoldenAudit.audit(
+                List.of(bothRulesSameAuthor),
+                REGISTRY,
+                Map.of("R-1", "agent:same", "R-2", "agent:same"))
+            .get(0);
+    assertThat(both.problems()).containsExactly("SEPARATION:R-1", "SEPARATION:R-2");
+
+    // The reviewer wrote the second hit rule only.
+    ReviewerRegistry registry = ReviewerRegistry.parse("agent:rules|Rule Author|Dev");
+    GoldenCase reviewedBySecondRuleAuthor =
+        GoldenCaseLoader.parse(
+            caseJson(
+                "GC-22",
+                "agent:golden",
+                "\"R-1\",\"R-2\"",
+                provenance("ESMA_QA", "Q&A 1699", "agent:rules", "2026-10-09")));
+    Row reviewer = GoldenAudit.audit(List.of(reviewedBySecondRuleAuthor), registry, authors).get(0);
+    assertThat(reviewer.countsForTraceability()).isFalse();
+    assertThat(reviewer.problems()).containsExactly("REVIEWER_IS_AUTHOR");
+  }
+
+  @Test
+  void aCaseWithoutHitRulesCountsWhenFullyReviewed() {
+    Row row =
+        auditOne(
+            caseJson(
+                "GC-23",
+                "agent:golden",
+                "",
+                provenance("ESMA_QA", "Q&A 1699", "rev-1", "2026-10-09")));
+    assertThat(row.problems()).isEmpty();
+    assertThat(row.countsForTraceability()).isTrue();
+  }
+
+  @Test
+  void aRuleIdListedTwiceIsReportedOnce() {
+    Row separation =
+        auditOne(
+            caseJson(
+                "GC-24",
+                "agent:rules",
+                "\"R-1\",\"R-1\"",
+                provenance("ESMA_QA", "Q&A 1699", "rev-1", "2026-10-09")));
+    assertThat(separation.problems()).containsExactly("SEPARATION:R-1");
+    Row unknown =
+        auditOne(
+            caseJson(
+                "GC-25",
+                "agent:golden",
+                "\"R-404\",\"R-1\",\"R-404\"",
+                provenance("ESMA_QA", "Q&A 1699", "rev-1", "2026-10-09")));
+    assertThat(unknown.problems()).containsExactly("UNKNOWN_RULE:R-404");
+  }
+
+  @Test
+  void loadDirectoryReadsOnlyJsonFilesSortedByFileName(@TempDir Path dir) throws IOException {
+    Files.writeString(dir.resolve("b.json"), caseJson("GC-B", "agent:golden", "\"R-1\"", ""));
+    Files.writeString(dir.resolve("a.json"), caseJson("GC-A", "agent:golden", "\"R-1\"", ""));
+    Files.writeString(dir.resolve("c.txt"), "not a golden case");
+    Files.writeString(dir.resolve("d.json.bak"), "not a golden case either");
+    Files.createDirectory(dir.resolve("e.json"));
+    assertThat(GoldenCaseLoader.loadDirectory(dir))
+        .extracting(GoldenCase::id)
+        .containsExactly("GC-A", "GC-B");
+    assertThat(GoldenCaseLoader.loadDirectory(Files.createDirectory(dir.resolve("empty"))))
+        .isEmpty();
+  }
+
+  @Test
+  void loadDirectoryNamesTheOffendingFileInTheError(@TempDir Path dir) throws IOException {
+    Files.writeString(dir.resolve("a.json"), caseJson("GC-A", "agent:golden", "\"R-1\"", ""));
+    Path broken = dir.resolve("broken.json");
+    Files.writeString(broken, "{\"id\":\"GC-X\"}");
+    assertThatThrownBy(() -> GoldenCaseLoader.loadDirectory(dir))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(broken.toString())
+        .hasMessageContaining("node");
+    Path missing = dir.resolve("nope");
+    assertThatThrownBy(() -> GoldenCaseLoader.loadDirectory(missing))
+        .isInstanceOf(UncheckedIOException.class)
+        .hasMessageContaining(missing.toString());
   }
 
   @Test

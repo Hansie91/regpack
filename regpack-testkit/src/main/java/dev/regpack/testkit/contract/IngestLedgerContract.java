@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.BatchId;
+import dev.regpack.model.Checkpoint;
 import dev.regpack.model.IngestKey;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.ledger.IngestLedger.Commit;
@@ -65,6 +66,56 @@ public interface IngestLedgerContract {
     StoredIngest stored = ledger().findIngest(new IngestKey(SRC_A, "r1", 1)).orElseThrow();
     assertThat(stored.contentHash()).isEqualTo(Sha256.ofUtf8("A"));
     assertThat(stored.batchId()).isEqualTo(c.batchId());
+  }
+
+  @Test
+  default void checkpointsAreIndependentPerSourceAndStream() {
+    Checkpoint quotes = new Checkpoint("quotes", new byte[] {9});
+    ledger().commitIngest(commit("B1", SRC_A, checkpoint(1), entry(SRC_A, "r1", 1, "A")));
+    ledger().commitIngest(commit("B2", SRC_B, checkpoint(2), entry(SRC_B, "r2", 1, "A")));
+    ledger().commitIngest(commit("B3", SRC_A, quotes, entry(SRC_A, "r3", 1, "A")));
+    // Same stream name, two sources: each keeps its own latest checkpoint.
+    assertThat(ledger().latestCheckpoint(SRC_A, "trades")).contains(checkpoint(1));
+    assertThat(ledger().latestCheckpoint(SRC_B, "trades")).contains(checkpoint(2));
+    // Same source, two streams: the second stream does not replace the first.
+    assertThat(ledger().latestCheckpoint(SRC_A, "quotes")).contains(quotes);
+    assertThat(ledger().latestCheckpoint(SRC_B, "quotes")).isEmpty();
+    // A later commit of one source moves only that source's checkpoint.
+    ledger().commitIngest(commit("B4", SRC_A, checkpoint(3), entry(SRC_A, "r4", 1, "A")));
+    assertThat(ledger().latestCheckpoint(SRC_A, "trades")).contains(checkpoint(3));
+    assertThat(ledger().latestCheckpoint(SRC_B, "trades")).contains(checkpoint(2));
+    assertThat(ledger().latestCheckpoint(SRC_A, "quotes")).contains(quotes);
+  }
+
+  @Test
+  default void pendingOutboxIsOldestFirstTruncatedByMaxWithIncreasingDistinctIds() {
+    Result b1 =
+        ledger().commitIngest(commit("B1", SRC_A, checkpoint(1), entry(SRC_A, "r1", 1, "A")));
+    Result b2 =
+        ledger().commitIngest(commit("B2", SRC_A, checkpoint(2), entry(SRC_A, "r2", 1, "A")));
+    Result b3 =
+        ledger().commitIngest(commit("B3", SRC_A, checkpoint(3), entry(SRC_A, "r3", 1, "A")));
+    List<OutboxItem> all = ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 10);
+    assertThat(all)
+        .extracting(OutboxItem::subjectId)
+        .containsExactly(b1.batchId().value(), b2.batchId().value(), b3.batchId().value());
+    assertThat(all)
+        .extracting(OutboxItem::id)
+        .containsExactly(
+            b1.outboxId().orElseThrow(), b2.outboxId().orElseThrow(), b3.outboxId().orElseThrow());
+    long previous = Long.MIN_VALUE;
+    for (OutboxItem item : all) {
+      assertThat(item.id().value()).isGreaterThan(previous);
+      previous = item.id().value();
+    }
+    // max truncates from the old end and keeps the order.
+    assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 1))
+        .extracting(OutboxItem::subjectId)
+        .containsExactly(b1.batchId().value());
+    assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 2))
+        .extracting(OutboxItem::subjectId)
+        .containsExactly(b1.batchId().value(), b2.batchId().value());
+    assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 0)).isEmpty();
   }
 
   @Test

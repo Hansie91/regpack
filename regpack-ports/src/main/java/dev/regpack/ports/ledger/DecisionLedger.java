@@ -11,8 +11,12 @@ import java.util.Optional;
 public interface DecisionLedger {
   record NewDecision(DecisionBody body, long expectedHeadSeq) {}
 
-  record BatchCommit(
-      List<NewDecision> decisions, Optional<OutboxLedger.OutboxId> completesOutbox) {}
+  /** The decisions are copied defensively, so a later change to the caller's list has no effect. */
+  record BatchCommit(List<NewDecision> decisions, Optional<OutboxLedger.OutboxId> completesOutbox) {
+    public BatchCommit {
+      decisions = List.copyOf(decisions);
+    }
+  }
 
   enum CommitStatus {
     INSERTED,
