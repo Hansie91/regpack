@@ -1,0 +1,2 @@
+# Registry of named human golden-case reviewers (spec 14.2 O1 and O2; gate G1).
+# Format: id|Full name|role   One line per person. Empty until the named Compliance owner exists (gate G1).
