@@ -2606,7 +2606,7 @@ Evidence for the wrapper choice (the owner asked for a maintained wrapper, pinne
 - [ ] **Step 2: Run red.** `scripts/t.sh regpack-app PackagingFilesTest`. Expected: the new test fails with `NoSuchFileException ... install-procrun.ps1`.
 - [ ] **Step 3: Write `packaging/windows/install-procrun.ps1`** (downloads from the Apache distribution host with the archive host as fallback, verifies SHA-512, prints the path of the 64-bit `prunsrv.exe`):
   ```powershell
-  # Downloads Apache Commons Daemon procrun 1.6.1 and verifies its SHA-512 before using it.
+  # Downloads Apache Commons Daemon procrun 1.6.1 (commons-daemon-1.6.1-bin-windows.zip) and verifies its SHA-512 before using it.
   # Usage: install-procrun.ps1 -Dest <directory>      Prints the full path of amd64\prunsrv.exe.
   param([Parameter(Mandatory = $true)][string]$Dest)
   $ErrorActionPreference = 'Stop'
