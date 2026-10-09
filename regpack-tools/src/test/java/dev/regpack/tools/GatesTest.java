@@ -2,6 +2,7 @@ package dev.regpack.tools;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -81,5 +82,40 @@ class GatesTest {
     assertThat(outcome.rc()).isEqualTo(2);
     assertThat(outcome.err()).contains("scan directory not found: no-such-dir");
     assertThat(outcome.out()).isEmpty();
+  }
+
+  @Test
+  void pinsReportsMissingWorkflowsAndPassesPinnedFiles() throws IOException {
+    Path dockerfile = repo.resolve("Dockerfile");
+    Files.writeString(dockerfile, "FROM scratch\n", StandardCharsets.UTF_8);
+    Path workflows = repo.resolve("workflows");
+    String docker = dockerfile.toString();
+    var missing = run("pins", "--dockerfile", docker, "--workflows", workflows.toString());
+    assertThat(missing.rc()).isEqualTo(1);
+    assertThat(missing.out()).startsWith("pins: PROBLEM no workflow files in ");
+    Files.createDirectories(workflows);
+    Files.writeString(
+        workflows.resolve("ci.yml"),
+        "permissions:\n  contents: read\njobs:\n  b:\n    runs-on: ubuntu-24.04\n",
+        StandardCharsets.UTF_8);
+    var ok = run("pins", "--dockerfile", docker, "--workflows", workflows.toString());
+    assertThat(ok.out().strip()).isEqualTo("pins: OK");
+    assertThat(ok.rc()).isZero();
+    assertThat(run("pins", "--dockerfile", "x").rc()).isEqualTo(2);
+  }
+
+  @Test
+  void eolReadsPathsFromStandardInputAndSkipsMissingFiles() throws IOException {
+    Files.writeString(repo.resolve("a.sh"), "#!/bin/sh\r\n", StandardCharsets.UTF_8);
+    var outBytes = new ByteArrayOutputStream();
+    int rc =
+        Gates.run(
+            new String[] {"eol", "--root", repo.toString()},
+            new ByteArrayInputStream("a.sh\ngone.sh\n".getBytes(StandardCharsets.UTF_8)),
+            new PrintStream(outBytes, true, StandardCharsets.UTF_8),
+            new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+    assertThat(rc).isEqualTo(1);
+    assertThat(outBytes.toString(StandardCharsets.UTF_8).strip())
+        .isEqualTo("eol: PROBLEM a.sh: CR_IN_LF_FILE");
   }
 }
