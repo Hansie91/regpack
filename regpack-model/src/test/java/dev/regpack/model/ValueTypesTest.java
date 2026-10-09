@@ -13,6 +13,15 @@ class ValueTypesTest {
     assertThatThrownBy(() -> EventIdentity.of("a|b")).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> EventIdentity.of("")).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(EventIdentity::of).isInstanceOf(IllegalArgumentException.class);
+    // a blank part is rejected by the per-part check, not only by the blank joined value
+    assertThatThrownBy(() -> EventIdentity.of("a", ""))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> EventIdentity.of("a", " "))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> EventIdentity.of(" ", "b"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> EventIdentity.of("a", (String) null))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

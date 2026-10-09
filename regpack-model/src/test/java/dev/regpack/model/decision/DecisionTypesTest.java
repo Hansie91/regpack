@@ -14,13 +14,16 @@ import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.canonical.AssetClass;
 import dev.regpack.model.canonical.CanonicalExecution;
+import dev.regpack.model.canonical.CanonicalExecutionCodec;
 import dev.regpack.model.canonical.LifecycleKind;
 import dev.regpack.model.canonical.PartyKind;
 import dev.regpack.model.json.Json;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -116,5 +119,123 @@ class DecisionTypesTest {
     assertThatThrownBy(() -> b.flags().add("x")).isInstanceOf(UnsupportedOperationException.class);
     assertThatThrownBy(() -> b.path().add(new PathStep("x", true, 0)))
         .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  private static DecisionBody variant(
+      DecisionBody base,
+      Instant asAt,
+      List<String> flags,
+      List<Citation> citations,
+      Sha256 inputDigest) {
+    return new DecisionBody(
+        base.eventIdentity(),
+        base.regime(),
+        base.decisionContextId(),
+        asAt,
+        base.evaluatedAt(),
+        base.outcome(),
+        flags,
+        base.reasonCode(),
+        base.node(),
+        base.ruleIdsHit(),
+        base.path(),
+        citations,
+        base.legs(),
+        inputDigest);
+  }
+
+  @Test
+  void replayBodyIsTheFullBodyMinusEvaluatedAt() {
+    DecisionBody base =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of("f1"));
+    Map<String, Object> withoutEvaluatedAt =
+        new LinkedHashMap<>(DecisionCodec.bodyToMap(base, true));
+    assertThat(withoutEvaluatedAt.remove("evaluatedAt")).isEqualTo(base.evaluatedAt());
+    assertThat(withoutEvaluatedAt).isEqualTo(DecisionCodec.bodyToMap(base, false));
+    assertThat(DecisionCodec.bodyToMap(base, false).keySet())
+        .containsExactlyElementsOf(withoutEvaluatedAt.keySet());
+  }
+
+  @Test
+  void replayDigestCoversEveryFieldExceptEvaluatedAt() {
+    DecisionBody base =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of("f1"));
+    Sha256 expected = base.replayDigest();
+    List<Citation> citations = base.citations();
+    Citation other = new Citation("mifir", "art26", CitationRole.EXCEPTION, Optional.empty());
+    assertThat(
+            variant(base, base.asAt(), List.of("f1"), citations, base.inputDigest()).replayDigest())
+        .isEqualTo(expected);
+    assertThat(
+            variant(base, base.asAt(), List.of("f2"), citations, base.inputDigest()).replayDigest())
+        .as("flags")
+        .isNotEqualTo(expected);
+    assertThat(variant(base, base.asAt(), List.of(), citations, base.inputDigest()).replayDigest())
+        .as("no flags")
+        .isNotEqualTo(expected);
+    assertThat(
+            variant(base, base.asAt().plusSeconds(1), base.flags(), citations, base.inputDigest())
+                .replayDigest())
+        .as("asAt")
+        .isNotEqualTo(expected);
+    assertThat(
+            variant(base, base.asAt(), base.flags(), citations, Sha256.ofUtf8("other"))
+                .replayDigest())
+        .as("inputDigest")
+        .isNotEqualTo(expected);
+    assertThat(
+            variant(base, base.asAt(), base.flags(), List.of(other), base.inputDigest())
+                .replayDigest())
+        .as("citation")
+        .isNotEqualTo(expected);
+    Citation otherRole =
+        new Citation("mifir", "art26", CitationRole.EXCEPTION, Optional.of(Sha256.ofUtf8("q")));
+    assertThat(
+            variant(base, base.asAt(), base.flags(), List.of(otherRole), base.inputDigest())
+                .replayDigest())
+        .as("citation role")
+        .isNotEqualTo(expected);
+  }
+
+  @Test
+  void inputDigestMatchesTheGoldenVector() {
+    CanonicalExecution e = execution();
+    String json =
+        "{\"assetClass\":\"EQUITY\",\"clientKind\":\"LEGAL_ENTITY\",\"currency\":\"EUR\","
+            + "\"eventKind\":\"NEW\",\"firmLei\":\"L\",\"isin\":\"FR0000120271\",\"price\":12.25,"
+            + "\"quantity\":100.5,\"tradedAt\":\"2026-10-09T09:30:00.123456Z\","
+            + "\"tradedOnVenue\":true,\"venueExecutionId\":\"EX-1\",\"venueMic\":\"XPAR\"}";
+    assertThat(Json.canonical(CanonicalExecutionCodec.toMap(e))).isEqualTo(json);
+    Sha256 digest = InputDigest.of(e, new IngestKey("src", "rec-1", 1));
+    assertThat(digest).isEqualTo(Sha256.ofUtf8(json + "\nsrc|rec-1|1"));
+    assertThat(digest.hex())
+        .isEqualTo("30ddc5cf01393b67d6c92facf300b21058c9c95392f5d5882b147582c5fe1e7d");
+    assertThat(InputDigest.of(e, new IngestKey("src2", "rec-1", 1))).isNotEqualTo(digest);
+    assertThat(InputDigest.of(e, new IngestKey("src", "rec-2", 1))).isNotEqualTo(digest);
+    assertThat(InputDigest.of(e, new IngestKey("src", "rec-1", 2))).isNotEqualTo(digest);
+  }
+
+  @Test
+  void contextIdMatchesTheGoldenVector() {
+    String json =
+        "{\"engineBuild\":\"b1\",\"enrichmentSnapshotIds\":[],\"executor\":\"interpreter\","
+            + "\"firmProfileVersion\":\"fp-1\",\"interpretationPins\":[\"pin-1\"],"
+            + "\"mappingVersion\":\"map-1\",\"packDigest\":\""
+            + Sha256.ofUtf8("pack").hex()
+            + "\",\"referenceSnapshotIds\":[\"ref-1\"]}";
+    assertThat(Json.canonical(DecisionCodec.contextToMap(context("b1")))).isEqualTo(json);
+    assertThat(context("b1").id().hex())
+        .isEqualTo("2c82bc6e73b568970a7152dcfd075c866a01dec5bc6c74d707e950e790a7be84");
+  }
+
+  @Test
+  void pathStepRejectsBlankRuleIdAndNegativeCost() {
+    assertThatThrownBy(() -> new PathStep("", true, 0))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new PathStep("  ", true, 0))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new PathStep("r", true, -1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(new PathStep("r", false, 0).costUnits()).isZero();
   }
 }

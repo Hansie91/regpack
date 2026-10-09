@@ -33,6 +33,7 @@ public record CanonicalExecution(
     requireText(isin, "isin");
     Objects.requireNonNull(clientKind, "clientKind");
     Objects.requireNonNull(clientLei, "clientLei");
+    clientLei.ifPresent(lei -> requireText(lei, "clientLei"));
     Objects.requireNonNull(quantity, "quantity");
     Objects.requireNonNull(price, "price");
     requireText(currency, "currency");

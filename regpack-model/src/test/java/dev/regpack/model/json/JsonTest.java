@@ -160,6 +160,14 @@ class JsonTest {
   }
 
   @Test
+  void scaleBoundIsExactlyOneThousand() {
+    assertThrows(JsonException.class, () -> Json.parse("[1E+1001]"));
+    assertThrows(JsonException.class, () -> Json.parse("[1E-1001]"));
+    assertEquals("[0." + "0".repeat(999) + "1]", Json.canonical(Json.parse("[1E-1000]")));
+    assertEquals("[1" + "0".repeat(1000) + "]", Json.canonical(Json.parse("[1E+1000]")));
+  }
+
+  @Test
   void unpairedSurrogatesAreRejected() {
     String lone = String.valueOf((char) 0xD800);
     assertThrows(IllegalArgumentException.class, () -> Json.canonical(lone));
@@ -169,6 +177,34 @@ class JsonTest {
     String pair = new String(Character.toChars(0x1F600));
     assertEquals("\"" + pair + "\"", Json.canonical(pair));
     assertEquals(pair, Json.parse("\"" + BACKSLASH + "ud83d" + BACKSLASH + "ude00\""));
+  }
+
+  @Test
+  void surrogatesInTheWrongOrderOrWithoutPartnerAreRejected() {
+    String high = String.valueOf((char) 0xD800);
+    String low = String.valueOf((char) 0xDC00);
+    String highThenA = high + "a";
+    String highThenHigh = high + high;
+    String swapped = low + high;
+    for (String bad : List.of(highThenA, highThenHigh, swapped)) {
+      assertThrows(IllegalArgumentException.class, () -> Json.canonical(bad));
+      assertThrows(JsonException.class, () -> Json.parse("\"" + bad + "\""));
+    }
+    assertThrows(JsonException.class, () -> Json.parse("\"" + BACKSLASH + "ud800a\""));
+    assertThrows(JsonException.class, () -> Json.parse("\"" + BACKSLASH + "ud800" + high + "\""));
+    assertThrows(
+        JsonException.class, () -> Json.parse("\"" + BACKSLASH + "udc00" + BACKSLASH + "ud800\""));
+    assertThrows(
+        JsonException.class, () -> Json.parse("\"" + BACKSLASH + "ud800" + BACKSLASH + "ud800\""));
+  }
+
+  @Test
+  void instantsAtTheYearRangeEdgesAreCanonical() {
+    assertEquals(
+        "\"0000-01-01T00:00:00.000000Z\"", Json.canonical(Instant.parse("0000-01-01T00:00:00Z")));
+    assertEquals(
+        "\"9999-12-31T23:59:59.999999Z\"",
+        Json.canonical(Instant.parse("9999-12-31T23:59:59.999999Z")));
   }
 
   @Test

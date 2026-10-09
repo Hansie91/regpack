@@ -86,6 +86,25 @@ public final class ForbiddenCallScan {
             "getCompactNumberInstance")) {
       r.add(new Rule(RuleSet.LOCALE, "java/text/NumberFormat", n, "()Ljava/text/NumberFormat;"));
     }
+    // DateFormat factories without a Locale parameter (the style-only overloads use the default)
+    String returnsDateFormat = ")Ljava/text/DateFormat;";
+    r.add(new Rule(RuleSet.LOCALE, "java/text/DateFormat", "getInstance", "(" + returnsDateFormat));
+    for (String n : List.of("getDateInstance", "getTimeInstance")) {
+      r.add(new Rule(RuleSet.LOCALE, "java/text/DateFormat", n, "(" + returnsDateFormat));
+      r.add(new Rule(RuleSet.LOCALE, "java/text/DateFormat", n, "(I" + returnsDateFormat));
+    }
+    r.add(
+        new Rule(
+            RuleSet.LOCALE,
+            "java/text/DateFormat",
+            "getDateTimeInstance",
+            "(" + returnsDateFormat));
+    r.add(
+        new Rule(
+            RuleSet.LOCALE,
+            "java/text/DateFormat",
+            "getDateTimeInstance",
+            "(II" + returnsDateFormat));
     r.add(new Rule(RuleSet.LOCALE, "java/text/DecimalFormat", "<init>", ""));
     r.add(new Rule(RuleSet.LOCALE, "java/text/SimpleDateFormat", "<init>", ""));
     r.add(new Rule(RuleSet.LOCALE, "java/text/Collator", "getInstance", "()Ljava/text/Collator;"));

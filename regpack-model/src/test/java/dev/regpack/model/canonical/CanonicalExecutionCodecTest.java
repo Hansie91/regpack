@@ -8,6 +8,7 @@ import dev.regpack.model.json.Json;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -71,5 +72,47 @@ class CanonicalExecutionCodecTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("eventKind")
         .hasMessageContaining("BOGUS");
+  }
+
+  @Test
+  void fromMapOfToMapIsTheSameExecution() {
+    for (Optional<String> lei : List.of(Optional.<String>empty(), Optional.of("X1"))) {
+      CanonicalExecution e = execution(lei);
+      assertThat(CanonicalExecutionCodec.fromMap(CanonicalExecutionCodec.toMap(e))).isEqualTo(e);
+    }
+  }
+
+  @Test
+  void fromMapRejectsBadInstants() {
+    Map<String, Object> good = CanonicalExecutionCodec.toMap(execution(Optional.empty()));
+    for (Object bad : new Object[] {"nope", 5L}) {
+      Map<String, Object> map = new LinkedHashMap<>(good);
+      map.put("tradedAt", bad);
+      assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+          .as(String.valueOf(bad))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("tradedAt");
+    }
+    Map<String, Object> asText = new LinkedHashMap<>(good);
+    asText.put("tradedAt", "2026-10-09T09:30:00.123456Z");
+    assertThat(CanonicalExecutionCodec.fromMap(asText).tradedAt())
+        .isEqualTo(Instant.parse("2026-10-09T09:30:00.123456Z"));
+  }
+
+  @Test
+  void blankClientLeiIsRejected() {
+    for (String blank : new String[] {"", "   "}) {
+      assertThatThrownBy(() -> execution(Optional.of(blank)))
+          .as("constructor")
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("clientLei");
+      Map<String, Object> map =
+          new LinkedHashMap<>(CanonicalExecutionCodec.toMap(execution(Optional.empty())));
+      map.put("clientLei", blank);
+      assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+          .as("fromMap")
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("clientLei");
+    }
   }
 }

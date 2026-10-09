@@ -16,7 +16,9 @@ import java.util.stream.Stream;
 /**
  * Supply-chain pin checks: container images are pinned by digest, workflow actions by full commit
  * SHA with a version comment, workflows declare least-privilege permissions and fixed runner
- * labels.
+ * labels. A {@code runs-on} value is read inline (scalar, flow list, flow map) and, when the key is
+ * bare, from the indented block sequence or map below it; labels that come from an expression such
+ * as {@code matrix.os} are not resolved.
  */
 public final class PinCheck {
   private static final Pattern FROM =
@@ -29,7 +31,7 @@ public final class PinCheck {
   private static final Pattern TOP_PERMISSIONS = Pattern.compile("^permissions:");
   private static final Pattern WRITE_ALL = Pattern.compile("^\\s*permissions:\\s*write-all\\b");
   private static final Pattern PULL_REQUEST_TARGET = Pattern.compile("\\bpull_request_target\\b");
-  private static final Pattern RUNS_ON = Pattern.compile("^\\s*(?:-\\s+)?runs-on:\\s*(.*)$");
+  private static final Pattern RUNS_ON = Pattern.compile("^(\\s*(?:-\\s+)?)runs-on:\\s*(.*)$");
   private static final Pattern COMMENT_START = Pattern.compile("(^|\\s)#");
 
   private PinCheck() {}
@@ -111,10 +113,9 @@ public final class PinCheck {
       }
       Matcher runsOn = RUNS_ON.matcher(code);
       if (runsOn.matches()) {
-        for (String label : runsOn.group(1).split("[\\s,\\[\\]'\"]+")) {
-          if (label.endsWith("-latest")) {
-            problems.add(where + "LATEST_RUNNER " + label);
-          }
+        addLatestRunners(problems, where, runsOn.group(2));
+        if (runsOn.group(2).isBlank()) {
+          scanRunsOnContinuation(problems, name, lines, i, runsOn.group(1).length());
         }
       }
     }
@@ -159,6 +160,34 @@ public final class PinCheck {
       }
     }
     return List.copyOf(problems);
+  }
+
+  /**
+   * Scans the lines below a bare {@code runs-on:} key: indented block sequence or block map
+   * entries, and sequence entries at the indentation of the key.
+   */
+  private static void scanRunsOnContinuation(
+      List<String> problems, String name, String[] lines, int keyLine, int keyIndent) {
+    for (int j = keyLine + 1; j < lines.length; j++) {
+      String next = withoutComment(lines[j]);
+      if (next.isBlank()) {
+        continue;
+      }
+      int indent = next.length() - next.stripLeading().length();
+      boolean sequenceEntry = indent == keyIndent && next.stripLeading().startsWith("- ");
+      if (indent < keyIndent || (indent == keyIndent && !sequenceEntry)) {
+        return;
+      }
+      addLatestRunners(problems, name + ":" + (j + 1) + ": ", next);
+    }
+  }
+
+  private static void addLatestRunners(List<String> problems, String where, String labels) {
+    for (String label : labels.split("[\\s,:\\[\\]{}'\"]+")) {
+      if (label.endsWith("-latest")) {
+        problems.add(where + "LATEST_RUNNER " + label);
+      }
+    }
   }
 
   private static String withoutComment(String line) {
