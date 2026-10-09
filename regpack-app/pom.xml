@@ -18,4 +18,46 @@
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-engine</artifactId></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
   </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>dev.regpack.app.Main</mainClass>
+              <addClasspath>true</addClasspath>
+              <classpathLayoutType>custom</classpathLayoutType>
+              <customClasspathLayout>$${artifact.artifactId}.$${artifact.extension}</customClasspathLayout>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.cyclonedx</groupId>
+        <artifactId>cyclonedx-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>sbom</id>
+            <phase>package</phase>
+            <goals><goal>makeBom</goal></goals>
+            <!-- explicit, so that the -DincludeTestScope=true of the aggregate licence run cannot leak test components into the shipped SBOM -->
+            <configuration><includeTestScope>false</includeTestScope></configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <configuration>
+          <descriptors><descriptor>src/assembly/dist.xml</descriptor></descriptors>
+          <appendAssemblyId>true</appendAssemblyId>
+          <tarLongFileMode>posix</tarLongFileMode>
+        </configuration>
+        <executions>
+          <execution><id>dist</id><phase>package</phase><goals><goal>single</goal></goals></execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>
