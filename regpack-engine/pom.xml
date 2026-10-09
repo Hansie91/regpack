@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>dev.regpack</groupId>
+    <artifactId>regpack</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>regpack-engine</artifactId>
+  <name>regpack-engine</name>
+  <description>Deterministic evaluation engine</description>
+  <dependencies>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-model</artifactId></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-ports</artifactId></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-inmemory</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-tools</artifactId><scope>test</scope></dependency>
+  </dependencies>
+</project>
