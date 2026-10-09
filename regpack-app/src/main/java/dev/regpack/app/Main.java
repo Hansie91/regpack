@@ -34,12 +34,31 @@ public final class Main {
       case "smoke":
         return SmokeCommand.run(rest, out, err, new SystemClock());
       case "serve":
-        err.println("serve is added by task T24");
-        return 2;
+        return serve(rest, env, err);
       default:
         err.println("unknown command '" + args[0] + "'");
         err.println(USAGE);
         return 2;
     }
+  }
+
+  private static int serve(List<String> args, Map<String, String> env, PrintStream err) {
+    AppConfig config;
+    try {
+      config = AppConfig.parse(args, env);
+    } catch (IllegalArgumentException e) {
+      err.println(e.getMessage());
+      err.println(USAGE);
+      return 2;
+    }
+    Service service = Service.start(config, System.out);
+    Runtime.getRuntime().addShutdownHook(new Thread(service::stop, "regpack-shutdown"));
+    try {
+      service.awaitStop();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      service.stop();
+    }
+    return 0;
   }
 }
