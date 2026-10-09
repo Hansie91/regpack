@@ -20,6 +20,7 @@ public final class HealthServer implements AutoCloseable {
   private static final String LIVE_PATH = "/health/live";
   private static final String READY_PATH = "/health/ready";
   private static final int STOP_GRACE_SECONDS = 1;
+  private static final int MAX_BODY_DRAIN_BYTES = 64 * 1024;
 
   private enum State {
     STARTING("STARTING", 503),
@@ -93,7 +94,8 @@ public final class HealthServer implements AutoCloseable {
 
   private void handle(HttpExchange exchange) throws IOException {
     try (exchange) {
-      exchange.getRequestBody().readAllBytes();
+      // The answer does not depend on the body: read a bounded amount, never the whole stream.
+      exchange.getRequestBody().readNBytes(MAX_BODY_DRAIN_BYTES);
       if (!exchange.getRequestMethod().equals("GET")) {
         exchange.getResponseHeaders().set("Allow", "GET");
         respond(exchange, 405, "{\"status\":\"METHOD_NOT_ALLOWED\"}");

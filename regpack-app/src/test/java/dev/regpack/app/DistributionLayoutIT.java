@@ -7,11 +7,14 @@ import dev.regpack.model.json.Json;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -75,6 +78,51 @@ class DistributionLayoutIT {
         return in.readAllBytes();
       }
     }
+  }
+
+  /**
+   * Unix permission bits per entry name, read by hand from the zip central directory (java.util.zip
+   * exposes no external attributes). An entry written by a non-Unix host has no mode and is left
+   * out.
+   */
+  static Map<String, Integer> unixModes(Path zip) throws IOException {
+    ByteBuffer zipBytes = ByteBuffer.wrap(Files.readAllBytes(zip)).order(ByteOrder.LITTLE_ENDIAN);
+    int eocd = -1;
+    for (int i = zipBytes.limit() - 22; i >= 0; i--) {
+      if (zipBytes.getInt(i) == 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    assertThat(eocd).as("end of central directory record").isNotNegative();
+    int entryCount = Short.toUnsignedInt(zipBytes.getShort(eocd + 10));
+    int at = zipBytes.getInt(eocd + 16);
+    Map<String, Integer> modes = new HashMap<>();
+    for (int n = 0; n < entryCount; n++) {
+      assertThat(zipBytes.getInt(at)).as("central directory header").isEqualTo(0x02014b50);
+      int hostOs = Byte.toUnsignedInt(zipBytes.get(at + 5));
+      int nameLength = Short.toUnsignedInt(zipBytes.getShort(at + 28));
+      int extraLength = Short.toUnsignedInt(zipBytes.getShort(at + 30));
+      int commentLength = Short.toUnsignedInt(zipBytes.getShort(at + 32));
+      int externalAttributes = zipBytes.getInt(at + 38);
+      byte[] name = new byte[nameLength];
+      zipBytes.get(at + 46, name);
+      if (hostOs == 3) {
+        modes.put(new String(name, StandardCharsets.UTF_8), externalAttributes >>> 16);
+      }
+      at += 46 + nameLength + extraLength + commentLength;
+    }
+    return modes;
+  }
+
+  @Test
+  void theLauncherIsExecutableAndTheOtherFilesAreNot() throws IOException {
+    Map<String, Integer> modes = unixModes(distZip());
+
+    assertThat(modes).containsKey(TOP + "bin/regpack");
+    assertThat(modes.get(TOP + "bin/regpack") & 0111).as("bin/regpack mode").isEqualTo(0111);
+    assertThat(modes.get(TOP + "share/systemd/regpack.service") & 0111).isZero();
+    assertThat(modes.get(TOP + "lib/regpack-app.jar") & 0111).isZero();
   }
 
   @Test
@@ -185,14 +233,23 @@ class DistributionLayoutIT {
     }
     Path home = temp.resolve(TOP.substring(0, TOP.length() - 1));
     String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+    // Output goes to a file so that waiting on the process, not on its stdout, enforces the
+    // timeout.
+    Path outputFile = temp.resolve("smoke.out");
     Process process =
         new ProcessBuilder(java, "-jar", home.resolve("lib/regpack-app.jar").toString(), "smoke")
             .directory(home.toFile())
             .redirectErrorStream(true)
+            .redirectOutput(outputFile.toFile())
             .start();
-    byte[] output = process.getInputStream().readAllBytes();
-    assertThat(process.waitFor(120, TimeUnit.SECONDS)).isTrue();
-    String text = new String(output, StandardCharsets.UTF_8);
+    if (!process.waitFor(120, TimeUnit.SECONDS)) {
+      process.destroyForcibly();
+      process.waitFor(10, TimeUnit.SECONDS);
+      fail(
+          "smoke did not finish within 120 s; output so far: "
+              + Files.readString(outputFile, StandardCharsets.UTF_8));
+    }
+    String text = Files.readString(outputFile, StandardCharsets.UTF_8);
     assertThat(process.exitValue()).as(text).isZero();
     assertThat(text).contains("regpack smoke: OK decisions=3");
   }

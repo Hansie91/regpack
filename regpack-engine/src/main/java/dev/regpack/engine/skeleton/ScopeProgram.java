@@ -62,7 +62,11 @@ public final class ScopeProgram implements RuleProgram<CanonicalExecution, Row> 
       meter.charge(1);
       boolean matched;
       try {
-        matched = entry.when().evaluate(bindings, meter) instanceof BoolValue b && b.value();
+        // Fail closed (I5): a non-bool result is an error, never a silent skip to the next row.
+        if (!(entry.when().evaluate(bindings, meter) instanceof BoolValue result)) {
+          throw new ExpressionException("when must be bool: " + row.id());
+        }
+        matched = result.value();
       } catch (ExpressionException e) {
         throw new RuleEvaluationException(row.id(), e);
       }

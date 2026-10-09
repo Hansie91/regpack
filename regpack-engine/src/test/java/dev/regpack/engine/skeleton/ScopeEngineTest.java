@@ -27,6 +27,7 @@ import dev.regpack.ports.regime.RegimeProvider.Descriptor;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -205,6 +206,58 @@ class ScopeEngineTest {
     assertThat(body.ruleIdsHit()).isEmpty();
     assertThat(body.path()).containsExactly(new PathStep("S-N03-novation", false, 3));
     assertThat(body.citations()).isEqualTo(WalkingSkeletonRules.rows().get(3).citations());
+  }
+
+  @Test
+  void nonBoolWhenResultFailsClosedAsExecError() {
+    Expression wrongType =
+        new Expression() {
+          private final Expression delegate = new SkeletonExpression();
+
+          @Override
+          public CompiledExpression compile(String source, Map<String, ValueType> variables) {
+            CompiledExpression compiled = delegate.compile(source, variables);
+            if (!source.startsWith("client.kind")) {
+              return compiled;
+            }
+            return new CompiledExpression() {
+              @Override
+              public String source() {
+                return compiled.source();
+              }
+
+              @Override
+              public Value evaluate(Bindings bindings, CostMeter meter) {
+                return new Value.StringValue("true");
+              }
+            };
+          }
+        };
+
+    DecisionBody body =
+        decide(new WalkingSkeletonRegime(new MeteredExecutor(), wrongType), equityOnVenue(), 100);
+
+    assertThat(body.outcome()).isEqualTo(Outcome.UNDETERMINED);
+    assertThat(body.reasonCode()).isEqualTo(new ReasonCode("EXEC_ERROR"));
+    assertThat(body.node()).isEqualTo("EXEC");
+    assertThat(body.flags())
+        .containsExactly(
+            "rule_id=S-D14-natural-person", "error_class=ExpressionException", "cost_units=4");
+    assertThat(body.ruleIdsHit()).isEmpty();
+    assertThat(body.path()).containsExactly(new PathStep("S-N03-novation", false, 3));
+  }
+
+  @Test
+  void rowsAreInAscendingPriorityWithUniqueIdsAndACatchAllLast() {
+    List<WalkingSkeletonRules.Row> rows = WalkingSkeletonRules.rows();
+
+    for (int i = 1; i < rows.size(); i++) {
+      assertThat(rows.get(i).priority()).isGreaterThan(rows.get(i - 1).priority());
+    }
+    assertThat(rows).extracting(WalkingSkeletonRules.Row::id).doesNotHaveDuplicates();
+    WalkingSkeletonRules.Row last = rows.get(rows.size() - 1);
+    assertThat(last.when()).isEqualTo("true");
+    assertThat(last.node()).isEqualTo("DEFAULT");
   }
 
   @Test

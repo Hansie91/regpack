@@ -94,6 +94,27 @@ class Tier1ExplainerTest {
   }
 
   @Test
+  void emptyHitsPathAndCitationsRenderAsNone() {
+    DecisionRecord decision =
+        record(
+            Outcome.UNDETERMINED,
+            "EXEC_ERROR",
+            "EXEC",
+            List.of(),
+            List.of(),
+            List.of(),
+            List.of(),
+            List.of());
+
+    assertThat(Tier1Explainer.explain(decision))
+        .contains("Rule hits: none\n")
+        .contains("Path: none\n")
+        .contains("Citations: none\n")
+        .contains("Flags: none\n")
+        .contains("Legs: none\n");
+  }
+
+  @Test
   void rendersFlagsAndNoLegsForUndetermined() {
     DecisionRecord decision =
         record(

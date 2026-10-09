@@ -92,6 +92,21 @@ class HealthServerTest {
   }
 
   @Test
+  void aRequestBodyDoesNotChangeTheAnswerOrBreakLaterRequests() throws Exception {
+    try (HealthServer server = HealthServer.start("127.0.0.1", 0)) {
+      server.markReady();
+      HttpRequest request =
+          HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/health/live"))
+              .timeout(Duration.ofSeconds(5))
+              .POST(HttpRequest.BodyPublishers.ofByteArray(new byte[32 * 1024]))
+              .build();
+      assertThat(client.send(request, HttpResponse.BodyHandlers.ofString()).statusCode())
+          .isEqualTo(405);
+      assertThat(get(server, "/health/live").statusCode()).isEqualTo(200);
+    }
+  }
+
+  @Test
   void serverCanBeClosedWithoutHanging() {
     assertTimeoutPreemptively(
         Duration.ofSeconds(5),

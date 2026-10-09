@@ -36,6 +36,24 @@ class AppConfigTest {
   }
 
   @Test
+  void aFlagWithoutAValueIsRejected() {
+    assertThatThrownBy(() -> AppConfig.parse(List.of("--port"), Map.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("--port")
+        .hasMessageContaining("needs a value");
+    assertThatThrownBy(() -> AppConfig.parse(List.of("--bind", "::1", "--roles"), Map.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("--roles");
+  }
+
+  @Test
+  void anUnknownFlagIsRejected() {
+    assertThatThrownBy(() -> AppConfig.parse(List.of("--bogus", "x"), Map.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("unknown flag --bogus");
+  }
+
+  @Test
   void invalidPortIsRejected() {
     assertThatThrownBy(() -> AppConfig.parse(List.of("--port", "70000"), Map.of()))
         .isInstanceOf(IllegalArgumentException.class);

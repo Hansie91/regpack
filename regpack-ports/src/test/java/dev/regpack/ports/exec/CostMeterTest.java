@@ -48,5 +48,7 @@ class CostMeterTest {
     assertThat(meter.currentRule()).isEqualTo("R1");
     meter.enter("R2");
     assertThat(meter.currentRule()).isEqualTo("R2");
+    assertThatThrownBy(() -> meter.enter("")).isInstanceOf(IllegalArgumentException.class);
+    assertThat(meter.currentRule()).isEqualTo("R2");
   }
 }

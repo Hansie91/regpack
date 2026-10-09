@@ -4,11 +4,11 @@ import dev.regpack.model.Citation;
 import dev.regpack.model.CitationRole;
 import dev.regpack.model.Outcome;
 import dev.regpack.model.ReasonCode;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * WALKING SKELETON: replaced by P2a.
@@ -108,12 +108,8 @@ public final class WalkingSkeletonRules {
     return ROWS;
   }
 
-  /** The author of each rule, keyed by rule id, in row order. */
+  /** The author of each rule, keyed by rule id; the map's iteration order is unspecified. */
   public static Map<String, String> authorsById() {
-    Map<String, String> authors = new LinkedHashMap<>();
-    for (Row row : ROWS) {
-      authors.put(row.id(), row.author());
-    }
-    return Map.copyOf(authors);
+    return ROWS.stream().collect(Collectors.toUnmodifiableMap(Row::id, Row::author));
   }
 }

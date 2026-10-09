@@ -40,8 +40,13 @@ class PackagingFilesTest {
     Path unit = repoRoot().resolve("packaging/systemd/regpack.service");
     String text = asciiLfText(unit);
     List<String> lines = List.of(text.split("\n", -1));
+    int service = lines.indexOf("[Service]");
+    int install = lines.indexOf("[Install]");
+    assertThat(service).isNotNegative().isLessThan(install);
+    List<String> serviceSection = lines.subList(service + 1, install);
 
-    assertThat(lines)
+    // The hardening keys must sit in [Service], not merely somewhere in the file.
+    assertThat(serviceSection)
         .contains(
             "Type=simple",
             "DynamicUser=yes",
@@ -56,10 +61,14 @@ class PackagingFilesTest {
             "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
             "CapabilityBoundingSet=",
             "Restart=on-failure");
-    assertThat(lines).noneMatch(l -> l.startsWith("User=") || l.startsWith("Group="));
+    assertThat(lines)
+        .noneMatch(l -> l.strip().startsWith("User=") || l.strip().startsWith("Group="));
 
     String smoke = asciiLfText(repoRoot().resolve("packaging/systemd/smoke.sh"));
-    assertThat(smoke).contains("--no-same-owner").contains("--destructive");
+    List<String> smokeLines = List.of(smoke.split("\n", -1));
+    assertThat(smokeLines)
+        .anyMatch(l -> l.startsWith("tar ") && l.contains("--no-same-owner"))
+        .anyMatch(l -> l.startsWith("[ \"${2:-}\" = \"--destructive\" ]"));
   }
 
   @Test
@@ -85,6 +94,21 @@ class PackagingFilesTest {
             "--ServiceUser",
             "icacls");
     assertThat(smoke).contains("stopped cleanly", "ExitCode", "-Destructive");
+
+    // The default service account is LocalService and nothing defaults to LocalSystem.
+    assertThat(service).contains("[string]$ServiceUser = 'NT AUTHORITY\\LocalService'");
+    assertThat(List.of(service.split("\n", -1)))
+        .filteredOn(l -> !l.strip().startsWith("#"))
+        .noneMatch(l -> l.contains("LocalSystem"));
+    // Only the logs directory is writable by LocalService (S-1-5-19); the install tree is
+    // read-only.
+    assertThat(service)
+        .contains("'*S-1-5-19:(OI)(CI)RX'")
+        .doesNotContain("S-1-5-19:(OI)(CI)F")
+        .containsOnlyOnce("S-1-5-19:(OI)(CI)M");
+    assertThat(List.of(service.split("\n", -1)))
+        .filteredOn(l -> l.contains("S-1-5-19:(OI)(CI)M"))
+        .allMatch(l -> l.startsWith("icacls $logs "));
   }
 
   @Test
@@ -94,9 +118,42 @@ class PackagingFilesTest {
 
     assertThat(lines)
         .anyMatch(l -> l.matches("FROM eclipse-temurin:25-jre-noble@sha256:[0-9a-f]{64}"));
-    assertThat(lines).contains("USER 10001:10001");
-    assertThat(lines).anyMatch(l -> l.startsWith("ENTRYPOINT [\"java\""));
+    // The last USER instruction decides who runs the container.
+    assertThat(lines.stream().filter(l -> l.startsWith("USER ")).reduce((first, second) -> second))
+        .contains("USER 10001:10001");
+    assertThat(lines)
+        .anyMatch(
+            l ->
+                l.startsWith("ENTRYPOINT [\"java\"")
+                    && l.contains("/opt/regpack/lib/regpack-app.jar"));
     assertThat(text).doesNotContain(":latest");
+  }
+
+  @Test
+  void ciWorkflowHasTheFiveJobsReadOnlyPermissionsAndMatchingArtefactNames() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+
+    assertThat(ci).containsPattern("(?m)^permissions:\\n  contents: read$");
+    List<String> ciLines = List.of(ci.split("\n", -1));
+    List<String> jobIds =
+        ciLines.subList(ciLines.indexOf("jobs:") + 1, ciLines.size()).stream()
+            .filter(l -> l.matches("  [a-z][a-z-]*:"))
+            .map(l -> l.strip().replace(":", ""))
+            .toList();
+    assertThat(jobIds)
+        .containsExactly(
+            "build", "determinism-compare", "smoke-linux", "smoke-windows", "smoke-kubernetes");
+
+    // The distribution is uploaded once and downloaded under the same name by the three smokes.
+    assertThat(ci).containsOnlyOnce("          name: regpack-dist\n          path: |");
+    assertThat(ci.split("name: regpack-dist\n          path: dist", -1)).hasSize(4);
+    // The digests are uploaded per matrix os and compared from the directory of the same name.
+    assertThat(ci).contains("os: [ubuntu-24.04, windows-2025]");
+    assertThat(ci).contains("name: toy-digest-${{ matrix.os }}");
+    assertThat(ci)
+        .contains("pattern: toy-digest-*")
+        .contains("digests/toy-digest-ubuntu-24.04/toy-digest.txt")
+        .contains("digests/toy-digest-windows-2025/toy-digest.txt");
   }
 
   @Test
@@ -111,11 +168,14 @@ class PackagingFilesTest {
             "startupProbe:",
             "livenessProbe:",
             "readinessProbe:",
-            "path: /health/live",
-            "path: /health/ready",
-            "type: Recreate",
             "replicas: {{ .Values.replicaCount }}",
             "automountServiceAccountToken: false");
+    // Each probe is paired with its own path: startup and liveness use live, readiness uses ready.
+    assertThat(templates)
+        .containsPattern("(?s)startupProbe:\\s+httpGet:\\s+path: /health/live\\s")
+        .containsPattern("(?s)livenessProbe:\\s+httpGet:\\s+path: /health/live\\s")
+        .containsPattern("(?s)readinessProbe:\\s+httpGet:\\s+path: /health/ready\\s")
+        .containsPattern("(?m)^  strategy:\\n    type: Recreate$");
     assertThat(asciiLfText(chart.resolve("values.schema.json"))).contains("\"const\": 1");
     assertThat(List.of(asciiLfText(chart.resolve("values.yaml")).split("\n", -1)))
         .contains("replicaCount: 1");

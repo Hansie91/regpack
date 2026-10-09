@@ -42,6 +42,15 @@ class MainTest {
   }
 
   @Test
+  void serveWithABadFlagValueExitsTwoWithUsageAndStartsNothing() {
+    assertThat(run("serve", "--port", "abc")).isEqualTo(2);
+    assertThat(errBytes.toString(StandardCharsets.UTF_8))
+        .contains("port is not a number: abc")
+        .contains("usage: regpack");
+    assertThat(stdout()).isEmpty();
+  }
+
+  @Test
   void smokeThroughMainExitsZero() {
     assertThat(run("smoke")).isZero();
     assertThat(stdout()).contains("regpack smoke: OK decisions=3");

@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
 class ServiceLifecycleTest {
   private static final AppConfig PORT_ZERO = AppConfig.parse(List.of("--port", "0"), Map.of());
@@ -32,17 +34,34 @@ class ServiceLifecycleTest {
     service.stop();
     service.stop();
     assertTimeoutPreemptively(Duration.ofSeconds(5), service::awaitStop);
-    String expectedRoles = String.join(",", roleFlags(PORT_ZERO));
     assertThat(text(bytes))
         .isEqualTo(
-            "regpack lifecycle: starting roles="
-                + expectedRoles
+            "regpack lifecycle: starting roles=ingest,engine,assembler,sender,feedback,"
+                + "timekeeper,control-plane,console"
                 + " bind=127.0.0.1 port=0\n"
                 + "regpack lifecycle: ready port="
                 + port
                 + "\n"
                 + "regpack lifecycle: stopping\n"
                 + "regpack lifecycle: stopped cleanly\n");
+  }
+
+  @Test
+  void startingLineListsExplicitRolesInEnumOrderNotInputOrNameOrder() {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    PrintStream log = new PrintStream(bytes, true, StandardCharsets.UTF_8);
+    AppConfig config =
+        AppConfig.parse(
+            List.of("--port", "0", "--roles", "console,sender,engine,ingest"), Map.of());
+    Service service = Service.start(config, log);
+    try {
+      assertThat(text(bytes))
+          .startsWith(
+              "regpack lifecycle: starting roles=ingest,engine,sender,console"
+                  + " bind=127.0.0.1 port=0\n");
+    } finally {
+      service.stop();
+    }
   }
 
   @Test
@@ -69,13 +88,16 @@ class ServiceLifecycleTest {
   }
 
   @Test
+  @ResourceLock(Resources.SYSTEM_OUT)
   void windowsEntryStartBlocksUntilStopIsCalled() throws Exception {
     PrintStream originalOut = System.out;
     ByteArrayOutputStream bytes = new ByteArrayOutputStream();
     System.setOut(new PrintStream(bytes, true, StandardCharsets.UTF_8));
     try {
       Thread entry =
-          Thread.ofPlatform().start(() -> WindowsServiceEntry.start(new String[] {"--port", "0"}));
+          Thread.ofPlatform()
+              .daemon()
+              .start(() -> WindowsServiceEntry.start(new String[] {"--port", "0"}));
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
       while (!text(bytes).contains("regpack lifecycle: ready") && System.nanoTime() < deadline) {
         Thread.sleep(20);
@@ -87,11 +109,9 @@ class ServiceLifecycleTest {
       assertThat(entry.isAlive()).isFalse();
       assertThat(text(bytes)).contains("regpack lifecycle: stopped cleanly");
     } finally {
+      // Stop first (a no-op when already stopped), so a failed assertion leaves nothing running.
+      WindowsServiceEntry.stop(new String[0]);
       System.setOut(originalOut);
     }
-  }
-
-  private static List<String> roleFlags(AppConfig config) {
-    return config.roles().roles().stream().map(Role::flag).toList();
   }
 }

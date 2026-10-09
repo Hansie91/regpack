@@ -91,13 +91,26 @@ class MeteredExecutorTest {
         new Toy(
             "toy",
             (in, meter, trace) -> {
-              meter.enter("R7");
+              meter.enter("R1");
               meter.charge(4);
               throw new RuleEvaluationException("R7", new ArithmeticException());
             });
 
+    // The failed rule is the exception's own id (R7), not the rule the meter was last in (R1).
     assertThat(executor.execute(program, "x", new CostBudget(10)))
         .isEqualTo(new Failed<String>("R7", "ArithmeticException", 4, List.of()));
+
+    Toy withoutCause =
+        new Toy(
+            "toy",
+            (in, meter, trace) -> {
+              meter.enter("R1");
+              throw new RuleEvaluationException("R7", null);
+            });
+
+    // With no cause the exception names its own class.
+    assertThat(executor.execute(withoutCause, "x", new CostBudget(10)))
+        .isEqualTo(new Failed<String>("R7", "RuleEvaluationException", 0, List.of()));
   }
 
   @Test
@@ -113,6 +126,31 @@ class MeteredExecutorTest {
 
     assertThat(executor.execute(program, "x", new CostBudget(10)))
         .isEqualTo(new Failed<String>("R9", "IllegalStateException", 2, List.of()));
+
+    // An anonymous class has no simple name, so the full class name is reported.
+    Toy anonymous =
+        new Toy(
+            "toy",
+            (in, meter, trace) -> {
+              meter.enter("R9");
+              throw new IllegalStateException("boom") {};
+            });
+    assertThat(executor.execute(anonymous, "x", new CostBudget(10)))
+        .isInstanceOfSatisfying(
+            Failed.class,
+            failed -> assertThat(failed.errorClass()).endsWith("MeteredExecutorTest$1"));
+
+    // A null program result is a program bug: it is reported as Failed, never as Completed.
+    Toy nullResult =
+        new Toy(
+            "toy",
+            (in, meter, trace) -> {
+              meter.enter("R3");
+              meter.charge(1);
+              return null;
+            });
+    assertThat(executor.execute(nullResult, "x", new CostBudget(10)))
+        .isEqualTo(new Failed<String>("R3", "NullPointerException", 1, List.of()));
   }
 
   @Test
