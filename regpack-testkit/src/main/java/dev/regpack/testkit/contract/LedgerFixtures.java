@@ -11,7 +11,9 @@ import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.ports.ledger.DecisionLedger;
+import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.IngestLedger;
+import dev.regpack.ports.ledger.LeaseLedger;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -100,5 +102,39 @@ public final class LedgerFixtures {
   /** A new decision that expects the chain head to be at {@code expectedHeadSeq}. */
   public static DecisionLedger.NewDecision decision(DecisionBody body, long expectedHeadSeq) {
     return new DecisionLedger.NewDecision(body, expectedHeadSeq);
+  }
+
+  /** The endpoint {@code ("SIMULATOR", "ARM", "LEI-" + name, "NCA-" + name)}. */
+  public static LeaseLedger.EndpointKey endpoint(String name) {
+    return new LeaseLedger.EndpointKey("SIMULATOR", "ARM", "LEI-" + name, "NCA-" + name);
+  }
+
+  /** The fixed attempt intent that {@link #begin} uses: a fixed digest and {@code file.xml}. */
+  public static DeliveryLedger.AttemptIntent attemptIntent() {
+    return new DeliveryLedger.AttemptIntent(Sha256.ofUtf8("artifact"), "file.xml");
+  }
+
+  /**
+   * Creates a delivery for (endpoint, epoch 1, business key, version) and moves it from {@code
+   * PREPARED} to {@code QUEUED}, asserting that the transition is applied.
+   */
+  public static DeliveryLedger.DeliveryId queuedDelivery(
+      DeliveryLedger ledger, LeaseLedger.EndpointKey e, String businessKey, long versionSeq) {
+    DeliveryLedger.DeliveryId id =
+        ledger.createDelivery(new DeliveryLedger.NewDelivery(e, 1, businessKey, versionSeq));
+    DeliveryLedger.TransitionStatus status =
+        ledger.transition(
+            id, DeliveryLedger.DeliveryState.PREPARED, DeliveryLedger.DeliveryState.QUEUED);
+    if (status != DeliveryLedger.TransitionStatus.APPLIED) {
+      throw new AssertionError("PREPARED -> QUEUED was not applied: " + status);
+    }
+    return id;
+  }
+
+  /** Allocates an attempt id, then calls {@code beginSending} with {@link #attemptIntent()}. */
+  public static DeliveryLedger.SendingResult begin(
+      DeliveryLedger ledger, DeliveryLedger.DeliveryId d, LeaseLedger.LeaseToken t) {
+    DeliveryLedger.AttemptId id = ledger.allocateAttemptId();
+    return ledger.beginSending(d, id, t, attemptIntent());
   }
 }

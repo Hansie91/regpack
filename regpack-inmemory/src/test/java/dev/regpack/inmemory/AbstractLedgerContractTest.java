@@ -4,11 +4,13 @@ import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.DecisionLedgerContract;
 import dev.regpack.testkit.contract.IngestLedgerContract;
+import dev.regpack.testkit.contract.LeaseDeliveryLedgerContract;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 
 /** Binds the ledger contract suites to an adapter created over a fresh {@link ManualClock}. */
-abstract class AbstractLedgerContractTest implements IngestLedgerContract, DecisionLedgerContract {
+abstract class AbstractLedgerContractTest
+    implements IngestLedgerContract, DecisionLedgerContract, LeaseDeliveryLedgerContract {
   private ManualClock clock;
   private LedgerStore ledger;
 
@@ -17,7 +19,7 @@ abstract class AbstractLedgerContractTest implements IngestLedgerContract, Decis
 
   @BeforeEach
   void setUpLedger() {
-    clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+    clock = new ManualClock(Instant.parse("2026-10-09T08:00:00Z"));
     ledger = create(clock);
   }
 

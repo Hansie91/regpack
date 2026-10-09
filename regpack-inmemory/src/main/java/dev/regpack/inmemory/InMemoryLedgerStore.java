@@ -11,9 +11,13 @@ import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
+import dev.regpack.ports.ledger.DuplicateKeyException;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.LedgerStore;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -37,6 +41,10 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private record DecisionKey(
       EventIdentity eventIdentity, Sha256 decisionContextId, Sha256 inputDigest) {}
 
+  /** States in which at most one delivery per (endpoint, business key) may be (spec 11.2). */
+  private static final Set<DeliveryState> IN_FLIGHT =
+      EnumSet.of(DeliveryState.SENDING, DeliveryState.AWAITING_ACK, DeliveryState.IN_DOUBT);
+
   private final Clock clock;
   private final Object lock = new Object();
   private final Map<IngestKey, StoredIngest> ingests = new HashMap<>();
@@ -49,6 +57,14 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private final Map<ChainKey, List<DecisionRecord>> chains = new HashMap<>();
   private final Map<DecisionKey, DecisionRecord> decisionsByKey = new HashMap<>();
   private long nextDecisionId = 1;
+  private final Map<EndpointKey, LeaseGrant> leases = new HashMap<>();
+  private final Map<EndpointKey, Long> leaseCounters = new HashMap<>();
+  private long restoreEpoch = 0;
+  private final Map<DeliveryId, Delivery> deliveries = new LinkedHashMap<>();
+  private final Set<NewDelivery> deliveryKeys = new HashSet<>();
+  private long nextDeliveryId = 1;
+  private final Map<AttemptId, Attempt> attempts = new HashMap<>();
+  private long nextAttemptId = 1;
 
   /** The clock is the "database clock" for leases (T11). */
   public InMemoryLedgerStore(Clock clock) {
@@ -268,5 +284,250 @@ public final class InMemoryLedgerStore implements LedgerStore {
     synchronized (lock) {
       return List.copyOf(chains.getOrDefault(new ChainKey(regime, eventIdentity), List.of()));
     }
+  }
+
+  @Override
+  public LeaseResult acquire(EndpointKey endpoint, String holder, Duration ttl) {
+    Objects.requireNonNull(endpoint, "endpoint");
+    Objects.requireNonNull(holder, "holder");
+    requirePositiveWholeMicros(ttl);
+    if (holder.isBlank()) {
+      throw new IllegalArgumentException("holder must not be blank");
+    }
+    synchronized (lock) {
+      Instant now = clock.now();
+      LeaseGrant current = leases.get(endpoint);
+      if (current != null && now.isBefore(current.expiresAt())) {
+        return new LeaseResult.Held(current.holder(), current.expiresAt());
+      }
+      long counter = leaseCounters.merge(endpoint, 1L, Long::sum);
+      LeaseGrant grant =
+          new LeaseGrant(new LeaseToken(restoreEpoch, counter), holder, now.plus(ttl));
+      leases.put(endpoint, grant);
+      // Takeover rule: whatever the previous holder had in SENDING is now in doubt.
+      deliveries.replaceAll(
+          (id, delivery) ->
+              delivery.key().endpoint().equals(endpoint)
+                      && delivery.state() == DeliveryState.SENDING
+                  ? new Delivery(id, delivery.key(), DeliveryState.IN_DOUBT)
+                  : delivery);
+      return new LeaseResult.Granted(grant);
+    }
+  }
+
+  @Override
+  public boolean renew(EndpointKey endpoint, LeaseToken token, Duration ttl) {
+    Objects.requireNonNull(endpoint, "endpoint");
+    Objects.requireNonNull(token, "token");
+    requirePositiveWholeMicros(ttl);
+    synchronized (lock) {
+      Instant now = clock.now();
+      LeaseGrant current = leases.get(endpoint);
+      if (current == null || !current.token().equals(token) || !now.isBefore(current.expiresAt())) {
+        return false;
+      }
+      leases.put(endpoint, new LeaseGrant(token, current.holder(), now.plus(ttl)));
+      return true;
+    }
+  }
+
+  @Override
+  public void release(EndpointKey endpoint, LeaseToken token) {
+    Objects.requireNonNull(endpoint, "endpoint");
+    Objects.requireNonNull(token, "token");
+    synchronized (lock) {
+      LeaseGrant current = leases.get(endpoint);
+      if (current != null && current.token().equals(token)) {
+        leases.remove(endpoint);
+      }
+    }
+  }
+
+  @Override
+  public Optional<LeaseGrant> currentLease(EndpointKey endpoint) {
+    Objects.requireNonNull(endpoint, "endpoint");
+    synchronized (lock) {
+      return Optional.ofNullable(leases.get(endpoint));
+    }
+  }
+
+  @Override
+  public long restoreEpoch() {
+    synchronized (lock) {
+      return restoreEpoch;
+    }
+  }
+
+  @Override
+  public void declareRestoreEpoch(long epoch) {
+    synchronized (lock) {
+      if (epoch <= restoreEpoch) {
+        throw new IllegalArgumentException(
+            "restore epoch " + epoch + " must exceed the current epoch " + restoreEpoch);
+      }
+      restoreEpoch = epoch;
+      leases.clear();
+      leaseCounters.clear();
+    }
+  }
+
+  private static void requirePositiveWholeMicros(Duration ttl) {
+    Objects.requireNonNull(ttl, "ttl");
+    if (ttl.isNegative() || ttl.isZero()) {
+      throw new IllegalArgumentException("ttl must be positive: " + ttl);
+    }
+    if (ttl.getNano() % 1000 != 0) {
+      throw new IllegalArgumentException("ttl is not whole microseconds: " + ttl);
+    }
+  }
+
+  @Override
+  public DeliveryId createDelivery(NewDelivery delivery) {
+    Objects.requireNonNull(delivery, "delivery");
+    Objects.requireNonNull(delivery.endpoint(), "endpoint");
+    if (delivery.businessKey().isBlank()) {
+      throw new IllegalArgumentException("businessKey must not be blank");
+    }
+    synchronized (lock) {
+      if (!deliveryKeys.add(delivery)) {
+        throw new DuplicateKeyException("delivery already exists: " + delivery);
+      }
+      DeliveryId id = new DeliveryId(nextDeliveryId++);
+      deliveries.put(id, new Delivery(id, delivery, DeliveryState.PREPARED));
+      return id;
+    }
+  }
+
+  @Override
+  public Optional<Delivery> delivery(DeliveryId id) {
+    Objects.requireNonNull(id, "id");
+    synchronized (lock) {
+      return Optional.ofNullable(deliveries.get(id));
+    }
+  }
+
+  @Override
+  public TransitionStatus transition(DeliveryId id, DeliveryState expectedFrom, DeliveryState to) {
+    Objects.requireNonNull(id, "id");
+    Objects.requireNonNull(expectedFrom, "expectedFrom");
+    Objects.requireNonNull(to, "to");
+    if (to == DeliveryState.SENDING) {
+      throw new IllegalArgumentException("a delivery moves into SENDING only through beginSending");
+    }
+    synchronized (lock) {
+      Delivery delivery = knownDelivery(id);
+      if (delivery.state() != expectedFrom) {
+        return TransitionStatus.STATE_MISMATCH;
+      }
+      if (IN_FLIGHT.contains(to)
+          && !IN_FLIGHT.contains(expectedFrom)
+          && anotherInFlight(delivery)) {
+        return TransitionStatus.IN_FLIGHT_CONFLICT;
+      }
+      deliveries.put(id, new Delivery(id, delivery.key(), to));
+      return TransitionStatus.APPLIED;
+    }
+  }
+
+  @Override
+  public AttemptId allocateAttemptId() {
+    synchronized (lock) {
+      return new AttemptId(nextAttemptId++);
+    }
+  }
+
+  @Override
+  public SendingResult beginSending(
+      DeliveryId id, AttemptId attemptId, LeaseToken token, AttemptIntent intent) {
+    Objects.requireNonNull(id, "id");
+    Objects.requireNonNull(attemptId, "attemptId");
+    Objects.requireNonNull(token, "token");
+    Objects.requireNonNull(intent, "intent");
+    synchronized (lock) {
+      Delivery delivery = knownDelivery(id);
+      // The id is checked before the fence.
+      if (attemptId.value() < 1 || attemptId.value() >= nextAttemptId) {
+        throw new IllegalArgumentException("attempt id was not allocated: " + attemptId.value());
+      }
+      if (attempts.containsKey(attemptId)) {
+        throw new DuplicateKeyException("attempt id already used: " + attemptId.value());
+      }
+      if (!isCurrent(delivery.key().endpoint(), token)) {
+        return new SendingResult(SendingStatus.STALE_LEASE, Optional.empty());
+      }
+      if (delivery.state() != DeliveryState.QUEUED) {
+        return new SendingResult(SendingStatus.STATE_MISMATCH, Optional.empty());
+      }
+      if (anotherInFlight(delivery)) {
+        return new SendingResult(SendingStatus.IN_FLIGHT_CONFLICT, Optional.empty());
+      }
+      deliveries.put(id, new Delivery(id, delivery.key(), DeliveryState.SENDING));
+      attempts.put(
+          attemptId,
+          new Attempt(attemptId, id, token, intent.artifactSha256(), intent.fileName(), false));
+      return new SendingResult(SendingStatus.APPLIED, Optional.of(attemptId));
+    }
+  }
+
+  @Override
+  public boolean markCommitIssued(AttemptId attempt, LeaseToken token) {
+    Objects.requireNonNull(attempt, "attempt");
+    Objects.requireNonNull(token, "token");
+    synchronized (lock) {
+      Attempt stored = attempts.get(attempt);
+      if (stored == null) {
+        return false;
+      }
+      Delivery delivery = deliveries.get(stored.delivery());
+      if (delivery.state() != DeliveryState.SENDING
+          || !isCurrent(delivery.key().endpoint(), token)) {
+        return false;
+      }
+      attempts.put(
+          attempt,
+          new Attempt(
+              stored.id(),
+              stored.delivery(),
+              stored.token(),
+              stored.artifactSha256(),
+              stored.fileName(),
+              true));
+      return true;
+    }
+  }
+
+  @Override
+  public Optional<Attempt> attempt(AttemptId id) {
+    Objects.requireNonNull(id, "id");
+    synchronized (lock) {
+      return Optional.ofNullable(attempts.get(id));
+    }
+  }
+
+  private Delivery knownDelivery(DeliveryId id) {
+    Delivery delivery = deliveries.get(id);
+    if (delivery == null) {
+      throw new IllegalArgumentException("unknown delivery " + id.value());
+    }
+    return delivery;
+  }
+
+  /** True when {@code token} is the latest unreleased, unvoided token of the endpoint. */
+  private boolean isCurrent(EndpointKey endpoint, LeaseToken token) {
+    LeaseGrant current = leases.get(endpoint);
+    return current != null && current.token().equals(token);
+  }
+
+  /** The in-flight guard: another delivery of the same endpoint and business key is in flight. */
+  private boolean anotherInFlight(Delivery delivery) {
+    for (Delivery other : deliveries.values()) {
+      if (!other.id().equals(delivery.id())
+          && other.key().endpoint().equals(delivery.key().endpoint())
+          && other.key().businessKey().equals(delivery.key().businessKey())
+          && IN_FLIGHT.contains(other.state())) {
+        return true;
+      }
+    }
+    return false;
   }
 }
