@@ -45,7 +45,24 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private static final Set<DeliveryState> IN_FLIGHT =
       EnumSet.of(DeliveryState.SENDING, DeliveryState.AWAITING_ACK, DeliveryState.IN_DOUBT);
 
+  /** Deliberate faults for ContractSuiteTeethTest; {@code NONE} is the correct adapter. */
+  public enum Flaw {
+    NONE,
+    IGNORE_LEASE_TOKEN,
+    NO_IN_FLIGHT_GUARD,
+    NON_ATOMIC_DECISIONS,
+    REINGEST_ON_REDELIVERY,
+    NO_TAKEOVER_IN_DOUBT,
+    ABA_AS_NOOP,
+    IGNORE_RESTORE_EPOCH,
+    IDEMPOTENCY_KEY_IGNORES_CONTEXT
+  }
+
+  /** Constant stand-in for the decision context id under IDEMPOTENCY_KEY_IGNORES_CONTEXT. */
+  private static final Sha256 NO_CONTEXT = new Sha256("0".repeat(64));
+
   private final Clock clock;
+  private final Flaw flaw;
   private final Object lock = new Object();
   private final Map<IngestKey, StoredIngest> ingests = new HashMap<>();
   private final Map<SourceEvent, Long> highestVersion = new HashMap<>();
@@ -68,7 +85,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   /** The clock is the "database clock" for leases (T11). */
   public InMemoryLedgerStore(Clock clock) {
+    this(clock, Flaw.NONE);
+  }
+
+  /** Test double only: an adapter with a deliberate {@link Flaw}. */
+  public InMemoryLedgerStore(Clock clock, Flaw flaw) {
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.flaw = Objects.requireNonNull(flaw, "flaw");
   }
 
   @Override
@@ -76,7 +99,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
     Objects.requireNonNull(commit, "commit");
     synchronized (lock) {
       Result stored = results.get(commit.batchId());
-      if (stored != null) {
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (stored != null && flaw != Flaw.REINGEST_ON_REDELIVERY) {
         return new Result(stored.batchId(), true, stored.entries(), stored.outboxId());
       }
       validate(commit);
@@ -131,6 +155,10 @@ public final class InMemoryLedgerStore implements LedgerStore {
     if (highest != null && entry.key().sourceVersion() < highest) {
       return Disposition.STALE;
     }
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (flaw == Flaw.ABA_AS_NOOP && equalsEarlierVersion(commit, entry)) {
+      return Disposition.NOOP_SAME_VERSION_SAME_HASH;
+    }
     ingests.put(
         entry.key(),
         new StoredIngest(
@@ -138,6 +166,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
     highestVersion.put(sourceEvent, entry.key().sourceVersion());
     owningSource.put(entry.eventIdentity(), commit.sourceId());
     return Disposition.NEW_VERSION;
+  }
+
+  private boolean equalsEarlierVersion(Commit commit, Entry entry) {
+    for (StoredIngest earlier : ingests.values()) {
+      if (earlier.eventIdentity().equals(entry.eventIdentity())
+          && earlier.key().sourceId().equals(commit.sourceId())
+          && earlier.contentHash().equals(entry.contentHash())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override
@@ -205,8 +244,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
       List<Committed> committed = new ArrayList<>();
       for (NewDecision decision : commit.decisions()) {
         DecisionBody body = decision.body();
-        DecisionKey decisionKey =
-            new DecisionKey(body.eventIdentity(), body.decisionContextId(), body.inputDigest());
+        DecisionKey decisionKey = decisionKey(body);
         DecisionRecord known = inserted.get(decisionKey);
         if (known == null) {
           known = decisionsByKey.get(decisionKey);
@@ -220,6 +258,10 @@ public final class InMemoryLedgerStore implements LedgerStore {
         List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
         long headSeq = chain.size() + added.size();
         if (decision.expectedHeadSeq() != headSeq) {
+          // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
+          if (flaw == Flaw.NON_ATOMIC_DECISIONS) {
+            publish(appended, inserted, nextId);
+          }
           throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
         }
         Optional<DecisionId> supersedes = Optional.empty();
@@ -234,11 +276,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
         inserted.put(decisionKey, record);
         committed.add(new Committed(CommitStatus.INSERTED, record));
       }
-      appended.forEach(
-          (chainKey, added) ->
-              chains.computeIfAbsent(chainKey, k -> new ArrayList<>()).addAll(added));
-      decisionsByKey.putAll(inserted);
-      nextDecisionId = nextId;
+      publish(appended, inserted, nextId);
       commit
           .completesOutbox()
           .ifPresent(
@@ -248,6 +286,24 @@ public final class InMemoryLedgerStore implements LedgerStore {
               });
       return List.copyOf(committed);
     }
+  }
+
+  private void publish(
+      Map<ChainKey, List<DecisionRecord>> appended,
+      Map<DecisionKey, DecisionRecord> inserted,
+      long nextId) {
+    appended.forEach(
+        (chainKey, added) ->
+            chains.computeIfAbsent(chainKey, k -> new ArrayList<>()).addAll(added));
+    decisionsByKey.putAll(inserted);
+    nextDecisionId = nextId;
+  }
+
+  private DecisionKey decisionKey(DecisionBody body) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    Sha256 context =
+        flaw == Flaw.IDEMPOTENCY_KEY_IGNORES_CONTEXT ? NO_CONTEXT : body.decisionContextId();
+    return new DecisionKey(body.eventIdentity(), context, body.inputDigest());
   }
 
   private void validate(BatchCommit commit) {
@@ -305,12 +361,15 @@ public final class InMemoryLedgerStore implements LedgerStore {
           new LeaseGrant(new LeaseToken(restoreEpoch, counter), holder, now.plus(ttl));
       leases.put(endpoint, grant);
       // Takeover rule: whatever the previous holder had in SENDING is now in doubt.
-      deliveries.replaceAll(
-          (id, delivery) ->
-              delivery.key().endpoint().equals(endpoint)
-                      && delivery.state() == DeliveryState.SENDING
-                  ? new Delivery(id, delivery.key(), DeliveryState.IN_DOUBT)
-                  : delivery);
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (flaw != Flaw.NO_TAKEOVER_IN_DOUBT) {
+        deliveries.replaceAll(
+            (id, delivery) ->
+                delivery.key().endpoint().equals(endpoint)
+                        && delivery.state() == DeliveryState.SENDING
+                    ? new Delivery(id, delivery.key(), DeliveryState.IN_DOUBT)
+                    : delivery);
+      }
       return new LeaseResult.Granted(grant);
     }
   }
@@ -366,8 +425,11 @@ public final class InMemoryLedgerStore implements LedgerStore {
             "restore epoch " + epoch + " must exceed the current epoch " + restoreEpoch);
       }
       restoreEpoch = epoch;
-      leases.clear();
-      leaseCounters.clear();
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (flaw != Flaw.IGNORE_RESTORE_EPOCH) {
+        leases.clear();
+        leaseCounters.clear();
+      }
     }
   }
 
@@ -514,12 +576,20 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   /** True when {@code token} is the latest unreleased, unvoided token of the endpoint. */
   private boolean isCurrent(EndpointKey endpoint, LeaseToken token) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (flaw == Flaw.IGNORE_LEASE_TOKEN) {
+      return true;
+    }
     LeaseGrant current = leases.get(endpoint);
     return current != null && current.token().equals(token);
   }
 
   /** The in-flight guard: another delivery of the same endpoint and business key is in flight. */
   private boolean anotherInFlight(Delivery delivery) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (flaw == Flaw.NO_IN_FLIGHT_GUARD) {
+      return false;
+    }
     for (Delivery other : deliveries.values()) {
       if (!other.id().equals(delivery.id())
           && other.key().endpoint().equals(delivery.key().endpoint())

@@ -23,13 +23,27 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
   private static final Grade GRADE = new Grade("P-MEMORY", "");
   private static final Durability DURABILITY = new Durability(false, 0);
 
+  /** Deliberate faults for ContractSuiteTeethTest; {@code NONE} is the correct adapter. */
+  public enum Flaw {
+    NONE,
+    OVERWRITE_ON_DUPLICATE,
+    ALLOW_RETENTION_SHORTENING
+  }
+
   private final Clock clock;
+  private final Flaw flaw;
   private final Object lock = new Object();
   private final TreeMap<String, StoredObject> objects = new TreeMap<>();
   private volatile boolean down;
 
   public InMemoryEvidenceStore(Clock clock) {
+    this(clock, Flaw.NONE);
+  }
+
+  /** Test double only: an adapter with a deliberate {@link Flaw}. */
+  public InMemoryEvidenceStore(Clock clock, Flaw flaw) {
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.flaw = Objects.requireNonNull(flaw, "flaw");
   }
 
   /** Makes every call throw {@link EvidenceUnavailableException} while {@code down} is true. */
@@ -57,7 +71,9 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     Sha256 digest = Sha256.of(bytes);
     synchronized (lock) {
       StoredObject existing = objects.get(request.key().path());
-      if (existing == null) {
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (existing == null
+          || (flaw == Flaw.OVERWRITE_ON_DUPLICATE && !existing.sha256().equals(digest))) {
         objects.put(
             request.key().path(),
             new StoredObject(
@@ -116,7 +132,9 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     Objects.requireNonNull(newRetainUntil, "newRetainUntil");
     synchronized (lock) {
       StoredObject existing = require(key);
-      if (newRetainUntil.isBefore(existing.retention().retainUntil())) {
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (flaw != Flaw.ALLOW_RETENTION_SHORTENING
+          && newRetainUntil.isBefore(existing.retention().retainUntil())) {
         throw new EvidenceRetentionException(
             "retention can only be extended: "
                 + key.path()

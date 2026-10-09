@@ -9,13 +9,13 @@ import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 
 /** Binds the ledger contract suites to an adapter created over a fresh {@link ManualClock}. */
-abstract class AbstractLedgerContractTest
+public abstract class AbstractLedgerContractTest
     implements IngestLedgerContract, DecisionLedgerContract, LeaseDeliveryLedgerContract {
   private ManualClock clock;
   private LedgerStore ledger;
 
   /** Creates a fresh, empty adapter that reads time from {@code clock}. */
-  abstract LedgerStore create(ManualClock clock);
+  public abstract LedgerStore create(ManualClock clock);
 
   @BeforeEach
   void setUpLedger() {

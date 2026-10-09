@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 
 class InMemoryEvidenceStoreContractTest extends AbstractEvidenceContractTest {
   @Override
-  EvidenceStore create(ManualClock clock) {
+  public EvidenceStore create(ManualClock clock) {
     return new InMemoryEvidenceStore(clock);
   }
 

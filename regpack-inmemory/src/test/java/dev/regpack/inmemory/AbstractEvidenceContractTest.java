@@ -7,12 +7,12 @@ import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 
 /** Binds {@link EvidenceStoreContract} to an adapter created over a fresh {@link ManualClock}. */
-abstract class AbstractEvidenceContractTest implements EvidenceStoreContract {
+public abstract class AbstractEvidenceContractTest implements EvidenceStoreContract {
   private ManualClock clock;
   private EvidenceStore store;
 
   /** Creates a fresh, empty adapter that reads time from {@code clock}. */
-  abstract EvidenceStore create(ManualClock clock);
+  public abstract EvidenceStore create(ManualClock clock);
 
   @BeforeEach
   void setUpStore() {
