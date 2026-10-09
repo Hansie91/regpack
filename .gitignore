@@ -1,0 +1,16 @@
+target/
+.idea/
+*.iml
+.vscode/
+.claude/
+*.log
+dependency-reduced-pom.xml
+.mvn/wrapper/maven-wrapper.jar
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.jks
+*.key
+settings-security.xml
