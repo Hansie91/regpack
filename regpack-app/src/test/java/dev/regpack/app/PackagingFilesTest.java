@@ -61,4 +61,29 @@ class PackagingFilesTest {
     String smoke = asciiLfText(repoRoot().resolve("packaging/systemd/smoke.sh"));
     assertThat(smoke).contains("--no-same-owner").contains("--destructive");
   }
+
+  @Test
+  void windowsScriptsPinProcrunChecksumAndAreAscii() throws IOException {
+    Path dir = repoRoot().resolve("packaging/windows");
+    String procrun = asciiLfText(dir.resolve("install-procrun.ps1"));
+    String service = asciiLfText(dir.resolve("install-service.ps1"));
+    String smoke = asciiLfText(dir.resolve("smoke.ps1"));
+
+    assertThat(procrun)
+        .contains(
+            "a878177edc92e663c1113858f8903451ec02b5b033bca373bea4f8761d9196323771301fcd6a7b8387d8e2300f7a1056b9e08e83fca9703df32ac3ecd5b129f7")
+        .contains("Get-FileHash -Algorithm SHA512")
+        .contains("commons-daemon-1.6.1-bin-windows.zip");
+    assertThat(service)
+        .contains(
+            "--StartMode=jvm",
+            "--StopMode=jvm",
+            "dev.regpack.app.WindowsServiceEntry",
+            "--StartMethod=start",
+            "--StopMethod=stop",
+            "bin\\server\\jvm.dll",
+            "--ServiceUser",
+            "icacls");
+    assertThat(smoke).contains("stopped cleanly", "ExitCode", "-Destructive");
+  }
 }

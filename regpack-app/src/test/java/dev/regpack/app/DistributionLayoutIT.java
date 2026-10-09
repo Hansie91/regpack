@@ -89,16 +89,17 @@ class DistributionLayoutIT {
             "bin/regpack",
             "bin/regpack.cmd",
             "share/sbom/regpack-bom.json",
-            "share/systemd/regpack.service");
+            "share/systemd/regpack.service",
+            "share/windows/install-procrun.ps1",
+            "share/windows/install-service.ps1",
+            "share/windows/smoke.ps1");
     assertThat(read(distZip(), "share/systemd/regpack.service")).isNotEmpty();
-
-    // T30 adds these; it changes the assertion to required.
-    List<String> optional =
-        List.of("share/windows/install-procrun.ps1", "share/windows/install-service.ps1");
-    for (String name : optional) {
-      if (names.contains(name)) {
-        assertThat(read(distZip(), name)).as(name).isNotEmpty();
-      }
+    for (String name :
+        List.of(
+            "share/windows/install-procrun.ps1",
+            "share/windows/install-service.ps1",
+            "share/windows/smoke.ps1")) {
+      assertThat(read(distZip(), name)).as(name).isNotEmpty();
     }
     // Nothing else beyond the documented groups.
     List<String> unexpected = new ArrayList<>();
