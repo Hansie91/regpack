@@ -1,0 +1,431 @@
+package dev.regpack.tools;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.SAXException;
+
+/**
+ * Checks the traceability file (spec 14.4): every requirement and invariant row has named evidence,
+ * every cited artefact exists and records a pass, and a row whose closing plans have all exited
+ * needs evidence that counts. Consistency-only golden cases never count, and for I1, I2, I9 and I10
+ * only a real-store run counts.
+ */
+public final class TraceabilityCheck {
+  /** One evidence line of the table. */
+  public record Evidence(String kind, String ref, String store, String ci, String note) {}
+
+  /** One row id with the plans that close it and its evidence lines. */
+  public record Row(String id, List<String> closesIn, List<Evidence> evidence) {
+    public Row {
+      closesIn = List.copyOf(closesIn);
+      evidence = List.copyOf(evidence);
+    }
+  }
+
+  /** The outcome of a check; {@code closed} and {@code open} count rows. */
+  public record Result(List<String> problems, int rows, int closed, int open) {
+    public Result {
+      problems = List.copyOf(problems);
+    }
+
+    /** True when no problem was found. */
+    public boolean ok() {
+      return problems.isEmpty();
+    }
+  }
+
+  private enum Status {
+    PASS,
+    PENDING,
+    OWNERLESS,
+    NOT_PASSING,
+    MISSING
+  }
+
+  private static final List<String> IDS = allIds();
+  private static final Set<String> KINDS =
+      Set.of("TEST", "GOLDEN", "BENCHMARK", "SPIKE", "GATE", "REVIEW", "NONE");
+  private static final Set<String> STORES = Set.of("UNIT", "INMEMORY", "REALSTORE", "NA");
+  private static final Set<String> CIS = Set.of("BUILD", "NIGHTLY", "RC", "NA");
+  private static final Set<String> REAL_STORE_ONLY = Set.of("I1", "I2", "I9", "I10");
+  private static final Set<String> SKIPPED_DIRECTORIES = Set.of(".git", "node_modules");
+  private static final Pattern PLAN = Pattern.compile("P[0-9]+[ab]?");
+  private static final Pattern EXITED_LINE = Pattern.compile("^exited_plans:\\s*(.*)$");
+  private static final Pattern SEPARATOR_CELL = Pattern.compile(":?-+:?");
+  private static final Pattern STATUS_LINE = Pattern.compile("^status:\\s*(\\S+)\\s*$");
+  private static final Pattern OWNER_LINE = Pattern.compile("^owner:\\s*\\S.*$");
+  private static final int COLUMNS = 7;
+
+  private TraceabilityCheck() {}
+
+  private static List<String> allIds() {
+    List<String> ids = new ArrayList<>();
+    for (int i = 1; i <= 14; i++) {
+      ids.add("R" + i);
+    }
+    for (int i = 1; i <= 10; i++) {
+      ids.add("I" + i);
+    }
+    return List.copyOf(ids);
+  }
+
+  /**
+   * The test cases and golden audit rows found under the scan roots. A test case that fails, errors
+   * or is skipped in any report is not in {@code passedTests}, whatever other reports say.
+   */
+  private record Reports(
+      Set<String> seenTests, Set<String> passedTests, Map<String, Boolean> golden) {}
+
+  /**
+   * Checks a traceability file.
+   *
+   * @param markdown the text of the traceability file
+   * @param repoRoot the repository root; file evidence paths are relative to it
+   * @param scanRoots directories searched for {@code TEST-*.xml} and {@code golden-audit.tsv}
+   */
+  public static Result check(String markdown, Path repoRoot, List<Path> scanRoots) {
+    List<String> problems = new ArrayList<>();
+    Set<String> exited = new HashSet<>();
+    Map<String, Row> rows = parse(markdown, problems, exited);
+    for (String id : IDS) {
+      if (!rows.containsKey(id)) {
+        problems.add("MISSING_ROW:" + id);
+      }
+    }
+    Reports reports = scan(scanRoots);
+    int closed = 0;
+    int open = 0;
+    for (String id : IDS) {
+      Row row = rows.get(id);
+      if (row == null) {
+        continue;
+      }
+      boolean due = exited.containsAll(row.closesIn());
+      boolean counted = checkEvidence(row, due, repoRoot, reports, problems);
+      if (!due) {
+        open++;
+      } else if (counted) {
+        closed++;
+      } else {
+        problems.add("ROW_WITHOUT_EVIDENCE:" + id);
+      }
+    }
+    return new Result(problems, rows.size(), closed, open);
+  }
+
+  private static Map<String, Row> parse(
+      String markdown, List<String> problems, Set<String> exited) {
+    Map<String, List<String>> closes = new LinkedHashMap<>();
+    Map<String, List<Evidence>> evidence = new LinkedHashMap<>();
+    boolean sawExited = false;
+    int lineNo = 0;
+    for (String raw : markdown.split("\\R", -1)) {
+      lineNo++;
+      String line = raw.strip();
+      Matcher exitedLine = EXITED_LINE.matcher(line);
+      if (exitedLine.matches()) {
+        sawExited = true;
+        readExited(exitedLine.group(1).strip(), problems, exited);
+        continue;
+      }
+      if (!line.startsWith("|")) {
+        continue;
+      }
+      List<String> cells = cells(line);
+      if (cells.get(0).equalsIgnoreCase("row") || isSeparator(cells)) {
+        continue;
+      }
+      String id = cells.get(0);
+      if (cells.size() != COLUMNS
+          || !KINDS.contains(cells.get(2))
+          || !STORES.contains(cells.get(4))
+          || !CIS.contains(cells.get(5))) {
+        problems.add("BAD_LINE:" + lineNo);
+        continue;
+      }
+      if (!IDS.contains(id)) {
+        problems.add("UNKNOWN_ROW:" + id);
+        continue;
+      }
+      List<String> plans = plans(id, cells.get(1), problems);
+      List<String> known = closes.putIfAbsent(id, plans);
+      if (known != null && !known.equals(plans)) {
+        problems.add("CLOSES_IN_MISMATCH:" + id);
+      }
+      evidence
+          .computeIfAbsent(id, k -> new ArrayList<>())
+          .add(new Evidence(cells.get(2), cells.get(3), cells.get(4), cells.get(5), cells.get(6)));
+    }
+    if (!sawExited) {
+      problems.add("NO_EXITED_PLANS");
+    }
+    Map<String, Row> rows = new LinkedHashMap<>();
+    for (Map.Entry<String, List<String>> e : closes.entrySet()) {
+      rows.put(e.getKey(), new Row(e.getKey(), e.getValue(), evidence.get(e.getKey())));
+    }
+    return rows;
+  }
+
+  private static void readExited(String value, List<String> problems, Set<String> exited) {
+    if (value.equals("none")) {
+      return;
+    }
+    for (String plan : value.split(",", -1)) {
+      String p = plan.strip();
+      if (PLAN.matcher(p).matches()) {
+        exited.add(p);
+      } else {
+        problems.add("BAD_PLAN:exited_plans:" + p);
+      }
+    }
+  }
+
+  private static List<String> plans(String id, String cell, List<String> problems) {
+    List<String> plans = new ArrayList<>();
+    for (String plan : cell.split(",", -1)) {
+      String p = plan.strip();
+      if (!PLAN.matcher(p).matches()) {
+        problems.add("BAD_PLAN:" + id + ":" + p);
+      }
+      plans.add(p);
+    }
+    return plans;
+  }
+
+  private static List<String> cells(String line) {
+    String inner = line.substring(1);
+    if (inner.endsWith("|")) {
+      inner = inner.substring(0, inner.length() - 1);
+    }
+    List<String> cells = new ArrayList<>();
+    for (String cell : inner.split("\\|", -1)) {
+      cells.add(cell.strip());
+    }
+    return cells;
+  }
+
+  private static boolean isSeparator(List<String> cells) {
+    return cells.stream().allMatch(c -> SEPARATOR_CELL.matcher(c).matches());
+  }
+
+  /** Reports problems of the cited artefacts and returns whether some evidence counts. */
+  private static boolean checkEvidence(
+      Row row, boolean due, Path repoRoot, Reports reports, List<String> problems) {
+    boolean counted = false;
+    for (Evidence e : row.evidence()) {
+      if (e.kind().equals("NONE")) {
+        continue;
+      }
+      String where = row.id() + ":" + e.ref();
+      Status status =
+          switch (e.kind()) {
+            case "TEST" -> testStatus(e.ref(), reports);
+            case "GOLDEN" -> goldenStatus(e.ref(), reports);
+            default -> fileStatus(e.kind(), e.ref(), repoRoot, where, problems);
+          };
+      switch (status) {
+        case MISSING -> problems.add("ARTEFACT_MISSING:" + where);
+        case NOT_PASSING -> problems.add("NOT_PASSING:" + where);
+        case PENDING -> {
+          if (due) {
+            problems.add("NOT_PASSING:" + where);
+          }
+        }
+        case OWNERLESS, PASS -> {}
+      }
+      boolean interim = REAL_STORE_ONLY.contains(row.id()) && !e.store().equals("REALSTORE");
+      if (status == Status.PASS && !interim) {
+        counted = true;
+      }
+    }
+    return counted;
+  }
+
+  private static Status testStatus(String ref, Reports reports) {
+    int hash = ref.indexOf('#');
+    String key =
+        hash < 0 ? ref : ref.substring(0, hash) + "#" + stripParentheses(ref.substring(hash + 1));
+    if (reports.passedTests().contains(key)) {
+      return Status.PASS;
+    }
+    return reports.seenTests().contains(key) ? Status.NOT_PASSING : Status.MISSING;
+  }
+
+  private static String stripParentheses(String name) {
+    return name.endsWith("()") ? name.substring(0, name.length() - 2) : name;
+  }
+
+  private static Status goldenStatus(String ref, Reports reports) {
+    Boolean counts = reports.golden().get(ref);
+    if (counts == null) {
+      return Status.MISSING;
+    }
+    return counts ? Status.PASS : Status.NOT_PASSING;
+  }
+
+  /** A file artefact passes with a {@code status: PASS} line; a REVIEW file also needs an owner. */
+  private static Status fileStatus(
+      String kind, String ref, Path repoRoot, String where, List<String> problems) {
+    Path base = repoRoot.toAbsolutePath().normalize();
+    Path file = base.resolve(ref).normalize();
+    if (!file.startsWith(base) || !Files.isRegularFile(file)) {
+      return Status.MISSING;
+    }
+    List<String> lines;
+    try {
+      lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+    } catch (IOException e) {
+      return Status.MISSING;
+    }
+    Optional<String> status = Optional.empty();
+    boolean owner = false;
+    for (String raw : lines) {
+      String line = raw.strip();
+      Matcher m = STATUS_LINE.matcher(line);
+      if (status.isEmpty() && m.matches()) {
+        status = Optional.of(m.group(1));
+      }
+      owner |= OWNER_LINE.matcher(line).matches();
+    }
+    boolean ownerMissing = kind.equals("REVIEW") && !owner;
+    if (ownerMissing) {
+      problems.add("NO_OWNER:" + where);
+    }
+    Status result;
+    if (status.isEmpty()) {
+      result = Status.NOT_PASSING;
+    } else if (status.get().equals("PASS")) {
+      result = Status.PASS;
+    } else if (status.get().equals("PENDING")) {
+      result = Status.PENDING;
+    } else {
+      result = Status.NOT_PASSING;
+    }
+    return ownerMissing && result == Status.PASS ? Status.OWNERLESS : result;
+  }
+
+  private static Reports scan(List<Path> scanRoots) {
+    Set<String> seen = new HashSet<>();
+    Set<String> passed = new HashSet<>();
+    Set<String> failed = new HashSet<>();
+    Map<String, Boolean> golden = new LinkedHashMap<>();
+    for (Path root : scanRoots) {
+      try {
+        Files.walkFileTree(
+            root,
+            new SimpleFileVisitor<>() {
+              @Override
+              public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                Path name = dir.getFileName();
+                boolean skipped =
+                    !dir.equals(root)
+                        && name != null
+                        && SKIPPED_DIRECTORIES.contains(name.toString());
+                return skipped ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+              }
+
+              @Override
+              public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                String name = file.getFileName().toString();
+                if (name.startsWith("TEST-") && name.endsWith(".xml")) {
+                  readTestReport(file, seen, passed, failed);
+                } else if (name.equals("golden-audit.tsv")) {
+                  readGoldenAudit(file, golden);
+                }
+                return FileVisitResult.CONTINUE;
+              }
+
+              @Override
+              public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                return FileVisitResult.CONTINUE;
+              }
+            });
+      } catch (IOException e) {
+        // an unreadable scan root yields no evidence, so cited artefacts are reported missing
+      }
+    }
+    return new Reports(seen, passed, golden);
+  }
+
+  /** An unreadable or malformed report yields no test cases, so its tests count as missing. */
+  private static void readTestReport(
+      Path file, Set<String> seen, Set<String> passed, Set<String> failed) {
+    Document doc;
+    try {
+      DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+      factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+      factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+      factory.setXIncludeAware(false);
+      factory.setExpandEntityReferences(false);
+      doc = factory.newDocumentBuilder().parse(file.toFile());
+    } catch (ParserConfigurationException | SAXException | IOException e) {
+      return;
+    }
+    NodeList cases = doc.getElementsByTagName("testcase");
+    for (int i = 0; i < cases.getLength(); i++) {
+      Element testcase = (Element) cases.item(i);
+      String key =
+          testcase.getAttribute("classname")
+              + "#"
+              + stripParentheses(testcase.getAttribute("name"));
+      seen.add(key);
+      if (hasFailureChild(testcase)) {
+        failed.add(key);
+        passed.remove(key);
+      } else if (!failed.contains(key)) {
+        passed.add(key);
+      }
+    }
+  }
+
+  private static boolean hasFailureChild(Element testcase) {
+    for (Node child = testcase.getFirstChild(); child != null; child = child.getNextSibling()) {
+      if (child instanceof Element element) {
+        String tag = element.getTagName();
+        if (tag.equals("failure") || tag.equals("error") || tag.equals("skipped")) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private static void readGoldenAudit(Path file, Map<String, Boolean> golden) {
+    List<String> lines;
+    try {
+      lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+    } catch (IOException e) {
+      return;
+    }
+    for (String line : lines) {
+      String[] cols = line.split("\t", -1);
+      if (cols.length >= 4 && !cols[0].isBlank()) {
+        golden.merge(cols[0], cols[3].equals("true"), Boolean::logicalOr);
+      }
+    }
+  }
+}
