@@ -4,7 +4,13 @@ import dev.regpack.model.BatchId;
 import dev.regpack.model.Checkpoint;
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.IngestKey;
+import dev.regpack.model.Regime;
+import dev.regpack.model.Sha256;
+import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.DecisionId;
+import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.LedgerStore;
 import java.util.ArrayList;
@@ -26,6 +32,11 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   private record StreamKey(String sourceId, String stream) {}
 
+  private record ChainKey(Regime regime, EventIdentity eventIdentity) {}
+
+  private record DecisionKey(
+      EventIdentity eventIdentity, Sha256 decisionContextId, Sha256 inputDigest) {}
+
   private final Clock clock;
   private final Object lock = new Object();
   private final Map<IngestKey, StoredIngest> ingests = new HashMap<>();
@@ -35,6 +46,9 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private final Map<StreamKey, Checkpoint> checkpoints = new HashMap<>();
   private final Map<OutboxId, OutboxItem> outbox = new LinkedHashMap<>();
   private long nextOutboxId = 1;
+  private final Map<ChainKey, List<DecisionRecord>> chains = new HashMap<>();
+  private final Map<DecisionKey, DecisionRecord> decisionsByKey = new HashMap<>();
+  private long nextDecisionId = 1;
 
   /** The clock is the "database clock" for leases (T11). */
   public InMemoryLedgerStore(Clock clock) {
@@ -160,6 +174,99 @@ public final class InMemoryLedgerStore implements LedgerStore {
     Objects.requireNonNull(id, "id");
     synchronized (lock) {
       return Optional.ofNullable(outbox.get(id));
+    }
+  }
+
+  @Override
+  public List<Committed> commitDecisions(BatchCommit commit) {
+    Objects.requireNonNull(commit, "commit");
+    synchronized (lock) {
+      validate(commit);
+      // Work on copies; real state is touched only after every decision has been accepted.
+      Map<ChainKey, List<DecisionRecord>> appended = new LinkedHashMap<>();
+      Map<DecisionKey, DecisionRecord> inserted = new LinkedHashMap<>();
+      long nextId = nextDecisionId;
+      List<Committed> committed = new ArrayList<>();
+      for (NewDecision decision : commit.decisions()) {
+        DecisionBody body = decision.body();
+        DecisionKey decisionKey =
+            new DecisionKey(body.eventIdentity(), body.decisionContextId(), body.inputDigest());
+        DecisionRecord known = inserted.get(decisionKey);
+        if (known == null) {
+          known = decisionsByKey.get(decisionKey);
+        }
+        if (known != null) {
+          committed.add(new Committed(CommitStatus.NOOP_REDELIVERY, known));
+          continue;
+        }
+        ChainKey chainKey = new ChainKey(body.regime(), body.eventIdentity());
+        List<DecisionRecord> chain = chains.getOrDefault(chainKey, List.of());
+        List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
+        long headSeq = chain.size() + added.size();
+        if (decision.expectedHeadSeq() != headSeq) {
+          throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
+        }
+        Optional<DecisionId> supersedes = Optional.empty();
+        if (!added.isEmpty()) {
+          supersedes = Optional.of(added.get(added.size() - 1).decisionId());
+        } else if (!chain.isEmpty()) {
+          supersedes = Optional.of(chain.get(chain.size() - 1).decisionId());
+        }
+        DecisionRecord record =
+            new DecisionRecord(new DecisionId(nextId++), headSeq + 1, supersedes, body);
+        added.add(record);
+        inserted.put(decisionKey, record);
+        committed.add(new Committed(CommitStatus.INSERTED, record));
+      }
+      appended.forEach(
+          (chainKey, added) ->
+              chains.computeIfAbsent(chainKey, k -> new ArrayList<>()).addAll(added));
+      decisionsByKey.putAll(inserted);
+      nextDecisionId = nextId;
+      commit
+          .completesOutbox()
+          .ifPresent(
+              id -> {
+                OutboxItem item = outbox.get(id);
+                outbox.put(id, new OutboxItem(id, item.kind(), item.subjectId(), OutboxState.DONE));
+              });
+      return List.copyOf(committed);
+    }
+  }
+
+  private void validate(BatchCommit commit) {
+    for (NewDecision decision : commit.decisions()) {
+      if (decision.expectedHeadSeq() < 0) {
+        throw new IllegalArgumentException("expectedHeadSeq must be >= 0");
+      }
+    }
+    commit
+        .completesOutbox()
+        .ifPresent(
+            id -> {
+              if (!outbox.containsKey(id)) {
+                throw new IllegalArgumentException("unknown outbox item " + id.value());
+              }
+            });
+  }
+
+  @Override
+  public Optional<DecisionRecord> currentDecision(Regime regime, EventIdentity eventIdentity) {
+    Objects.requireNonNull(regime, "regime");
+    Objects.requireNonNull(eventIdentity, "eventIdentity");
+    synchronized (lock) {
+      List<DecisionRecord> chain =
+          chains.getOrDefault(new ChainKey(regime, eventIdentity), List.of());
+      return chain.isEmpty() ? Optional.empty() : Optional.of(chain.get(chain.size() - 1));
+    }
+  }
+
+  @Override
+  public List<DecisionRecord> decisionChain(Regime regime, EventIdentity eventIdentity) {
+    Objects.requireNonNull(regime, "regime");
+    Objects.requireNonNull(eventIdentity, "eventIdentity");
+    synchronized (lock) {
+      return List.copyOf(chains.getOrDefault(new ChainKey(regime, eventIdentity), List.of()));
     }
   }
 }
