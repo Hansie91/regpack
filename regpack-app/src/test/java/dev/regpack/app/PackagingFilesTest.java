@@ -86,4 +86,38 @@ class PackagingFilesTest {
             "icacls");
     assertThat(smoke).contains("stopped cleanly", "ExitCode", "-Destructive");
   }
+
+  @Test
+  void dockerfileIsPinnedByDigestAndRunsNonRoot() throws IOException {
+    String text = asciiLfText(repoRoot().resolve("packaging/container/Dockerfile"));
+    List<String> lines = List.of(text.split("\n", -1));
+
+    assertThat(lines)
+        .anyMatch(l -> l.matches("FROM eclipse-temurin:25-jre-noble@sha256:[0-9a-f]{64}"));
+    assertThat(lines).contains("USER 10001:10001");
+    assertThat(lines).anyMatch(l -> l.startsWith("ENTRYPOINT [\"java\""));
+    assertThat(text).doesNotContain(":latest");
+  }
+
+  @Test
+  void helmChartDeclaresProbesSingleReplicaAndRecreate() throws IOException {
+    Path chart = repoRoot().resolve("packaging/helm/regpack");
+    String templates =
+        asciiLfText(chart.resolve("templates/deployment.yaml"))
+            + asciiLfText(chart.resolve("templates/service.yaml"));
+
+    assertThat(templates)
+        .contains(
+            "startupProbe:",
+            "livenessProbe:",
+            "readinessProbe:",
+            "path: /health/live",
+            "path: /health/ready",
+            "type: Recreate",
+            "replicas: {{ .Values.replicaCount }}",
+            "automountServiceAccountToken: false");
+    assertThat(asciiLfText(chart.resolve("values.schema.json"))).contains("\"const\": 1");
+    assertThat(List.of(asciiLfText(chart.resolve("values.yaml")).split("\n", -1)))
+        .contains("replicaCount: 1");
+  }
 }
