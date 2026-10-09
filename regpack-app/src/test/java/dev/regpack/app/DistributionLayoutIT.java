@@ -84,14 +84,17 @@ class DistributionLayoutIT {
     Set<String> libs = new HashSet<>();
     names.stream().filter(n -> n.startsWith("lib/")).forEach(libs::add);
     assertThat(libs).isEqualTo(JARS);
-    assertThat(names).contains("bin/regpack", "bin/regpack.cmd", "share/sbom/regpack-bom.json");
+    assertThat(names)
+        .contains(
+            "bin/regpack",
+            "bin/regpack.cmd",
+            "share/sbom/regpack-bom.json",
+            "share/systemd/regpack.service");
+    assertThat(read(distZip(), "share/systemd/regpack.service")).isNotEmpty();
 
-    // T29 and T30 add these; they change the assertion to required.
+    // T30 adds these; it changes the assertion to required.
     List<String> optional =
-        List.of(
-            "share/systemd/regpack.service",
-            "share/windows/install-procrun.ps1",
-            "share/windows/install-service.ps1");
+        List.of("share/windows/install-procrun.ps1", "share/windows/install-service.ps1");
     for (String name : optional) {
       if (names.contains(name)) {
         assertThat(read(distZip(), name)).as(name).isNotEmpty();
