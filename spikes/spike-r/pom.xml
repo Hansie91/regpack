@@ -22,5 +22,9 @@
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-model</artifactId></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-ports</artifactId></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-engine</artifactId></dependency>
+    <dependency><groupId>dev.cel</groupId><artifactId>compiler</artifactId></dependency>
+    <dependency><groupId>dev.cel</groupId><artifactId>runtime</artifactId></dependency>
+    <dependency><groupId>dev.cel</groupId><artifactId>common</artifactId></dependency>
+    <dependency><groupId>dev.cel</groupId><artifactId>protobuf</artifactId></dependency>
   </dependencies>
 </project>

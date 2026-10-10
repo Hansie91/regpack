@@ -21,6 +21,7 @@
 
   <properties>
     <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
+    <cel-java.version>0.14.0</cel-java.version>
     <!-- set by each spike module: the class that the runner jar starts -->
     <spike.mainClass></spike.mainClass>
   </properties>
@@ -28,12 +29,28 @@
   <dependencyManagement>
     <dependencies>
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-bench</artifactId><version>${project.version}</version></dependency>
+      <!-- R2: the cel-java set (approval A-2 covers the two licence spellings below) -->
+      <dependency><groupId>dev.cel</groupId><artifactId>compiler</artifactId><version>${cel-java.version}</version></dependency>
+      <dependency><groupId>dev.cel</groupId><artifactId>runtime</artifactId><version>${cel-java.version}</version></dependency>
+      <dependency><groupId>dev.cel</groupId><artifactId>common</artifactId><version>${cel-java.version}</version></dependency>
+      <dependency><groupId>dev.cel</groupId><artifactId>protobuf</artifactId><version>${cel-java.version}</version></dependency>
     </dependencies>
   </dependencyManagement>
 
   <build>
     <pluginManagement>
       <plugins>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>license-maven-plugin</artifactId>
+          <configuration>
+            <licenseMerges combine.children="append">
+              <!-- approval A-2 (governance/licence-policy.md, 2026-10-10, hans): spike POM only, never the root POM -->
+              <licenseMerge>BSD-3-Clause|Go License</licenseMerge>
+              <licenseMerge>BSD-3-Clause|BSD 3-clause</licenseMerge>
+            </licenseMerges>
+          </configuration>
+        </plugin>
         <plugin>
           <artifactId>maven-dependency-plugin</artifactId>
           <version>${maven-dependency-plugin.version}</version>
@@ -100,6 +117,22 @@
                   <includes>
                     <include>dev.regpack</include>
                     <!-- exact coordinates are added by the task that admits them: R2 the cel-java set, L1 the JDBC driver -->
+                    <!-- R2: the cel-java set, exactly as resolved (P1a plan, task R2) -->
+                    <include>dev.cel:compiler:0.14.0</include>
+                    <include>dev.cel:runtime:0.14.0</include>
+                    <include>dev.cel:common:0.14.0</include>
+                    <include>dev.cel:protobuf:0.14.0</include>
+                    <include>com.google.guava:guava:33.6.0-jre</include>
+                    <include>com.google.guava:failureaccess:1.0.3</include>
+                    <include>com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava</include>
+                    <include>com.google.errorprone:error_prone_annotations:2.47.0</include>
+                    <include>com.google.j2objc:j2objc-annotations:3.1</include>
+                    <include>com.google.protobuf:protobuf-java:4.35.1</include>
+                    <include>com.google.auto.value:auto-value-annotations:1.11.1</include>
+                    <include>org.jspecify:jspecify:1.0.0</include>
+                    <include>org.antlr:antlr4-runtime:4.13.2</include>
+                    <include>com.google.re2j:re2j:1.8</include>
+                    <include>org.threeten:threeten-extra:1.10.0</include>
                   </includes>
                   <message>Spike dependencies must be listed here with exact versions (P1a plan, Approvals)</message>
                 </bannedDependencies>
