@@ -24,7 +24,7 @@ The gate runs as separate Maven task segments after `verify`:
 
 `cyclonedx:makeAggregateBom` writes the SBOM of the whole build to `target/bom.json`. `license:aggregate-add-third-party` fails the build for any dependency whose licence is not on the allow-list or is missing, and writes `target/generated-sources/license/THIRD-PARTY.txt`. The plugin is configured with `<force>true</force>`, so a repeat local run is never skipped as up to date and always re-checks the licences. A dependency whose POM lacks licence data is declared in `governance/THIRD-PARTY.missing.properties`, and only with an approval recorded below.
 
-Owner confirmation: recorded in docs/exit/P0.md (T33)
+Owner confirmation: 2026-10-09, hans. The allow-list above is confirmed; EPL-2.0 applies at test and build time only, and Legal may review it later.
 
 ## Approvals
 

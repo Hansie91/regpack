@@ -9,7 +9,7 @@ Maps requirements R1-R14 and invariants I1-I10 to named evidence. Checked by the
 - `TEST` refs are `fully.qualified.Class#method` (the concrete test class of the adapter's module); renaming a cited test without updating this file fails the gate.
 - The `closes_in` column is a proposal for the owner (invariants follow the spec 14.4 list, requirements follow the section 3 and 16 mapping).
 
-exited_plans: none
+exited_plans: P0
 
 | row | closes_in | kind | ref | store | ci | note |
 |---|---|---|---|---|---|---|
@@ -26,7 +26,7 @@ exited_plans: none
 | R11 | P5 | NONE | - | NA | NA | no evidence yet |
 | R12 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#abaProducesThreeVersions | INMEMORY | BUILD | interim: does not close the row |
 | R13 | P4 | NONE | - | NA | NA | no evidence yet |
-| R14 | P0 | REVIEW | docs/reviews/R14-process-checklist.md | NA | NA | owner sign-off pending |
+| R14 | P0 | REVIEW | docs/reviews/R14-process-checklist.md | NA | NA | owner signed 2026-10-09 |
 | I1 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#beginSendingRequiresCurrentLeaseAndQueuedState | INMEMORY | BUILD | interim: does not close the row |
 | I1 | P3 | TEST | dev.regpack.engine.pipeline.ToyCrashIT#acknowledgementFollowsIngestCommit | INMEMORY | BUILD | interim: does not close the row |
 | I2 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#redeliveredBatchIsNoopAndReturnsOriginalResult | INMEMORY | BUILD | interim: does not close the row |
