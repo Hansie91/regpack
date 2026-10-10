@@ -20,6 +20,9 @@ case "$jdk_first_line" in
   *'version "25'*) ;;
   *) echo "smoke: REGPACK_JAVA_HOME=$JDK is not a Java 25 runtime: $jdk_first_line"; exit 1 ;;
 esac
+# sudo resets JAVA_HOME (see above), so the script's own foreground commands, such as the launcher's
+# smoke run below, must be given the verified JDK too.
+export JAVA_HOME="$JDK"
 
 diagnose() {
   # Printed only when the smoke fails, so a red CI run carries its own evidence.

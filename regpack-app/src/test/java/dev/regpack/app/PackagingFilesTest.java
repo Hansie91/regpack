@@ -78,6 +78,9 @@ class PackagingFilesTest {
     String workflow = Files.readString(repoRoot().resolve(".github/workflows/ci.yml"));
     String readme = Files.readString(repoRoot().resolve("packaging/systemd/README.md"));
     assertThat(smoke).contains("REGPACK_JAVA_HOME", "version \"25");
+    // The script's own foreground commands (the launcher's smoke run) must use the verified JDK
+    // too.
+    assertThat(smoke).contains("export JAVA_HOME=\"$JDK\"");
     assertThat(smoke).doesNotContain("--preserve-env");
     assertThat(workflow).contains("sudo env \"REGPACK_JAVA_HOME=$JAVA_HOME\"");
     assertThat(workflow).doesNotContain("--preserve-env");
