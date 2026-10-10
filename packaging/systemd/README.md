@@ -52,5 +52,9 @@ rmdir /etc/regpack 2>/dev/null || true
 `--destructive`:
 
 ```bash
-sudo --preserve-env=JAVA_HOME bash packaging/systemd/smoke.sh regpack-0.1.0-SNAPSHOT-dist.tar.gz --destructive
+sudo env "REGPACK_JAVA_HOME=/path/to/jdk-25" bash packaging/systemd/smoke.sh regpack-0.1.0-SNAPSHOT-dist.tar.gz --destructive
 ```
+
+The JDK is passed as `REGPACK_JAVA_HOME` through `env`, not as a preserved `JAVA_HOME`: on Ubuntu,
+PAM re-reads `/etc/environment` after sudo and resets `JAVA_HOME` to the image default, which started
+the service on the wrong JVM in the first CI run. The script also refuses a JDK that is not Java 25.

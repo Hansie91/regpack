@@ -66,6 +66,24 @@ class PackagingFilesTest {
     }
   }
 
+  /**
+   * On Ubuntu, sudo runs PAM, which re-reads /etc/environment after --preserve-env and resets
+   * JAVA_HOME to the image default (Java 17 on the CI runner), so the first CI run started the
+   * service on the wrong JVM. The JDK is therefore passed under its own name, through env after
+   * sudo, and the smoke refuses a JDK that is not Java 25.
+   */
+  @Test
+  void systemdSmokePassesAndChecksTheJdkExplicitly() throws IOException {
+    String smoke = asciiLfText(repoRoot().resolve("packaging/systemd/smoke.sh"));
+    String workflow = Files.readString(repoRoot().resolve(".github/workflows/ci.yml"));
+    String readme = Files.readString(repoRoot().resolve("packaging/systemd/README.md"));
+    assertThat(smoke).contains("REGPACK_JAVA_HOME", "version \"25");
+    assertThat(smoke).doesNotContain("--preserve-env");
+    assertThat(workflow).contains("sudo env \"REGPACK_JAVA_HOME=$JAVA_HOME\"");
+    assertThat(workflow).doesNotContain("--preserve-env");
+    assertThat(readme).doesNotContain("--preserve-env");
+  }
+
   @Test
   void systemdUnitHasHardeningAndCleanStopSettings() throws IOException {
     Path unit = repoRoot().resolve("packaging/systemd/regpack.service");

@@ -112,7 +112,7 @@ jobs:
           path: dist
       - name: Install the distribution under systemd and run the smoke
         shell: bash
-        run: sudo --preserve-env=JAVA_HOME bash packaging/systemd/smoke.sh "$(ls dist/regpack-app-*-dist.tar.gz)" --destructive
+        run: sudo env "REGPACK_JAVA_HOME=$JAVA_HOME" bash packaging/systemd/smoke.sh "$(ls dist/regpack-app-*-dist.tar.gz)" --destructive
 
   smoke-windows:
     name: smoke (windows server, service)

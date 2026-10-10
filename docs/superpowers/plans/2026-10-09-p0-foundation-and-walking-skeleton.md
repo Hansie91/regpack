@@ -2536,7 +2536,7 @@ Two aggregator goals run as separate Maven task segments after `verify` (lifecyc
   ```bash
   #!/usr/bin/env bash
   # Smoke run of the regpack distribution as a systemd service (plan P0; spec 5.2 and 14.5).
-  # Usage: sudo --preserve-env=JAVA_HOME bash packaging/systemd/smoke.sh <path to regpack-*-dist.tar.gz> --destructive
+  # Usage: sudo env "REGPACK_JAVA_HOME=/path/to/jdk-25" bash packaging/systemd/smoke.sh <path to regpack-*-dist.tar.gz> --destructive
   set -euo pipefail
 
   DIST="${1:?usage: smoke.sh <dist .tar.gz> --destructive}"
@@ -3162,7 +3162,7 @@ Base image evidence: `eclipse-temurin:25-jre-noble` (Ubuntu 24.04, JRE image, ab
             path: dist
         - name: Install the distribution under systemd and run the smoke
           shell: bash
-          run: sudo --preserve-env=JAVA_HOME bash packaging/systemd/smoke.sh "$(ls dist/regpack-app-*-dist.tar.gz)" --destructive
+          run: sudo env "REGPACK_JAVA_HOME=$JAVA_HOME" bash packaging/systemd/smoke.sh "$(ls dist/regpack-app-*-dist.tar.gz)" --destructive
 
     smoke-windows:
       name: smoke (windows server, service)
@@ -3481,3 +3481,11 @@ This appendix records where the executed P0 differs from the task text above, an
 3. Docker build of the image and the `jdk.httpserver` module check inside the JRE image (T28).
 4. Helm `verify-chart.sh` and the kind smoke (`packaging/helm/smoke.sh`) (T31).
 5. The GitHub workflow itself (T32), which first runs when the repository is pushed (T33).
+
+### C.4 First CI runs (2026-10-10): what they found
+
+Run 1 had both builds and the cross-OS determinism job green; the three runtime smokes had never run before and each failed, as the Task 33 table anticipates. Fixes, each with a test or a diagnostic so the class of error cannot recur silently:
+
+- **Helm lint failed:** `Chart.yaml` had an unquoted description containing `: `, which YAML reads as a nested mapping. Quoted; `PackagingFilesTest#helmYamlPlainValuesDoNotContainAMappingIndicator` now scans unquoted values in the chart YAML.
+- **Windows service smoke** passed install, start, health and the toy pipeline but did not find the clean-stop marker in `service-stdout*.log`. The smoke now searches every `*.log` in the service log folder for the same marker (same strictness) and prints `icacls`, the folder listing and log tails on a miss. Run 2: green.
+- **Linux systemd smoke** started the service on Java 17. Cause: `sudo --preserve-env=JAVA_HOME` does not survive on Ubuntu, because PAM re-reads `/etc/environment` after sudo and resets `JAVA_HOME` to the image default (Java 17 on the runner). The smoke never checked which Java it was given. Fix: the JDK is passed as `REGPACK_JAVA_HOME` through `sudo env ...`, and the smoke refuses any JDK that is not Java 25 (`PackagingFilesTest#systemdSmokePassesAndChecksTheJdkExplicitly`). The failure diagnostics stay in the script.
