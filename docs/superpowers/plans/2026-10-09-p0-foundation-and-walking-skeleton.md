@@ -1432,7 +1432,7 @@ public final class Json {
 }
 public final class JsonException extends RuntimeException { public JsonException(String message); }
 ```
-Rules. Parse: RFC 8259 grammar; an integer literal without fraction or exponent becomes `Long` (out of range is a `JsonException`), any other number becomes `BigDecimal`; the literal `null` is a `JsonException` (explicit absence means the key is omitted; spec 7.4); duplicate keys, leading zeros, `NaN` and trailing characters are `JsonException`; objects parse to a `LinkedHashMap`. Canonical write accepts `Map<String,?>` (keys sorted by `String.compareTo`), `List`, `String`, `Boolean`, `Long`/`Integer`/`Short`/`Byte`, `BigInteger`, `BigDecimal` (written as `stripTrailingZeros().toPlainString()`, zero as `0`), `Instant` (UTC, always six fractional digits: `uuuu-MM-dd'T'HH:mm:ss.SSSSSS'Z'` with `Locale.ROOT`; sub-microsecond nanos are an `IllegalArgumentException`), `LocalDate` (ISO), and any `Enum` (its `name()`); `null`, `Optional`, `Double` and `Float` throw `IllegalArgumentException` (scaled decimals only). Strings escape `"`, `\`, and control characters (`\b \f \n \r \t`, others as `\u00xx` with lowercase hex built from a table); non-ASCII is written as is.
+Rules. Parse: RFC 8259 grammar; an integer literal without fraction or exponent becomes `Long` (out of range is a `JsonException`), any other number becomes `BigDecimal`; the literal `null` is a `JsonException` (explicit absence means the key is omitted; spec 7.4); duplicate keys, leading zeros, `NaN` and trailing characters are `JsonException`; objects parse to a `LinkedHashMap`. Canonical write accepts `Map<String,?>` (keys sorted by `String.compareTo`), `List`, `String`, `Boolean`, `Long`/`Integer`/`Short`/`Byte`, `BigInteger`, `BigDecimal` (written as `stripTrailingZeros().toPlainString()`, zero as `0`), `Instant` (UTC, always six fractional digits: `uuuu-MM-dd'T'HH:mm:ss.SSSSSS'Z'` with `Locale.ROOT`; sub-microsecond nanos are an `IllegalArgumentException`), `LocalDate` (ISO), and any `Enum` (its `name()`); `null`, `Optional`, `Double` and `Float` throw `IllegalArgumentException` (scaled decimals only). Further limits: `abs(scale) <= 1000` is enforced at parse only (a caller-built huge `BigDecimal` is not guarded in `canonical`); lone surrogates in strings are rejected; an `Instant` outside years 0000-9999 is rejected. Strings escape `"`, `\`, and control characters (`\b \f \n \r \t`, others as `\u00xx` with lowercase hex built from a table); non-ASCII is written as is.
 
 - [ ] **Step 1: Write the failing tests** in `JsonTest`:
   - `canonicalOrdersKeysAndStripsDecimals`: `Json.canonical(Json.parse("{\"b\": 1.10, \"a\": \"x\", \"c\": [true, 0.00, 100E-2]}"))` is `{"a":"x","b":1.1,"c":[true,0,1]}`.
@@ -1445,7 +1445,7 @@ Rules. Parse: RFC 8259 grammar; an integer literal without fraction or exponent 
   - `ndjsonSkipsBlankLinesAndReportsLineNumber`: `parseNdjson("{\"a\":1}\n\n{\"a\":2}\n")` has size 2; `parseNdjson("{\"a\":1}\n{bad}\n")` throws `JsonException` whose message contains `line 2`.
 - [ ] **Step 2: Run red.** `scripts/t.sh regpack-model JsonTest`. Expected: `cannot find symbol ... class Json`.
 - [ ] **Step 3: Implement** `Json` as a recursive-descent parser over the string plus a recursive canonical writer (no regex, no `String.format`). `JsonException` declares `serialVersionUID` as Convention 7 requires; `-Xlint:all -Werror` would otherwise fail the first compile (the `serial` category), and every later exception class follows the same rule.
-- [ ] **Step 4: Run green.** Same command. Expected: `Tests run: 11, Failures: 0, Errors: 0, Skipped: 0`.
+- [ ] **Step 4: Run green.** Same command. Expected: `Tests run: 18, Failures: 0, Errors: 0, Skipped: 0`.
 - [ ] **Step 5: Commit.** `./mvnw -B -ntp -q spotless:apply`, `git add -A`, `git commit -m "feat(model): add strict canonical JSON" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"`.
 
 ### Task 6 (T6): Canonical execution and decision types
@@ -1544,7 +1544,7 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
   `InMemoryEvidenceStoreContractTest extends AbstractEvidenceContractTest` returns `new InMemoryEvidenceStore(clock)`, implements `simulateOutage` by delegating to the adapter and `reopen()` by returning the same instance, and adds `declaresTestOnlyGradeAndNoDurabilityClaim` (profile `P-MEMORY`, durability equal to `Durability(false, 0)`).
 - [ ] **Step 2: Run red.** `scripts/t.sh regpack-inmemory 'InMemoryEvidenceStoreContractTest,NoWallClockTest'` and `scripts/t.sh regpack-ports 'EvidenceKeyTest,NoWallClockTest'`. Expected: `cannot find symbol` for `EvidenceStore`, `EvidenceKey`, `InMemoryEvidenceStore`.
 - [ ] **Step 3: Implement** the port types and the adapter: a `TreeMap<String, StoredObject>` guarded by one lock (natural `String` order is UTF-16 code-unit order), `writtenAt` from the injected `Clock`, the grade `("P-MEMORY", "")` and the honest `Durability(false, 0)` (a test double: it survives nothing, so no durability gate may accept it), and one volatile outage flag checked first in every method. The grade string `P-MEMORY` can never be mistaken for P-WORM or P-SEALED.
-- [ ] **Step 4: Run green.** Same commands. Expected: `Tests run: 14` in inmemory (12 contract tests, `declaresTestOnlyGradeAndNoDurabilityClaim` and `NoWallClockTest`) and `Tests run: 4` in ports, all with `Failures: 0, Errors: 0, Skipped: 0`.
+- [ ] **Step 4: Run green.** Same commands. Expected: `Tests run: 14` in inmemory (`InMemoryEvidenceStoreContractTest` runs 13: the 12 contract tests plus the testkit-only `declaresTestOnlyGradeAndNoDurabilityClaim`; `NoWallClockTest` runs 1) and `Tests run: 4` in ports, all with `Failures: 0, Errors: 0, Skipped: 0`.
 - [ ] **Step 5: Commit.** `./mvnw -B -ntp -q spotless:apply`, `git add -A`, `git commit -m "feat(ports): add EvidenceStore port, contract suite and in-memory adapter" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"`.
 
 ### Task 9 (T9): `LedgerStore` part 1: ingest and outbox
@@ -2276,7 +2276,7 @@ File grammar: a line `exited_plans: P0,P1` (or `none`), then a Markdown table `|
   - [ ] The final whole-branch review found no unresolved finding
   - [ ] The owner has read the port contracts and the exit record and signs by changing status to PASS
   ```
-- [ ] **Step 6: Run the gate on the real file.** `./mvnw -B -ntp -q spotless:apply` then `./mvnw -B -ntp verify` (so the reports exist), then in Git Bash `"${REGPACK_JAVA:-java}" -cp regpack-tools/target/classes dev.regpack.tools.Gates traceability --file docs/traceability.md --root . --scan .` (in PowerShell on path A, plain `java -cp ...` works; on path B use Git Bash with `REGPACK_JAVA` set). Expected: `traceability: OK rows=24 closed=0 open=24`. If it reports `ARTEFACT_MISSING` for a cited test, the test name in the file is wrong (fix the file) or the test was not run (run `verify`, not `test`, because `ToyCrashIT` is a failsafe test).
+- [ ] **Step 6: Run the gate on the real file.** Run it after a clean build (`target` directories removed): the check can still count a passing test that exists only in a stale `TEST-*.xml`. `./mvnw -B -ntp -q spotless:apply` then `./mvnw -B -ntp verify` (so the reports exist), then in Git Bash `"${REGPACK_JAVA:-java}" -cp regpack-tools/target/classes dev.regpack.tools.Gates traceability --file docs/traceability.md --root . --scan .` (in PowerShell on path A, plain `java -cp ...` works; on path B use Git Bash with `REGPACK_JAVA` set). Expected: `traceability: OK rows=24 closed=0 open=24`. If it reports `ARTEFACT_MISSING` for a cited test, the test name in the file is wrong (fix the file) or the test was not run (run `verify`, not `test`, because `ToyCrashIT` is a failsafe test).
 - [ ] **Step 7: Commit.** `./mvnw -B -ntp -q spotless:apply`, `git add -A`, `git commit -m "feat(tools): add traceability gate and the spec 14.4 traceability file" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"`.
 
 ### Task 26 (T26): Pin and line-ending gates
@@ -2335,6 +2335,7 @@ Two aggregator goals run as separate Maven task segments after `verify` (lifecyc
     <configuration>
       <acceptPomPackaging>true</acceptPomPackaging>
       <excludedGroups>dev\.regpack</excludedGroups>
+      <force>true</force>
       <failOnMissing>true</failOnMissing>
       <failOnBlacklist>true</failOnBlacklist>
       <includedLicenses>Apache-2.0|EPL-2.0|MIT|BSD-2-Clause|BSD-3-Clause</includedLicenses>
@@ -2350,7 +2351,7 @@ Two aggregator goals run as separate Maven task segments after `verify` (lifecyc
   </plugin>
   ```
 - [ ] **Step 3: Write `governance/licence-policy.md`** (allow-list: Apache-2.0, EPL-2.0 for JUnit at test and build time only, MIT, BSD-2-Clause, BSD-3-Clause; anything else, in particular GPL, AGPL, LGPL, BSL, ELv2, SSPL, Commons Clause, a missing or unknown licence, needs explicit written approval recorded in this file with date and approver before the dependency is added; the rule that the allow-list lives in the root `pom.xml` and this file is its rationale; a line `Owner confirmation: recorded in docs/exit/P0.md (T33)`; and a section "Interim vulnerability handling (until P9b)": Dependabot alerts and security updates are on (T33 step 1); the weekly Dockerfile digest PR is the base-image control; the JDK patch level moves by changing the pinned Temurin version in `toolchain/README.md` and the CI `java-version`; a HIGH or CRITICAL advisory affecting a shipped component is triaged and recorded in `docs/exit/P0.md` before the owner signs P0; the gating scanner, for example OSV-Scanner or Trivy, is chosen in P9b) and an empty `governance/THIRD-PARTY.missing.properties` with a comment header explaining the `groupId--artifactId--version=licence name` format.
-- [ ] **Step 4: Run the gate against the forbidden dependency (green for the gate).** With `javax.activation-api` still in `regpack-testkit/pom.xml`, re-run the Step 1 command. Expected: `BUILD FAILURE` from `license:aggregate-add-third-party` whose message names the artifact's group and artifactId (the exact wording is not fixed by this plan; record it in `docs/exit/P0.md`). If the build instead fails on a licence that should be allowed (a message naming a licence on another dependency), read that dependency's POM; if the licence is one of the five allowed, add its exact name to the matching `licenseMerge`; if it is not allowed, stop and ask the owner. Do not widen `includedLicenses` without recording the approval in `governance/licence-policy.md`. If the license goal prints "All files are up to date, skip goal execution", add `-Dlicense.force=true` (the plugin skips when its output is newer than the inputs). The excluded-group pattern is not anchored: `^dev.regpack$` matched nothing and left the reactor modules reported as "Unknown license".
+- [ ] **Step 4: Run the gate against the forbidden dependency (green for the gate).** With `javax.activation-api` still in `regpack-testkit/pom.xml`, re-run the Step 1 command. Expected: `BUILD FAILURE` from `license:aggregate-add-third-party` whose message names the artifact's group and artifactId (the exact wording is not fixed by this plan; record it in `docs/exit/P0.md`). If the build instead fails on a licence that should be allowed (a message naming a licence on another dependency), read that dependency's POM; if the licence is one of the five allowed, add its exact name to the matching `licenseMerge`; if it is not allowed, stop and ask the owner. Do not widen `includedLicenses` without recording the approval in `governance/licence-policy.md`. The configuration sets `<force>true</force>` so the goal never skips as up to date (the plugin skips when its output is newer than the inputs; no `-Dlicense.force` is needed). The excluded-group pattern is deliberately unanchored: the anchored form `^dev.regpack$` matched nothing and left the reactor modules reported as "Unknown license".
 - [ ] **Step 5: Remove the defect and confirm the clean build.** Remove the `javax.activation-api` dependency again with `git checkout -- regpack-testkit/pom.xml` and re-run the Step 1 command. Expected: `BUILD SUCCESS`; `target/bom.json` exists and its JSON has `"bomFormat"` equal to `CycloneDX`; `target/generated-sources/license/THIRD-PARTY.txt` lists JUnit (EPL-2.0), AssertJ, ByteBuddy, opentest4j and apiguardian and no `dev.regpack` entry.
 - [ ] **Step 6: Commit.** `./mvnw -B -ntp -q spotless:apply`, `git add -A`, `git commit -m "build: add SBOM and licence allow-list gate" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"`.
 
@@ -3409,3 +3410,74 @@ Nothing was downloaded, installed or built to produce this plan. Sources are pri
 5. Whether `windows-2022` should join the Windows matrix leg in addition to `windows-2025` (the plan uses one Windows Server runner).
 6. Whether to run the destructive Windows service smoke (elevated PowerShell, procrun download, `-Destructive`) before pushing. It is recommended only in a disposable Windows VM or Windows Sandbox; otherwise rely on CI.
 
+
+## Appendix C: Execution amendments and notes for later plans (2026-10-09)
+
+This appendix records where the executed P0 differs from the task text above, and what later plans and the owner must pick up. Item ids refer to `.superpowers/minors-and-concerns.md`. Port signatures in "Port contracts for owner review" are unchanged.
+
+### C.1 Plan amendments (what the plan said, what is true now, why)
+
+| Items | Plan said | True now | Why |
+|---|---|---|---|
+| M10, M13 | No stated null convention | Null arguments raise `IllegalArgumentException` in model value types, but `NullPointerException` in `Checkpoint` (`state.clone()`) and `Citation` (`requireNonNull`). Behaviour is not pinned by tests. | Both are accepted under the no-null rule. |
+| M16, M17, M18 | T5 Step 4 expected `Tests run: 11` | The model module has 18 tests. Extra rules in the T5 Rules paragraph: `abs(scale) <= 1000` at parse only, no lone surrogates, `Instant` year 0000-9999. A caller-built huge `BigDecimal` is not guarded in `canonical()`. | Hardening after review. The T9 and T22 ingest tasks carry these bounds in their ledger lines. |
+| M24 | T6 codec maps hold strings | `CanonicalExecutionCodec.toMap` and `bodyToMap` emit `Instant` objects; `fromMap` accepts `String` or `Instant`. `Json.canonical` renders both identically. | Justified deviation. |
+| M32 | T8 Step 4 counts | `InMemoryEvidenceStoreContractTest` runs 13 (12 contract plus 1 testkit-only grade check), `NoWallClockTest` 1, module total 14. | Wording only. |
+| M57 | T12 teeth sanity check | A first sanity attempt looked green, possibly because Maven did not recompile the changed testkit source. Sanity checks that weaken the testkit must run with `-am` (or after `clean`). | Stale compile. |
+| M102 | T20 `GoldenAudit.Row.reviewerId` | It is the empty string when no reviewer is named (the TSV prints `-`). Consumers must not expect the literal `-` or an `Optional`. | Implementation choice. |
+| M114 | T22 `staleVersionIsNotDecided` | The test replays identical content and gets `NOOP_SAME_VERSION_SAME_HASH`, not `STALE`. The assertion (no added decision) is still valid. The name is cited in traceability (Convention 9), so it is not renamed. | Discrepancy recorded. |
+| M123, M124, M125 | T23 `AppConfig` parsing | Only the separate-value form is accepted (`--port 8080`, not `--port=8080`); values are stripped; roles parse case-insensitively with `all` only as the whole value. Launchers in T24, T29 and T30 must not assume otherwise. | Implementation choice. |
+| M135, M137 | T25 gate | `TraceabilityCheck` can still count a passing test that exists only in a stale `TEST-*.xml`. CI always runs the gate after a clean checkout and build; local runs should clean `target` first (T25 Step 6 now says so). | Residual risk. |
+| M143 | T26 Step 4 | Convert any working-tree file the gate flags, including `.mvn/wrapper/maven-wrapper.properties`, with `sed -i 's/\r$//'`. | The wrapper generator writes CRLF there. |
+| M147, M151 | T27 `excludedGroups` | `dev\.regpack` is deliberately unanchored (the anchored form excluded nothing); it also excludes any group id containing `dev.regpack`. Record this as deliberate in `governance/licence-policy.md`. The T27 snippet and Step 4 now show `<force>true</force>` in the plugin configuration instead of a `-Dlicense.force=true` workaround. | Anchored pattern matched nothing. |
+| M148 | Plan correction in commit 7e73a99 | That commit quotes the old pattern as `^dev.regpack$`; it was `^dev\.regpack$` (corrected in T27 Step 4). Also, `cyclonedx:makeAggregateBom` does not run with Maven offline mode (`-o`). | Factual fix. |
+| M152 | T27 red-run failure message | Write the observed failure message to `docs/exit/P0.md` when T33 creates it. | Deferred to T33. |
+| M165 | T31 `packaging/helm/smoke.sh` | The script splits the image at the first and last colon and uses `--set image.tag`; a numeric tag or a registry-port image breaks. Fine for `regpack:ci`; prefer `--set-string` and last-colon-without-slash splitting if the script is touched again. | Plan-verbatim. |
+
+### C.2 Notes for later plans and owner decisions
+
+**P3 (PostgreSQL adapters)**
+
+- M12: `EventIdentity`'s public canonical constructor accepts values such as `|` or `a||b`; only `of(...)` enforces the part rules. An adapter that rebuilds an `EventIdentity` from storage bypasses them. Decide whether to tighten the constructor or require validated decoding. Needed by: before the P3 plan (row decoding).
+- M28, M33: `extendRetention` and `setLegalHold` on a missing key throw a plain `IllegalArgumentException` in the in-memory adapter; the port is silent. Decide between documenting IAE plus a contract test, a dedicated exception, or a no-op, so P-SEALED and P-WORM behave the same. Needed by: owner review of port contracts before P3 starts.
+- M35, M39: `InMemoryLedgerStore.commitIngest` rejects entries whose `key.sourceId` differs from `commit.sourceId`, and a blank `commit.sourceId`. This is stricter than the `IngestLedger` port text and not in the contract. Confirm and state it in the Javadoc with a contract test, or relax it. Needed by: owner review before P3 and P7a.
+- M48, M49, M52: unspecified edge behaviour in the in-memory ledger: `acquire` rejects a blank holder and a non-positive or sub-microsecond ttl; `createDelivery` rejects a blank `businessKey`; `transition` and `beginSending` throw IAE for an unknown `DeliveryId`; `markCommitIssued` returns false for an unknown attempt. Decide the intended behaviour and pin it in the contract. Needed by: P3 hand-off, before the PostgreSQL ledger contract rebind.
+- M50, M51: fence semantics. `currentLease`, `beginSending` and `markCommitIssued` treat the latest unreleased grant as current even after `expiresAt`, safe only because every acquire moves SENDING deliveries to IN_DOUBT. Confirm this (no expiry predicate in the fence update) for PostgreSQL, or choose strict expiry fencing (change `isCurrent` plus a contract test). Needed by: P3 design, before the lease and delivery tables are specified.
+- M82: `KmsSignature` and `WrappedKey` copy defensively, but `equals`, `hashCode` and `toString` compare `byte[]` by identity. Document it or override with `Arrays` variants (no signature change). Needed by: before P3 adapters use these records as map keys or in assertions.
+- M115, M116 (paging part): `recoverPending` reads `pendingOutbox` with `Integer.MAX_VALUE`, and `landingKey` parses `BatchId.value()`. Define the paging bound and a `BatchId` helper. Needed by: P3 for paging (see P7a for the poison policy).
+
+**P4 and P8**
+
+- M63, M68: `DestinationSimulator.pollAcks` advances its cursor past the highest visible position, so an earlier-visible lower-position ack that is not yet visible is lost for good (also reachable when the clock steps back). P0 scenarios cannot trigger it. P8 scenarios must emit acks in `visibleAt` order, or the rule must change to head-of-line; add a Javadoc caveat. Needed by: P8 plan, and P4 clock-step drills.
+
+**P5**
+
+- M83, M84, M85, M86, M87: `ReferenceData.Entry` has an additive invariant (`validTo` after `validFrom`, IAE; NPE on null) that is not in "Port contracts for owner review". `SnapshotId` below 1 and a blank `DatasetId` name are still accepted. Decide whether to add the invariant to the port text and tighten `SnapshotId` and `DatasetId`. Needed by: next owner review of port contracts, before P5.
+
+**P2a**
+
+- M91: `Completed` requires a non-null value and `MeteredExecutor` reports a null program result as `Failed(currentRule, NullPointerException)`. Document in the port Javadoc that `RuleProgram.run` must return non-null. Needed by: P2a plan (interpreter implementer).
+
+**P7a**
+
+- M115, M116 (poison part): a malformed NDJSON line throws from `pump` after landing and before `commitIngest`, so the batch is redelivered forever. Define the poison-batch policy. Needed by: P7a plan (ingest fault taxonomy).
+- M117: `MicroBatchPipeline` is not thread-safe across concurrent `pump` calls on one source. Confirm that the scheduler guarantees one pump per source. Needed by: P7a plan (scheduler).
+- M35, M39: see P3 (also needed before P7a).
+
+**P9b (runbooks, operations, packaging completion)**
+
+- M130: `Main serve` logs to `System.out` instead of the injected `out` stream, and a bind failure escapes `run()` as an `UncheckedIOException` stack trace with exit 1 rather than a one-line error. Decide the exit-code convention for startup failures and use the injected streams. Needed by: P9b runbooks and operations plan.
+- M166: Helm `values.schema.json` has no `additionalProperties: false`, so misspelt keys are accepted silently (`replicaCount` stays const 1). Decide whether to tighten the plan-supplied schema. Needed by: P9b packaging completion.
+
+**Owner decisions before T33 or the P0 exit review**
+
+- M134: `docs/traceability.md` rows R12, I3, I5, I6 carry "interim: does not close the row" although INMEMORY evidence does close them under the rules. Approve rewording (R12: "in-memory contract test"; I3, I5, I6: "in-memory evidence") and keep the interim note only on I1, I2, I9, I10. Needed by: before T33 and the P0 exit review.
+- M162: `smoke.ps1` assumes procrun `--StdOutput=auto` writes `service-stdout*.log`; this is unverified. Check on the owner's disposable VM or on the first CI run and loosen the filter to `*stdout*.log` in plan and script if it differs. Needed by: first run of the T30 smoke on the owner machine, before T33.
+
+### C.3 Runs not executed locally (must run in CI or after owner approval)
+
+1. systemd smoke and `systemd-analyze verify` of the unit file (T29).
+2. Windows procrun smoke and the install scripts, including `-Destructive` (T30); recommended only in a disposable Windows VM or Windows Sandbox, otherwise rely on CI.
+3. Docker build of the image and the `jdk.httpserver` module check inside the JRE image (T28).
+4. Helm `verify-chart.sh` and the kind smoke (`packaging/helm/smoke.sh`) (T31).
+5. The GitHub workflow itself (T32), which first runs when the repository is pushed (T33).
