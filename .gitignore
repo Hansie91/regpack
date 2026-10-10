@@ -14,3 +14,5 @@ dependency-reduced-pom.xml
 *.jks
 *.key
 settings-security.xml
+spikes/inbox/
+results/
