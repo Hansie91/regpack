@@ -1,0 +1,13 @@
+# Placeholder so that the "Run workflow" button exists: GitHub offers workflow_dispatch only for a
+# workflow file that is on the default branch. The real workflow lives on p1a/spikes (P1a, task T8);
+# a later merge of that branch takes its version of this file.
+name: spikes-run
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  stub:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: echo stub
