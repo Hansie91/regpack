@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["replicaCount", "image", "http"],
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "const": 1,
+      "description": "One active replica: a second live sender would breach invariant I9"
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "http": {
+      "type": "object",
+      "properties": {
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "bind": { "type": "string" }
+      }
+    },
+    "roles": { "type": "string" }
+  }
+}

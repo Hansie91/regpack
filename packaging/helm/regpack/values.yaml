@@ -1,0 +1,30 @@
+# One active replica (spec 5.2, invariant I9): enforced by values.schema.json, not by convention.
+replicaCount: 1
+image:
+  repository: regpack
+  tag: ci
+  digest: ""          # sha256:... for releases; overrides the tag
+  pullPolicy: IfNotPresent
+http:
+  port: 8080
+  bind: 0.0.0.0
+roles: all
+terminationGracePeriodSeconds: 30
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+probes:
+  startup:
+    periodSeconds: 2
+    failureThreshold: 30
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
