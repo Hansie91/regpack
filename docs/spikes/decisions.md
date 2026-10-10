@@ -40,7 +40,11 @@ Technical notes of the implementer and the fixer of T3, not owner decisions; the
 
 ## Hand-off channels verified
 
-Written at T8.
+Selftest run [38093544725](https://github.com/Hansie91/regpack/actions/runs/38093544725), 2026-10-10: `spikes-run` `selftest` `smoke`, dispatched by hans (`workflow_dispatch`) from `p1a/spikes` at `2a6247c`, attempt 1. The runs and jobs listings (read without sign-in) show the run and both jobs `success`; the steps of the run job ran in the planned order, `Seal the result directory (last write)` (step 10) followed only by the artefact upload (step 11).
+
+- **Job-summary text channel: worked.** hans pasted the `summary.json` of the run; `bench import --spike SELFTEST --summary-text <file> --dry-run` accepted it (strict parse, criteria digest equal to `docs/spikes/criteria.lock`, spike id matches the registry) and printed `import: OK (dry run) SELFTEST status=PENDING evidence=SUMMARY computed=PASS`. By design this channel is PENDING and can never satisfy a gate; it is not the channel for a verdict. Its `timeBox.usedMinutes` is 0 because `bench publish` does not read the ledger; the importer computes the time from `docs/spikes/timebox/<ID>.tsv`.
+- **Artefact channel: not yet imported.** The artefact `spike-selftest-all-38093544725-1` exists (5,240 bytes, not expired until 2026-11-09, GitHub digest `sha256:5a2d5d209f674f31c3dadff3f271c76c9c42237aac4a724a8d75261537b68515`). Still open: the owner unzips it into `spikes/inbox/38093544725/spike-selftest-all-38093544725-1/` and `BENCH import --spike SELFTEST --dir <that folder> --dry-run` must print `import: OK (dry run) SELFTEST status=PASS evidence=RAW`. No `sp-r` run is dispatched before that passes (the seal and hash check across the CI-to-local path is what RF4 rests on).
+- **Runner (from the `env` block of the pasted summary; `runner.txt` is to be read from the artefact):** GitHub-hosted `ubuntu-24.04`, image `ubuntu24` version `20261004.327.1`, AMD EPYC 7763 (4 vCPU), 16,766,414,848 bytes of memory, kernel `6.17.0-1022-azure`, Eclipse Adoptium Java 25.0.4.1. This closes the P0 gap "runner image names and versions were not captured" once `runner.txt` confirms it.
 
 ## Scope exceptions approved by the owner
 
