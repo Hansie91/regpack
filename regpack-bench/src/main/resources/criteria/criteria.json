@@ -1,0 +1,340 @@
+{
+  "schema": "regpack.bench.criteria/1",
+  "params": {
+    "availableMarginHours": "4",
+    "rtoLimitHours": "4",
+    "recordsPerDay": "50000000",
+    "burstRecordsPerSecond": "3470",
+    "backupIntervalHours": "24"
+  },
+  "boxes": {
+    "HARNESS": "480",
+    "SP-R": "480",
+    "SP-G": "240",
+    "SP-L": "960",
+    "SP-X": "480"
+  },
+  "criteria": [
+    {
+      "id": "R-1a", "spike": "SP-R",
+      "metric": "MUST semantic vectors failed or unsupported, in-house layer",
+      "unit": "vectors", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 6.2, I3 (vectors from the spec text)",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED", "group": "layer:inhouse"
+    },
+    {
+      "id": "R-1b", "spike": "SP-R",
+      "metric": "MUST semantic vectors failed or unsupported, cel-java layer",
+      "unit": "vectors", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 6.2, I3 (vectors from the spec text)",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED", "group": "layer:cel"
+    },
+    {
+      "id": "R-2a", "spike": "SP-R",
+      "metric": "Records/s per thread, 4 threads busy, worst-case shape S2 (every row of a 200-rule pack evaluated), in-house layer",
+      "unit": "records/s per thread", "direction": "AT_LEAST", "threshold": "10000",
+      "source": "SPEC 6.6; shape and per-vCPU reading PLAN (Q3)",
+      "required": true, "noisy": true, "resources": ["CPU", "MEMORY"], "minRuns": "0",
+      "basis": "MEASURED", "group": "layer:inhouse"
+    },
+    {
+      "id": "R-2b", "spike": "SP-R",
+      "metric": "Records/s per thread, 4 threads busy, worst-case shape S2 (every row of a 200-rule pack evaluated), cel-java layer",
+      "unit": "records/s per thread", "direction": "AT_LEAST", "threshold": "10000",
+      "source": "SPEC 6.6; shape and per-vCPU reading PLAN (Q3)",
+      "required": true, "noisy": true, "resources": ["CPU", "MEMORY"], "minRuns": "0",
+      "basis": "MEASURED", "group": "layer:cel"
+    },
+    {
+      "id": "R-3", "spike": "SP-R",
+      "metric": "One-thread S2 rate at 200 rules; microseconds per record at 50, 500 and 5,000 rules, per layer",
+      "unit": "records/s, microseconds per record", "direction": "MEASURED_ONLY",
+      "source": "PLAN",
+      "required": false, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "R-4", "spike": "SP-R",
+      "metric": "Tier-1 explain render p99 (L-9 gets 900; together 1 s)",
+      "unit": "ms", "direction": "AT_MOST", "threshold": "100",
+      "source": "SPEC 6.6; split PLAN",
+      "required": true, "noisy": true, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "R-5", "spike": "SP-R",
+      "metric": "Hot swap: batches that saw two packs plus lost records (activation time p99 is recorded only)",
+      "unit": "batches and records", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 6.5 step 6",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "R-6a", "spike": "SP-R",
+      "metric": "Runs whose cost units differ over 1,000 repeats of one input, in-house layer",
+      "unit": "runs", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 6.6, 14.1",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED", "group": "layer:inhouse"
+    },
+    {
+      "id": "R-6b", "spike": "SP-R",
+      "metric": "Runs whose cost units differ over 1,000 repeats of one input, cel-java layer",
+      "unit": "runs", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 6.6, 14.1",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED", "group": "layer:cel"
+    },
+    {
+      "id": "R-7", "spike": "SP-R",
+      "metric": "Per-record budget and poison-circuit (N, M) defaults: consistency violations (values are recorded)",
+      "unit": "violations", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 6.6, 7.3; formulas PLAN",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MODELLED"
+    },
+    {
+      "id": "R-8", "spike": "SP-R",
+      "metric": "Differential disagreements: in-house against the P0 skeleton rules (4 rules, must be 0), and layer against layer on a 100,000-record sample (informational)",
+      "unit": "disagreements", "direction": "AT_MOST", "threshold": "0",
+      "source": "PLAN",
+      "required": false, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "G-1", "spike": "SP-G",
+      "metric": "The six EMIR action types encoded in the pack format",
+      "unit": "action types", "direction": "AT_LEAST", "threshold": "6",
+      "source": "SPEC 16 SP-G",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DOCUMENT"
+    },
+    {
+      "id": "G-2", "spike": "SP-G",
+      "metric": "Register rows OPEN or PROPOSED (not dispositioned by the owner); INCONCLUSIVE until then",
+      "unit": "rows", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 16 SP-G",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "1",
+      "basis": "DOCUMENT"
+    },
+    {
+      "id": "G-3", "spike": "SP-G",
+      "metric": "Register rows UNFIXABLE (a redesign, not a format fix)",
+      "unit": "rows", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 16 SP-G",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DOCUMENT"
+    },
+    {
+      "id": "G-4", "spike": "SP-G",
+      "metric": "Decision chains of one execution under two regimes coexist on the P0 in-memory ledger and the modelled (regime, event_identity, leg) report_subject keys behave regime-scoped: failures (the SQL-level form is L-12)",
+      "unit": "failures", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 16 SP-G, 10",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "L-1", "spike": "SP-L",
+      "metric": "Open-loop runs at 3,470 records/s with a live synchronous standby that fail to sustain it",
+      "unit": "runs", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 5.6, D6",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "2",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "L-2", "spike": "SP-L",
+      "metric": "Synchronous micro-batch commit p99 per 60 s window at the reference N",
+      "unit": "ms", "direction": "AT_MOST", "threshold": "1000",
+      "source": "PLAN",
+      "required": true, "noisy": true, "resources": ["CPU", "DISK"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "L-3", "spike": "SP-L",
+      "metric": "Closed-loop capacity, same configuration",
+      "unit": "records/s", "direction": "AT_LEAST", "threshold": "3470",
+      "source": "SPEC 5.6",
+      "required": true, "noisy": true, "resources": ["CPU", "DISK"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "L-4", "spike": "SP-L",
+      "metric": "Run B (primary memory-limited to the day's table-to-memory ratio): failed runs",
+      "unit": "runs", "direction": "AT_MOST", "threshold": "0",
+      "source": "PLAN (RF14)",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "2",
+      "basis": "EXTRAPOLATED"
+    },
+    {
+      "id": "L-5", "spike": "SP-L",
+      "metric": "Bytes per decision row with indexes",
+      "unit": "bytes", "direction": "AT_MOST", "threshold": "500",
+      "source": "SPEC 5.6",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "L-6", "spike": "SP-L",
+      "metric": "Restore RTO (backup restore plus gap replay), cold cache, fsync on, at 10M keys, projected from at least 3 measured sizes; fewer sizes is NOT_RUN",
+      "unit": "hours", "direction": "AT_MOST", "threshold": "4",
+      "source": "PLAN from SPEC 11.4",
+      "required": true, "noisy": true, "resources": ["CPU", "DISK"], "minRuns": "0",
+      "basis": "EXTRAPOLATED"
+    },
+    {
+      "id": "L-7", "spike": "SP-L",
+      "metric": "Restore RTO as L-6 at 100M keys, with the physical floor",
+      "unit": "hours", "direction": "AT_MOST", "threshold": "4",
+      "source": "PLAN from SPEC 11.4",
+      "required": true, "noisy": true, "resources": ["CPU", "DISK"], "minRuns": "0",
+      "basis": "EXTRAPOLATED"
+    },
+    {
+      "id": "L-8", "spike": "SP-L",
+      "metric": "Full rebuild from evidence: seconds per million keys at the measured sizes, projected hours at 10M and 100M",
+      "unit": "seconds per million keys, hours", "direction": "MEASURED_ONLY",
+      "source": "SPEC 11.4, I10",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "EXTRAPOLATED"
+    },
+    {
+      "id": "L-9", "spike": "SP-L",
+      "metric": "Primary-key fetch of a decision under the burst, p99 (with R-4: 1 s)",
+      "unit": "ms", "direction": "AT_MOST", "threshold": "900",
+      "source": "PLAN (with R-4: 1 s)",
+      "required": true, "noisy": true, "resources": ["CPU", "DISK"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "L-10", "spike": "SP-L",
+      "metric": "Decision lookup p99 with 1,826 daily partitions; monthly granularity beside it",
+      "unit": "ms", "direction": "AT_MOST", "threshold": "50",
+      "source": "PLAN",
+      "required": true, "noisy": true, "resources": ["CPU", "DISK"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "L-11", "spike": "SP-L",
+      "metric": "Class (b) seq counter row, synchronous commit, best writer count (10 times 9.94/s = 3,470 records/s / 500 reports per file + 3 other events/s; the 500 and the 3 are planning assumptions)",
+      "unit": "events/s", "direction": "AT_LEAST", "threshold": "100",
+      "source": "PLAN; SPEC 11.2",
+      "required": true, "noisy": true, "resources": ["CPU", "DISK"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "L-12", "spike": "SP-L",
+      "metric": "SQL-level constraint checks that fail (names of the P0 contract tests, L1)",
+      "unit": "checks", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC 6.3, 10, 14.1",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "L-13", "spike": "SP-L",
+      "metric": "Samples without a sync or quorum streaming standby during measured runs",
+      "unit": "samples", "direction": "AT_MOST", "threshold": "0",
+      "source": "SPEC I1, 5.6",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "L-14", "spike": "SP-L",
+      "metric": "Ledger bytes per day by table; evidence objects per day and PUT/s at journal granularity; micro-batch N knee and commit p99 at N; decision_head growth",
+      "unit": "bytes, objects, ms", "direction": "MEASURED_ONLY",
+      "source": "SPEC 5.6, 7.8, 11.2",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MODELLED"
+    },
+    {
+      "id": "L-15", "spike": "SP-L",
+      "metric": "Replay lag and cancelled queries of replica and synchronous standby under console load",
+      "unit": "seconds, queries", "direction": "MEASURED_ONLY",
+      "source": "SPEC 16 SP-L",
+      "required": false, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MEASURED",
+      "consequenceIfNotRun": "reading from the synchronous standby remains not allowed (spec 12.1)"
+    },
+    {
+      "id": "X-1a", "spike": "SP-X",
+      "metric": "Integrated 4-thread assemble stage (writer, per-record XSD under policy ALL, file write, SHA-256, whole-file gate; rate over whole file cycles)",
+      "unit": "records/s", "direction": "AT_LEAST", "threshold": "3472",
+      "source": "SPEC 16 SP-X; margin 4 h PLAN (Q1)",
+      "required": true, "noisy": true, "resources": ["CPU", "MEMORY"], "minRuns": "0",
+      "basis": "MEASURED", "group": "policy:ALL"
+    },
+    {
+      "id": "X-1b", "spike": "SP-X",
+      "metric": "Integrated 4-thread assemble stage as X-1a under policy SAMPLED_10",
+      "unit": "records/s", "direction": "AT_LEAST", "threshold": "3472",
+      "source": "SPEC 16 SP-X; margin 4 h PLAN (Q1)",
+      "required": true, "noisy": true, "resources": ["CPU", "MEMORY"], "minRuns": "0",
+      "basis": "MEASURED", "group": "policy:S10"
+    },
+    {
+      "id": "X-2a", "spike": "SP-X",
+      "metric": "Modelled capacity at defect rates 0, 0.1% and 1% including bisect cost, policy ALL",
+      "unit": "records/s", "direction": "AT_LEAST", "threshold": "3472",
+      "source": "SPEC 8.2, 16 SP-X",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED", "group": "policy:ALL"
+    },
+    {
+      "id": "X-2b", "spike": "SP-X",
+      "metric": "Modelled capacity at defect rates 0, 0.1% and 1% including bisect cost, policy SAMPLED_10",
+      "unit": "records/s", "direction": "AT_LEAST", "threshold": "3472",
+      "source": "SPEC 8.2, 16 SP-X",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED", "group": "policy:S10"
+    },
+    {
+      "id": "X-3", "spike": "SP-X",
+      "metric": "Model against the integrated ALL run, relative deviation at defect rate 0",
+      "unit": "relative deviation", "direction": "AT_MOST", "threshold": "0.15",
+      "source": "PLAN",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED", "group": "policy:S10"
+    },
+    {
+      "id": "X-4", "spike": "SP-X",
+      "metric": "Writer MB/s and records/s; per-record XSD microseconds; whole-file gate seconds for 100,000 records (1 and 4 threads); bisect validations; stage latency for 1,000, 5,000, 25,000 and 100,000 records",
+      "unit": "MB/s, records/s, microseconds, seconds, ms", "direction": "MEASURED_ONLY",
+      "source": "SPEC 16 SP-X, 5.6",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MEASURED"
+    },
+    {
+      "id": "X-5", "spike": "SP-X",
+      "metric": "A self-authored XSD 1.1 construct is rejected by the JDK validator",
+      "unit": "constructs", "direction": "AT_LEAST", "threshold": "1",
+      "source": "SPEC 5.3",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "X-6", "spike": "SP-X",
+      "metric": "Synthetic-schema shape statistics outside their declared targets",
+      "unit": "statistics", "direction": "AT_MOST", "threshold": "0",
+      "source": "PLAN (RF9)",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "ST-1", "spike": "HARNESS",
+      "metric": "Self-test count criterion",
+      "unit": "count", "direction": "AT_MOST", "threshold": "0",
+      "source": "HARNESS self-test",
+      "required": true, "noisy": false, "resources": ["CPU"], "minRuns": "0",
+      "basis": "DERIVED"
+    },
+    {
+      "id": "ST-2", "spike": "HARNESS",
+      "metric": "Self-test fork series",
+      "unit": "units/s", "direction": "AT_LEAST", "threshold": "1",
+      "source": "HARNESS self-test",
+      "required": true, "noisy": true, "resources": ["CPU"], "minRuns": "0",
+      "basis": "MEASURED"
+    }
+  ]
+}
