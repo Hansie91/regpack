@@ -1,6 +1,6 @@
 apiVersion: v2
 name: regpack
-description: regpack walking skeleton (plan P0): one active replica with health probes
+description: "regpack walking skeleton (plan P0): one active replica with health probes"
 type: application
 version: 0.1.0
 appVersion: "0.1.0-SNAPSHOT"

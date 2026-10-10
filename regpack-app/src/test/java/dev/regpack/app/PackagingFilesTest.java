@@ -35,6 +35,37 @@ class PackagingFilesTest {
     }
   }
 
+  /**
+   * A plain (unquoted) YAML value that contains ": " is read as a nested mapping and breaks the
+   * chart, as the first CI run showed for Chart.yaml. Helm lint is the authority; this catches the
+   * mistake before CI.
+   */
+  @Test
+  void helmYamlPlainValuesDoNotContainAMappingIndicator() throws IOException {
+    for (String relative :
+        List.of("packaging/helm/regpack/Chart.yaml", "packaging/helm/regpack/values.yaml")) {
+      List<String> lines = Files.readAllLines(repoRoot().resolve(relative), StandardCharsets.UTF_8);
+      for (int i = 0; i < lines.size(); i++) {
+        String stripped = lines.get(i).strip();
+        int indicator = stripped.indexOf(": ");
+        if (stripped.isEmpty() || stripped.startsWith("#") || indicator < 0) {
+          continue;
+        }
+        String value = stripped.substring(indicator + 2).strip();
+        int comment = value.indexOf(" #");
+        if (comment >= 0) {
+          value = value.substring(0, comment).strip();
+        }
+        if (value.isEmpty() || "\"'[{|>".indexOf(value.charAt(0)) >= 0) {
+          continue;
+        }
+        assertThat(value)
+            .as("%s line %d: an unquoted value must not contain \": \"", relative, i + 1)
+            .doesNotContain(": ");
+      }
+    }
+  }
+
   @Test
   void systemdUnitHasHardeningAndCleanStopSettings() throws IOException {
     Path unit = repoRoot().resolve("packaging/systemd/regpack.service");

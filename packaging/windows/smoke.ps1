@@ -57,9 +57,22 @@ try {
   $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name='$name'"
   if ($svc.State -ne 'Stopped') { throw "service state is $($svc.State), expected Stopped" }
   if ($svc.ExitCode -ne 0) { throw "service ExitCode is $($svc.ExitCode), expected 0" }
-  $marker = Get-ChildItem -Path (Join-Path $AppHome 'logs') -Filter 'service-stdout*.log' |
-    Get-Content | Select-String -SimpleMatch 'regpack lifecycle: stopped cleanly'
-  if (-not $marker) { throw 'no clean-stop marker in the service log' }
+  # The marker must be in a log written by the service itself. Every *.log in the service log folder
+  # counts, because procrun's stdout file name is not fixed by anything we control.
+  $logs = Join-Path $AppHome 'logs'
+  $logFiles = @(Get-ChildItem -Path $logs -Filter '*.log' -ErrorAction SilentlyContinue)
+  $marker = $logFiles | Get-Content -ErrorAction SilentlyContinue |
+    Select-String -SimpleMatch 'regpack lifecycle: stopped cleanly'
+  if (-not $marker) {
+    Write-Host '--- smoke diagnostics: service log folder'
+    icacls $logs | Write-Host
+    Get-ChildItem -Path $logs -Force | Format-Table Name, Length, LastWriteTime | Out-String | Write-Host
+    foreach ($f in $logFiles) {
+      Write-Host "--- last 40 lines of $($f.Name)"
+      Get-Content -Path $f.FullName -Tail 40 | Write-Host
+    }
+    throw 'no clean-stop marker in the service log'
+  }
   Write-Host 'smoke: windows service OK'
 }
 finally {

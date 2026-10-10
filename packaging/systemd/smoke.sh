@@ -13,6 +13,21 @@ UNIT=/etc/systemd/system/regpack.service
 [ "${2:-}" = "--destructive" ] || { echo "smoke: this script deletes ${APP_HOME}, /etc/regpack/regpack.env and ${UNIT}; pass --destructive as the second argument on a disposable host"; exit 1; }
 : "${JAVA_HOME:?JAVA_HOME must point at a JDK 25 (preserve it through sudo)}"
 
+diagnose() {
+  # Printed only when the smoke fails, so a red CI run carries its own evidence.
+  echo "=== smoke diagnostics ==="
+  echo "-- JAVA_HOME=${JAVA_HOME}"
+  ls -ld "$JAVA_HOME" "$JAVA_HOME/bin/java" 2>&1 || true
+  "$JAVA_HOME/bin/java" -version 2>&1 || true
+  echo "-- default java on PATH: $(readlink -f "$(command -v java)" 2>&1 || true)"
+  echo "-- /etc/regpack/regpack.env:"; cat /etc/regpack/regpack.env 2>&1 || true
+  echo "-- unit properties:"
+  systemctl show regpack -p Environment -p EnvironmentFiles -p ExecMainStatus -p Result 2>&1 || true
+  echo "-- the same sandbox run by hand:"
+  systemd-run --quiet --wait --collect --pipe -p DynamicUser=yes -p ProtectSystem=strict -p ProtectHome=yes \
+    -p EnvironmentFile=/etc/regpack/regpack.env /bin/sh -c 'echo "JAVA_HOME=$JAVA_HOME"; "$JAVA_HOME/bin/java" -version' 2>&1 || true
+}
+
 cleanup() {
   systemctl stop regpack >/dev/null 2>&1 || true
   rm -f "$UNIT" /etc/regpack/regpack.env
@@ -40,7 +55,7 @@ for _ in $(seq 1 60); do
   if curl -fsS "http://127.0.0.1:${PORT}/health/ready" >/dev/null 2>&1; then ready=yes; break; fi
   sleep 1
 done
-[ "$ready" = yes ] || { journalctl -u regpack --no-pager | tail -50; echo "smoke: not ready after 60 s"; exit 1; }
+[ "$ready" = yes ] || { journalctl -u regpack --no-pager | tail -50; diagnose; echo "smoke: not ready after 60 s"; exit 1; }
 
 # 3. the toy pipeline from the installed build, plus the health assertions
 "$APP_HOME/bin/regpack" smoke --health-url "http://127.0.0.1:${PORT}"
