@@ -340,6 +340,16 @@ public final class CelJavaExpression implements Expression {
       return nodeCount;
     }
 
+    /**
+     * An upper bound of the units one evaluation can charge: the node count plus, for every
+     * variable the expression materialises, the larger of the longest list and the most 256-code
+     * point units of the longest string.
+     */
+    public long staticWorstCaseUnits(int maxListItems, int maxStringCodePoints) {
+      long perBinding = Math.max(maxListItems, maxStringCodePoints / 256L);
+      return nodeCount + (paths.chains().size() + paths.bare().size()) * perBinding;
+    }
+
     @Override
     public Value evaluate(Bindings bindings, CostMeter meter) {
       meter.charge(nodeCount);

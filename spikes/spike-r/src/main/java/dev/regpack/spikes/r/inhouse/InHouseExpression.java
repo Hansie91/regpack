@@ -69,6 +69,15 @@ public final class InHouseExpression implements Expression {
       return parsed.nodeCount();
     }
 
+    /**
+     * An upper bound of the units one evaluation can charge when no bound list holds more than
+     * {@code maxListItems} items and no bound string more than {@code maxStringCodePoints} code
+     * points: the node count plus every size surcharge, whether or not a branch is taken.
+     */
+    public long staticWorstCaseUnits(int maxListItems, int maxStringCodePoints) {
+      return StaticCost.of(parsed.root(), maxListItems, maxStringCodePoints);
+    }
+
     @Override
     public Value evaluate(Bindings bindings, CostMeter meter) {
       return Evaluator.eval(parsed.root(), bindings, meter);
