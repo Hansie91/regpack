@@ -1,0 +1,146 @@
+name: spikes-run
+run-name: spikes-run ${{ inputs.spike }} ${{ inputs.profile }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      spike:
+        description: 'Spike to run'
+        type: choice
+        required: true
+        options: [selftest, sp-r, sp-l, sp-x]
+      profile:
+        description: 'smoke: pipeline check, never a verdict; full: the measurement'
+        type: choice
+        required: true
+        default: smoke
+        options: [smoke, full]
+      confirm_downloads:
+        description: 'Approval A-1: sp-l pulls postgres:18.6-trixie by digest on the runner'
+        type: boolean
+        required: true
+        default: false
+      stretch:
+        description: 'Also run the STRETCH parts'
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 'spikes-run-${{ inputs.spike }}'
+  cancel-in-progress: false
+
+env:
+  MAVEN_ARGS: -B -ntp --strict-checksums
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Build the matrix and check the download approval
+        id: matrix
+        shell: bash
+        env:
+          SPIKE: ${{ inputs.spike }}
+          CONFIRM: ${{ inputs.confirm_downloads }}
+        run: |
+          set -euo pipefail
+          # deadline = timeout - 25 minutes, so the spike stops itself before the job is killed
+          case "$SPIKE" in
+            selftest) matrix='{"include":[{"spike":"selftest","part":"all","timeout":30,"deadline":5,"pg":"false"}]}' ;;
+            sp-r) matrix='{"include":[{"spike":"sp-r","part":"all","timeout":345,"deadline":320,"pg":"false"}]}' ;;
+            sp-x) matrix='{"include":[{"spike":"sp-x","part":"all","timeout":300,"deadline":275,"pg":"false"}]}' ;;
+            sp-l) matrix='{"include":[{"spike":"sp-l","part":"ingest","timeout":330,"deadline":305,"pg":"true"},{"spike":"sp-l","part":"restore","timeout":330,"deadline":305,"pg":"true"},{"spike":"sp-l","part":"misc","timeout":240,"deadline":215,"pg":"true"}]}' ;;
+            *) echo "unknown spike: $SPIKE"; exit 1 ;;
+          esac
+          case "$matrix" in
+            *'"pg":"true"'*)
+              if [ "$CONFIRM" != "true" ]; then
+                echo "Spike $SPIKE pulls a container image; tick confirm_downloads (approval A-1) to run it."
+                exit 1
+              fi
+              ;;
+          esac
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  run:
+    name: run (${{ matrix.spike }} ${{ matrix.part }})
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      SPIKE: ${{ matrix.spike }}
+      PART: ${{ matrix.part }}
+      PG: ${{ matrix.pg }}
+      DEADLINE: ${{ matrix.deadline }}
+      PROFILE: ${{ inputs.profile }}
+      STRETCH: ${{ inputs.stretch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Capture the runner
+        shell: bash
+        run: bash spikes/scripts/runner-capture.sh "results/$SPIKE-$PART"
+      - name: Build the harness and the spike, run their tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mvnw -DskipTests -Dspotless.check.skip=true install
+          if [ "$SPIKE" != "selftest" ]; then
+            ./mvnw -f spikes/pom.xml -pl "spike-${SPIKE#sp-}" -am verify
+          fi
+      - name: Start PostgreSQL
+        if: matrix.pg == 'true'
+        shell: bash
+        run: bash spikes/scripts/pg-up.sh "sp-l-$PART"
+      - name: Integration tests
+        if: ${{ !cancelled() && matrix.pg == 'true' && inputs.profile == 'smoke' }}
+        shell: bash
+        run: bash spikes/scripts/it-pg.sh "$PART"
+      - name: Run the spike
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="results/$SPIKE-$PART"
+          if [ "$SPIKE" = "selftest" ]; then
+            bash scripts/bench.sh selftest --out "$OUT"
+          else
+            M="spike-${SPIKE#sp-}"
+            JOPTS=()
+            if [ "$PG" = "true" ]; then
+              JOPTS+=("-Dspike.pg.url=jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres")
+            fi
+            java ${JOPTS[@]+"${JOPTS[@]}"} -jar "spikes/$M/target/$M-0.1.0-SNAPSHOT.jar" run --profile "$PROFILE" --part "$PART" --stretch "$STRETCH" --deadline-minutes "$DEADLINE" --out "$OUT"
+          fi
+      - name: Stop PostgreSQL and collect its logs
+        if: ${{ always() && matrix.pg == 'true' }}
+        shell: bash
+        run: bash spikes/scripts/pg-down.sh "results/$SPIKE-$PART"
+      - name: Seal the result directory (last write)
+        if: always()
+        shell: bash
+        run: bash scripts/bench.sh publish --dir "results/$SPIKE-$PART" --os ubuntu-24.04
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: spike-${{ matrix.spike }}-${{ matrix.part }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: results/${{ matrix.spike }}-${{ matrix.part }}
+          retention-days: 30
+          if-no-files-found: error
