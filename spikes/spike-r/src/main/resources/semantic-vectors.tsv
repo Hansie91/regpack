@@ -1,0 +1,47 @@
+D01	MUST	dec('0.1') + dec('0.2') == dec('0.3')	{}	T		
+D02	MUST	dec('1.10') == dec('1.1')	{}	T		
+D03	MUST	round(dec('2.5'), 0, 'HALF_EVEN') == dec('2')	{}	T		
+D04	MUST	round(dec('2.5'), 0, 'HALF_UP') == dec('3')	{}	T		
+D05	MUST	round(dec('1.005'), 2, 'HALF_UP') == dec('1.01')	{}	T		
+D06	MUST	dec('1234.5') / dec('100') == dec('12.345')	{}	T		
+D07	MUST	dec('1') / dec('3')	{}	ERR:NON_TERMINATING		
+D08	MUST	dec('1') / dec('0')	{}	ERR:DIV_ZERO		
+D09	MUST	string(dec('12.50'))	{}	s:12.5		
+D10	MUST	dec('0.30') < dec('0.4')	{}	T		
+D11	MUST	dec('1e5000')	{}	ERR:SCALE		
+D12	MUST	0.1 + 0.2 == 0.3	{}	ONEOF:T|COMPILE_ERROR		
+D13	DECIDE	1 + dec('0.5') == dec('1.5')	{}	T		
+T01	MUST	timestamp('2026-10-09T09:30:00.123456Z') < timestamp('2026-10-09T09:30:00.123457Z')	{}	T		
+T02	MUST	isoMicros(timestamp('2026-10-09T09:30:00Z')) == '2026-10-09T09:30:00.000000Z'	{}	T		
+T03	MUST	isoMicros(timestamp('2026-10-09T09:30:00.123456789Z'))	{}	ERR:RANGE		
+T04	MUST	isoMicros(timestamp('2026-10-09T11:30:00+02:00')) == '2026-10-09T09:30:00.000000Z'	{}	T		
+T05	MUST	date('2026-02-29')	{}	ERR:PARSE		
+T06	MUST	dayOfWeek(date('2026-10-09')) == 'FRIDAY'	{}	T		
+T07	MUST	upper('title') == 'TITLE'	{}	T		
+T08	MUST	timestamp('2026-10-09T09:30:00')	{}	ONEOF:ERR:PARSE|COMPILE_ERROR		
+A01	MUST	has(event.venue)	{}	F		
+A02	MUST	event.venue == 'XPAR'	{}	ERR:ABSENT		
+A03	MUST	has(event.venue) && event.venue == 'XPAR'	{}	F		
+A04	DECIDE	event.venue == 'XPAR' && has(event.venue)	{}	ERR:ABSENT		
+A05	MUST	event.venue == null	{"event.venue":"s:XPAR"}	ONEOF:COMPILE_ERROR|ERR		
+A06	MUST	has(client.lei)	{"client.kind":"s:NATURAL_PERSON"}	F		
+A07	DECIDE	has(client.parent.lei)	{"client.kind":"s:NATURAL_PERSON"}	F		
+A08	MUST	has(event.venue) ? event.venue : 'NONE'	{}	s:NONE		
+E01	MUST	9223372036854775807 + 1	{}	ERR:OVERFLOW		
+E02	MUST	1 / 0	{}	ERR:DIV_ZERO		
+E03	MUST	int('abc')	{}	ERR:PARSE		
+E04	MUST	1 < 'a'	{}	ONEOF:COMPILE_ERROR|ERR:TYPE		
+E05	SHOULD	true || (1 / 0 == 1)	{}	T		
+E06	DECIDE	(1 / 0 == 1) || true	{}	ERR:DIV_ZERO		
+S01	MUST	size('é') == 1	{}	T		
+S02	MUST	size('😀') == 1	{}	T		
+S03	MUST	'DEAL' in ['DEAL', 'MTCH', 'AOTC']	{}	T		
+S04	MUST	'A' + 'B' == 'AB'	{}	T		
+S05	SHOULD	[1, 2] + [3] == [1, 2, 3]	{}	T		
+S06	MUST	size([1, 2, 3]) == 3	{}	T		
+S07	DECIDE	event.kind == 'NEW'	{"event.kind":"e:LifecycleKind.NEW"}	T		
+S08	SHOULD	'LEI-FIRM-0001'.startsWith('LEI-')	{}	T		
+C01	MUST	contains(items, 'x')	{"items":"l:@gen(10001)"}	ERR:BUDGET	10000	
+C02	MUST	size(lower(big)) == 1	{"big":"s:@gen(1048576)"}	ERR:BUDGET	1000	
+C03	MUST	@chain(3000)	{}	COMPILE_ERROR		1000
+L01	DECIDE	[1, 2, 3].all(x, x > 0)	{}	T		

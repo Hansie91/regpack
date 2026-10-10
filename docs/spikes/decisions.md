@@ -41,3 +41,7 @@ Technical notes of the implementer and the fixer of T3, not owner decisions; the
 ## Hand-off channels verified
 
 Written at T8.
+
+## Scope exceptions approved by the owner
+
+- 2026-10-10, hans: R1 may add the job id spikes to the exact job list of PackagingFilesTest (regpack-app), because the plan adds a spikes job to ci.yml.

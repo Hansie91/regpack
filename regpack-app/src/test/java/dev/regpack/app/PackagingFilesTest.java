@@ -182,7 +182,7 @@ class PackagingFilesTest {
   }
 
   @Test
-  void ciWorkflowHasTheFiveJobsReadOnlyPermissionsAndMatchingArtefactNames() throws IOException {
+  void ciWorkflowHasTheSixJobsReadOnlyPermissionsAndMatchingArtefactNames() throws IOException {
     String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
 
     assertThat(ci).containsPattern("(?m)^permissions:\\n  contents: read$");
@@ -194,7 +194,12 @@ class PackagingFilesTest {
             .toList();
     assertThat(jobIds)
         .containsExactly(
-            "build", "determinism-compare", "smoke-linux", "smoke-windows", "smoke-kubernetes");
+            "build",
+            "determinism-compare",
+            "spikes",
+            "smoke-linux",
+            "smoke-windows",
+            "smoke-kubernetes");
 
     // The distribution is uploaded once and downloaded under the same name by the three smokes.
     assertThat(ci).containsOnlyOnce("          name: regpack-dist\n          path: |");

@@ -15,7 +15,9 @@
   <name>regpack-spikes</name>
   <description>Aggregator of the disposable P1a spike modules; each spike task adds its module</description>
 
-  <modules/>
+  <modules>
+    <module>spike-r</module>
+  </modules>
 
   <properties>
     <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>

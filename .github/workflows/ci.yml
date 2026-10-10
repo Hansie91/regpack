@@ -93,6 +93,26 @@ jobs:
           echo "windows: $b"
           [ "$a" = "$b" ] || { echo "toy crash digests differ between operating systems"; exit 1; }
 
+  spikes:
+    name: spikes (disposable P1a code)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Build the spikes against the freshly installed release modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mvnw -DskipTests -Dspotless.check.skip=true install
+          ./mvnw -f spikes/pom.xml verify license:aggregate-add-third-party -DincludeTestScope=true
+
   smoke-linux:
     name: smoke (linux, systemd)
     needs: build
