@@ -57,12 +57,15 @@ try {
   $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name='$name'"
   if ($svc.State -ne 'Stopped') { throw "service state is $($svc.State), expected Stopped" }
   if ($svc.ExitCode -ne 0) { throw "service ExitCode is $($svc.ExitCode), expected 0" }
-  # The marker must be in a log written by the service itself. Every *.log in the service log folder
-  # counts, because procrun's stdout file name is not fixed by anything we control.
+  # The marker must be in a log written by the service itself. install-service.ps1 sets --StdOutput=auto,
+  # so procrun chooses the file name; every *.log in the service log folder counts, and the matched file is
+  # printed so that the real name is recorded in the run log.
   $logs = Join-Path $AppHome 'logs'
   $logFiles = @(Get-ChildItem -Path $logs -Filter '*.log' -ErrorAction SilentlyContinue)
-  $marker = $logFiles | Get-Content -ErrorAction SilentlyContinue |
-    Select-String -SimpleMatch 'regpack lifecycle: stopped cleanly'
+  $marker = $logFiles | Select-String -SimpleMatch 'regpack lifecycle: stopped cleanly'
+  if ($marker) {
+    Write-Host ("smoke: clean-stop marker found in " + (($marker | Select-Object -ExpandProperty Path -Unique) -join ', '))
+  }
   if (-not $marker) {
     Write-Host '--- smoke diagnostics: service log folder'
     icacls $logs | Write-Host

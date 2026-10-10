@@ -21,7 +21,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+existing=$("$KIND" get clusters 2>/dev/null) || { echo "smoke: cannot list kind clusters; refusing to continue" >&2; exit 1; }
+if printf '%s\n' "$existing" | grep -qxF "$CLUSTER"; then
   echo "smoke: a kind cluster named $CLUSTER already exists; refusing to touch it. Delete it yourself and rerun." >&2
   exit 1
 fi

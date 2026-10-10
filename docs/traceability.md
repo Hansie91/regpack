@@ -24,7 +24,7 @@ exited_plans: P0
 | R9 | P6a | NONE | - | NA | NA | no evidence yet |
 | R10 | P5 | NONE | - | NA | NA | no evidence yet |
 | R11 | P5 | NONE | - | NA | NA | no evidence yet |
-| R12 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#abaProducesThreeVersions | INMEMORY | BUILD | interim: does not close the row |
+| R12 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#abaProducesThreeVersions | INMEMORY | BUILD | in-memory contract test |
 | R13 | P4 | NONE | - | NA | NA | no evidence yet |
 | R14 | P0 | REVIEW | docs/reviews/R14-process-checklist.md | NA | NA | owner signed 2026-10-09 |
 | I1 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#beginSendingRequiresCurrentLeaseAndQueuedState | INMEMORY | BUILD | interim: does not close the row |
@@ -32,13 +32,13 @@ exited_plans: P0
 | I2 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#redeliveredBatchIsNoopAndReturnsOriginalResult | INMEMORY | BUILD | interim: does not close the row |
 | I2 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#inFlightGuardAllowsOnlyOneDeliveryPerBusinessKey | INMEMORY | BUILD | interim: does not close the row |
 | I2 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#staleExpectedHeadSeqIsRejectedAndRollsBackWholeBatch | INMEMORY | BUILD | interim: does not close the row |
-| I3 | P5,P8 | TEST | dev.regpack.engine.pipeline.ToyCrashIT#sameFaultPlanGivesIdenticalTraceAndDigest | INMEMORY | BUILD | interim: does not close the row |
-| I3 | P5,P8 | TEST | dev.regpack.model.NoWallClockRandomLocaleTest#modelMainClassesAreClean | INMEMORY | BUILD | interim: does not close the row |
-| I3 | P5,P8 | TEST | dev.regpack.engine.NoWallClockRandomLocaleTest#engineMainClassesAreClean | INMEMORY | BUILD | interim: does not close the row |
+| I3 | P5,P8 | TEST | dev.regpack.engine.pipeline.ToyCrashIT#sameFaultPlanGivesIdenticalTraceAndDigest | INMEMORY | BUILD | in-memory evidence |
+| I3 | P5,P8 | TEST | dev.regpack.model.NoWallClockRandomLocaleTest#modelMainClassesAreClean | INMEMORY | BUILD | in-memory evidence |
+| I3 | P5,P8 | TEST | dev.regpack.engine.NoWallClockRandomLocaleTest#engineMainClassesAreClean | INMEMORY | BUILD | in-memory evidence |
 | I4 | P9b,P12 | NONE | - | NA | NA | no evidence yet |
-| I5 | P2a,P6a | TEST | dev.regpack.engine.skeleton.ScopeEngineTest#naturalPersonIsUndeterminedNeverDoNotReport | INMEMORY | BUILD | interim: does not close the row |
-| I5 | P2a,P6a | TEST | dev.regpack.engine.skeleton.ScopeEngineTest#unmatchedInstrumentFallsToCatchAllUndetermined | INMEMORY | BUILD | interim: does not close the row |
-| I6 | P3,P4,P8 | TEST | dev.regpack.engine.pipeline.ToyCrashIT#redeliveryAfterAckLossIsNoop | INMEMORY | BUILD | interim: does not close the row |
+| I5 | P2a,P6a | TEST | dev.regpack.engine.skeleton.ScopeEngineTest#naturalPersonIsUndeterminedNeverDoNotReport | INMEMORY | BUILD | in-memory evidence |
+| I5 | P2a,P6a | TEST | dev.regpack.engine.skeleton.ScopeEngineTest#unmatchedInstrumentFallsToCatchAllUndetermined | INMEMORY | BUILD | in-memory evidence |
+| I6 | P3,P4,P8 | TEST | dev.regpack.engine.pipeline.ToyCrashIT#redeliveryAfterAckLossIsNoop | INMEMORY | BUILD | in-memory evidence |
 | I7 | P4 | NONE | - | NA | NA | no evidence yet |
 | I8 | P8 | NONE | - | NA | NA | no evidence yet |
 | I9 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder | INMEMORY | BUILD | interim: does not close the row |

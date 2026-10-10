@@ -15,10 +15,10 @@ UNIT=/etc/systemd/system/regpack.service
 [ "${2:-}" = "--destructive" ] || { echo "smoke: this script deletes ${APP_HOME}, /etc/regpack/regpack.env and ${UNIT}; pass --destructive as the second argument on a disposable host"; exit 1; }
 JDK="${REGPACK_JAVA_HOME:?REGPACK_JAVA_HOME must point at a JDK 25 (pass it with: sudo env REGPACK_JAVA_HOME=... bash smoke.sh ...)}"
 jdk_version=$("$JDK/bin/java" -version 2>&1) || { echo "smoke: cannot run $JDK/bin/java"; exit 1; }
-jdk_first_line=$(printf '%s\n' "$jdk_version" | head -n 1)
-case "$jdk_first_line" in
+# The whole output is checked, not its first line: a "Picked up JAVA_TOOL_OPTIONS" line may come first.
+case "$jdk_version" in
   *'version "25'*) ;;
-  *) echo "smoke: REGPACK_JAVA_HOME=$JDK is not a Java 25 runtime: $jdk_first_line"; exit 1 ;;
+  *) echo "smoke: REGPACK_JAVA_HOME=$JDK is not a Java 25 runtime: $(printf '%s' "$jdk_version" | tr '\n' ' ')"; exit 1 ;;
 esac
 # sudo resets JAVA_HOME (see above), so the script's own foreground commands, such as the launcher's
 # smoke run below, must be given the verified JDK too.

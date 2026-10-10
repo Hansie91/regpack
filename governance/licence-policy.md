@@ -32,8 +32,8 @@ None recorded.
 
 ## Interim vulnerability handling (until P9b)
 
-- Dependabot alerts and security updates are on (T33 step 1).
-- The weekly Dockerfile digest pull request is the base-image control.
+- Dependabot alerts and security updates: to be enabled in the repository settings. They were not enabled when P0 was signed (an open owner action, recorded in docs/exit/P0.md), so this control is not yet in force.
+- The weekly Dockerfile digest pull request (`.github/dependabot.yml`) is the base-image control; it takes effect only once that file is on the default branch and Dependabot is enabled.
 - The JDK patch level moves by changing the pinned Temurin version in `toolchain/README.md` and the CI `java-version`.
 - A HIGH or CRITICAL advisory affecting a shipped component is triaged and recorded in `docs/exit/P0.md` before the owner signs P0.
 - The gating scanner, for example OSV-Scanner or Trivy, is chosen in P9b.
