@@ -44,12 +44,21 @@ public final class Gates {
         case "eol" -> {
           return eol(rest, in, out, err);
         }
+        case "g3" -> {
+          return g3(rest, in, out, err);
+        }
+        case "isolation" -> {
+          return isolation(rest, out, err);
+        }
+        case "entry" -> {
+          return entry(rest, out, err);
+        }
         default -> {
           // falls through to the usage message
         }
       }
     }
-    err.println("usage: Gates <traceability|pins|eol>");
+    err.println("usage: Gates <traceability|pins|eol|g3|isolation|entry>");
     return 2;
   }
 
@@ -155,14 +164,103 @@ public final class Gates {
    * input.
    */
   private static int eol(List<String> args, InputStream in, PrintStream out, PrintStream err) {
+    String root = rootOption(args);
+    if (root == null) {
+      err.println("usage: Gates eol [--root <dir>] (relative paths, one per line, on stdin)");
+      return 2;
+    }
+    List<String> paths = readPaths("eol", in, err);
+    if (paths == null) {
+      return 2;
+    }
+    return report("eol", EolCheck.check(Path.of(root), paths), out);
+  }
+
+  /**
+   * The {@code g3} gate: {@code [--root <dir>]}, with relative paths, one per line, on standard
+   * input.
+   */
+  private static int g3(List<String> args, InputStream in, PrintStream out, PrintStream err) {
+    String root = rootOption(args);
+    if (root == null) {
+      err.println("usage: Gates g3 [--root <dir>] (relative paths, one per line, on stdin)");
+      return 2;
+    }
+    List<String> paths = readPaths("g3", in, err);
+    if (paths == null) {
+      return 2;
+    }
+    return report("g3", G3Check.check(Path.of(root), paths), out);
+  }
+
+  /** The {@code isolation} gate: {@code [--root <dir>]}. */
+  private static int isolation(List<String> args, PrintStream out, PrintStream err) {
+    String root = rootOption(args);
+    if (root == null) {
+      err.println("usage: Gates isolation [--root <dir>]");
+      return 2;
+    }
+    return report("isolation", IsolationCheck.check(Path.of(root)), out);
+  }
+
+  /**
+   * The {@code entry} gate: {@code --target <target> [--root <dir>]}. Prints one line per
+   * requirement of the target and exits 0 only when every line is OK; an unknown target is a usage
+   * error.
+   */
+  private static int entry(List<String> args, PrintStream out, PrintStream err) {
+    String target = null;
+    String root = ".";
+    for (int i = 0; i < args.size(); i += 2) {
+      if (i + 1 >= args.size()) {
+        return entryUsage(err);
+      }
+      switch (args.get(i)) {
+        case "--target" -> target = args.get(i + 1);
+        case "--root" -> root = args.get(i + 1);
+        default -> {
+          return entryUsage(err);
+        }
+      }
+    }
+    if (target == null) {
+      return entryUsage(err);
+    }
+    Path repoRoot = Path.of(root);
+    String wiring = "docs/spikes/entry-wiring.tsv";
+    try {
+      List<EntryCheck.Requirement> all =
+          EntryCheck.parse(Files.readString(repoRoot.resolve(wiring), StandardCharsets.UTF_8));
+      EntryCheck.Outcome outcome = EntryCheck.check(target, all, repoRoot);
+      outcome.lines().forEach(out::println);
+      return outcome.satisfied() ? 0 : 1;
+    } catch (IOException e) {
+      err.println("entry: cannot read " + wiring + ": " + e.getMessage());
+    } catch (IllegalArgumentException e) {
+      err.println("entry: " + e.getMessage());
+    }
+    return 2;
+  }
+
+  private static int entryUsage(PrintStream err) {
+    err.println("usage: Gates entry --target <target> [--root <dir>]");
+    return 2;
+  }
+
+  /** The value of {@code [--root <dir>]}, {@code "."} when absent, null on a usage error. */
+  private static String rootOption(List<String> args) {
     String root = ".";
     for (int i = 0; i < args.size(); i += 2) {
       if (i + 1 >= args.size() || !args.get(i).equals("--root")) {
-        err.println("usage: Gates eol [--root <dir>] (relative paths, one per line, on stdin)");
-        return 2;
+        return null;
       }
       root = args.get(i + 1);
     }
+    return root;
+  }
+
+  /** Relative paths, one per line, from standard input; null (after a message) when unreadable. */
+  private static List<String> readPaths(String gate, InputStream in, PrintStream err) {
     List<String> paths = new ArrayList<>();
     try {
       BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
@@ -173,10 +271,10 @@ public final class Gates {
         }
       }
     } catch (IOException e) {
-      err.println("eol: cannot read standard input: " + e.getMessage());
-      return 2;
+      err.println(gate + ": cannot read standard input: " + e.getMessage());
+      return null;
     }
-    return report("eol", EolCheck.check(Path.of(root), paths), out);
+    return paths;
   }
 
   private static int report(String gate, List<String> problems, PrintStream out) {

@@ -13,4 +13,7 @@ if [ -n "$BUILD_ROOT" ]; then scan+=(--scan "$BUILD_ROOT"); fi
 gates traceability --file docs/traceability.md --root . "${scan[@]}"
 gates pins --dockerfile packaging/container/Dockerfile --workflows .github/workflows
 git ls-files | gates eol --root .
+# G3 and isolation (P1a): tracked and untracked-not-ignored files, so a leak is caught before it is added
+{ git ls-files; git ls-files -o --exclude-standard; } | gates g3 --root .
+gates isolation --root .
 echo "check-gates: all gates passed"

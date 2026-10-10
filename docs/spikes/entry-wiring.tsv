@@ -1,0 +1,19 @@
+# derived from spec 16 Entry clauses on 2026-10-10; the owner re-derives after any spec edit (the freeze record has the line)
+# columns: target, requires, kind, note. kind: REPORT_EXISTS (RAW report with status PASS, FAIL or INCONCLUSIVE) | STATUS_PASS (RAW report with status PASS) | GATE_CLEARED (docs/gates/<G>.md has status: CLEARED)
+P2a	SP-R	REPORT_EXISTS	spec 16 entry: SP-R and SP-G reports before the grammar freezes
+P2a	SP-G	REPORT_EXISTS	spec 16 entry: SP-R and SP-G reports before the grammar freezes
+P3-schema-sizing	SP-L	REPORT_EXISTS	spec 16 entry: SP-L before schema sizing
+P5-xsd-or-derived-content	G3	GATE_CLEARED	spec 17.1 G3: before any XSD is fetched or XSD- or workbook-derived content enters the repository
+P7a-microbatch	SP-L	REPORT_EXISTS	spec 16 entry: SP-L, SP-M and SP-X for the micro-batch N and T
+P7a-microbatch	SP-M	REPORT_EXISTS	SP-M is a P1b spike: stays MISSING until it reports
+P7a-microbatch	SP-X	REPORT_EXISTS	spec 16 entry: SP-L, SP-M and SP-X for the micro-batch N and T
+P8	SP-S	REPORT_EXISTS	P1b spike: stays MISSING until it reports
+P8	SP-E	REPORT_EXISTS	P1b spike: stays MISSING until it reports; SP-E itself is blocked by G3
+P8	SP-X	REPORT_EXISTS	spec 16 entry: SP-X for the per-record XSD policy and the file-gate throughput
+P8	G3	GATE_CLEARED	spec 17.1 G3
+P12	SP-G	REPORT_EXISTS	spec 16 entry: SP-G for the EMIR pack content
+SP-E	G3	GATE_CLEARED	SP-E fetches real XSDs: blocked until the owner clears G3
+spec-freeze	SP-R	REPORT_EXISTS	spec 16: the four reports exist before the owner records the freeze
+spec-freeze	SP-G	REPORT_EXISTS	spec 16: the four reports exist before the owner records the freeze
+spec-freeze	SP-L	REPORT_EXISTS	spec 16: the four reports exist before the owner records the freeze
+spec-freeze	SP-X	REPORT_EXISTS	spec 16: the four reports exist before the owner records the freeze
