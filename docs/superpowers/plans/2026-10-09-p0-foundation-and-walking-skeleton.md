@@ -3413,7 +3413,7 @@ Nothing was downloaded, installed or built to produce this plan. Sources are pri
 
 ## Appendix C: Execution amendments and notes for later plans (2026-10-09)
 
-This appendix records where the executed P0 differs from the task text above, and what later plans and the owner must pick up. Item ids refer to `.superpowers/minors-and-concerns.md`. Port signatures in "Port contracts for owner review" are unchanged.
+This appendix records where the executed P0 differs from the task text above, and what later plans and the owner must pick up. Item ids (M1 to M167) refer to an uncommitted working file of reviewer-recorded minors from the execution session; every item that matters is restated in this appendix, so the ids are only for traceability to that session. Port signatures in "Port contracts for owner review" are unchanged.
 
 ### C.1 Plan amendments (what the plan said, what is true now, why)
 

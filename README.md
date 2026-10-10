@@ -13,4 +13,4 @@ transaction reporting (RTS 22) to a simulated ARM; EMIR follows.
 
 - Set up the toolchain (Java 25 and Maven wrapper): see [toolchain/README.md](toolchain/README.md)
 - Build and test: `./mvnw -B -ntp verify` (PowerShell: `.\mvnw.cmd -B -ntp verify`)
-- Run the repository gates: `scripts/check-gates.sh` (added in plan P0, Task 3 onward)
+- Run the repository gates: `scripts/check-gates.sh` (added in plan P0, Task 32)

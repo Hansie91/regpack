@@ -49,6 +49,11 @@ done
 systemctl stop regpack
 result=$(systemctl show regpack -p Result --value)
 [ "$result" = "success" ] || { journalctl -u regpack --no-pager | tail -50; echo "smoke: unit Result=$result"; exit 1; }
-journalctl -u regpack --no-pager | grep -q 'regpack lifecycle: stopped cleanly' \
-  || { journalctl -u regpack --no-pager | tail -50; echo "smoke: no clean-stop marker"; exit 1; }
+marker=no
+for _ in $(seq 1 20); do
+  # journald is asynchronous: give the last line up to 10 s to become readable.
+  if journalctl -u regpack --no-pager | grep -q 'regpack lifecycle: stopped cleanly'; then marker=yes; break; fi
+  sleep 0.5
+done
+[ "$marker" = yes ] || { journalctl -u regpack --no-pager | tail -50; echo "smoke: no clean-stop marker"; exit 1; }
 echo "smoke: linux systemd OK"

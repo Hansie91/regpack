@@ -12,11 +12,20 @@ NS=regpack
 REPO="${IMAGE%%:*}"
 TAG="${IMAGE##*:}"
 
+CREATED=0
 cleanup() {
-  "$KIND" delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  # Only delete a cluster this script created; never touch a developer's own cluster.
+  if [ "$CREATED" = 1 ]; then
+    "$KIND" delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
+if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+  echo "smoke: a kind cluster named $CLUSTER already exists; refusing to touch it. Delete it yourself and rerun." >&2
+  exit 1
+fi
+CREATED=1
 "$KIND" create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --wait 180s
 "$KIND" load docker-image "$IMAGE" --name "$CLUSTER"
 kubectl create namespace "$NS"
