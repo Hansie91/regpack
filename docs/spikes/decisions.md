@@ -16,6 +16,17 @@ Questions are those of Appendix B of the P1a plan. A reading marked "default" is
 - Q7 (after the exit: keep `spikes/` frozen on `main` or delete): default is keep frozen. OPEN, asked at C2.
 - Q8 (who dispositions the SP-G register): the owner (hans). Default, OPEN, asked at G2.
 
+## T3 harness notes
+
+Technical notes of the implementer and the fixer of T3, not owner decisions; they exist so that T4 to T6 build on the protocol consistently.
+
+- Child JVM time limit: `ForkRunner.runForked` checks the deadline only before a fork starts, and a child has no limit of its own. A hung child (for instance one waiting on PostgreSQL) blocks the run until the CI job timeout, which is the only guard. A per-child watchdog derived from the protocol was considered and not added: a periodic workload (`cycleUnits` above 0) has no bound that the protocol states, so a derived limit could kill a legitimate fork and turn it into a harness discard. A later task that knows the length of its workload may add a limit.
+- Canary disk: `runInProcess` has no parameter for a scratch path (the plan fixes the signature), so the disk probe writes to a temporary file in the OS temp directory and deletes it afterwards. It therefore measures the temp directory's disk. For SP-L this is not the data disk of the PostgreSQL container; the disk canary there is a health signal of the runner, not of the database volume.
+- How a worker gets its `Protocol` and fork index: `runForked` passes neither. The worker receives what the caller puts into `workerArgs` (for example the name `full`, `informative` or `smoke`, which it maps to the static factories) and the `spike.*` system properties of the parent. The worker prints its result with any index; the parent replaces it with the position in the series (`withIndex`).
+- Relative range in P-2 is `(max - min) / min` over the last `stableWindows` window rates; it is infinite when the smallest rate is not positive.
+- FORK-RESULT line: `FORK-RESULT ` and the canonical JSON of the fields `index`, `unstable`, `discarded`, `discardReason`, `windowRates`, `canaryCpu`, `canaryMemory`, `canaryDisk`, `stealFraction`, `checksum`. Rates and the steal fraction are decimals of scale 9 (canonical JSON holds no double), `index` and `checksum` are integers. A child prints exactly one such line: none, several, a malformed one, or a not-discarded one without a window rate is a `HARNESS_ERROR` discard.
+- A canary of zero length (`Protocol.canary()` is `Duration.ZERO`) means no probes and no scratch file; the canary lists of the fork are then empty. Only the protocols of the tests use it.
+
 ## Approvals ledger
 
 | Id | What | Date | Name | State |
