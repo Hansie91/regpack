@@ -14,7 +14,7 @@ Questions are those of Appendix B of the P1a plan. A reading marked "default" is
 - Criteria placeholders: every criterion whose source says PLAN is confirmed by hans in `docs/spikes/criteria.lock` before the first full run. Accepted by hans, 2026-10-10 (default). Q1 to Q3 are answered. Locked by hans on 2026-10-10 as generated, digest d85eca736beb3ba4826bdbd6b160bba9e40cd838f7227b41c97140730d5b9447 (`docs/spikes/criteria.lock`): the 17 placeholder rows and the L-11 assumptions (500 reports per file, 3 other events per second) are final; no threshold changes after this date. Noted at the lock and left unchanged: the SP-L rows use 3,470 records/s (SPEC 5.6) and the SP-X rows 3,472 (the 4 h margin).
 - Q6 (rejected draft `reference/`): stays untracked (excluded locally in `.git/info/exclude`). Default, not yet questioned: OPEN until the owner says otherwise.
 - Q7 (after the exit: keep `spikes/` frozen on `main` or delete): default is keep frozen. OPEN, asked at C2.
-- Q8 (who dispositions the SP-G register): the owner (hans). Default, OPEN, asked at G2.
+- Q8 (who dispositions the SP-G register): the owner (hans). Done 2026-10-10: 16 rows ACCEPTED (15 amendment-list wordings and BRK-18 as a P12 item), 3 REJECTED_NOT_NEEDED (BRK-03, BRK-05, BRK-17); BRK-17 and BRK-18 re-rated P12_ONLY by the owner. The acceptance is a design decision with gate G1 (named Compliance owner) still open, not a Compliance or Legal view of EMIR.
 
 ## T3 harness notes
 
