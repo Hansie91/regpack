@@ -1,0 +1,17 @@
+<!-- SELF-AUTHORED SYNTHETIC SCHEMA: not derived from any ESMA or ISO 20022 artefact (gate G3) -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="urn:regpack:spike:synthetic:probe:1"
+           xmlns="urn:regpack:spike:synthetic:probe:1"
+           elementFormDefault="qualified">
+  <!-- One XSD 1.1 construct (an assertion) on a made-up pair of numbers. A validator that only
+       implements XSD 1.0 must reject this schema (criterion X-5). -->
+  <xs:element name="span_probe">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="low_end" type="xs:int"/>
+        <xs:element name="high_end" type="xs:int"/>
+      </xs:sequence>
+      <xs:assert test="low_end le high_end"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>
