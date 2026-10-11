@@ -1,0 +1,160 @@
+# derive/action-type.yaml of the spike pack emir.eu (SP-G paper exercise).
+# One decision table: (source event kind, derivative status) to the EMIR action type, hit policy FIRST,
+# explicit priority, mandatory catch-all (spec 6.1, 6.2), rows in the row shape of the illustrative rule
+# of spec 6.1 (id, node, priority, when, outcome, reason, cite, rationale, valid).
+# The spec shows that row shape for scope tables. The action type is a value and the choice depends on
+# status, so this table needs three things the spec does not give: the status as an input (BRK-04), a
+# place for the value (BRK-10) and EMIR reason codes and nodes (BRK-11). A scope table would be the
+# natural home but a scope row cannot carry a value; the file stays in derive/ as the plan fixes it.
+# The table header and the row shape (including rule_ref, which spec 6.1 asks of derive rules but
+# gives no format for) are a reading of 6.1 that the spec does not define: BRK-19.
+# Citations, rationale references and validity dates are placeholders: no legal text was consulted.
+# Event kinds NEW, AMEND, TERMINATE, CANCEL, REVIVE and VALUATION are assumption A-8 (README.md).
+provenance: consistency-only
+
+table:                                           # BRK-19 (block: the spec gives no header for a decision table)
+  id: emir.eu.derive.action-type
+  hit_policy: FIRST
+  priority: explicit
+  inputs: [event.kind, state.status]             # BRK-04 (state.status is not a canonical event field)
+  catch_all: D-ACT-99
+
+rows:
+  - id: D-ACT-01
+    node: ACT                                    # BRK-11
+    priority: 100
+    when: "event.kind == 'NEW' && state.status == 'NOT_REPORTED'"                     # BRK-04
+    outcome: REPORT
+    field: report.action_type                    # BRK-10
+    value: NEWT                                  # BRK-10
+    reason: EMIR.ACT.NEWT                        # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  - id: D-ACT-02
+    node: ACT                                    # BRK-11
+    priority: 110
+    when: "event.kind == 'AMEND' && state.status == 'OUTSTANDING'"                    # BRK-04
+    outcome: REPORT
+    field: report.action_type                    # BRK-10
+    value: MODI                                  # BRK-10
+    reason: EMIR.ACT.MODI                        # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  - id: D-ACT-03
+    node: ACT                                    # BRK-11
+    priority: 120
+    when: "event.kind == 'TERMINATE' && state.status == 'OUTSTANDING'"                # BRK-04
+    outcome: REPORT
+    field: report.action_type                    # BRK-10
+    value: TERM                                  # BRK-10
+    reason: EMIR.ACT.TERM                        # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  - id: D-ACT-04
+    node: ACT                                    # BRK-11
+    priority: 130
+    when: "event.kind == 'CANCEL' && state.status in ['OUTSTANDING', 'TERMINATED']"   # BRK-04
+    outcome: REPORT
+    field: report.action_type                    # BRK-10
+    value: EROR                                  # BRK-10
+    reason: EMIR.ACT.EROR                        # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  - id: D-ACT-05
+    node: ACT                                    # BRK-11
+    priority: 140
+    when: "event.kind == 'REVIVE' && state.status in ['ERRORED', 'TERMINATED']"       # BRK-04
+    outcome: REPORT
+    field: report.action_type                    # BRK-10
+    value: REVI                                  # BRK-10
+    reason: EMIR.ACT.REVI                        # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  - id: D-ACT-06
+    node: ACT                                    # BRK-11
+    priority: 150
+    when: "event.kind == 'VALUATION' && state.status == 'OUTSTANDING'"                # BRK-04
+    outcome: REPORT
+    field: report.action_type                    # BRK-10
+    value: VALU                                  # BRK-10
+    reason: EMIR.ACT.VALU                        # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  # Assumption A-5: a derivative that is not outstanding needs no valuation report. A negative is
+  # still a decision with a reason (I5), never a silent drop.
+  - id: D-ACT-07
+    node: ACT                                    # BRK-11
+    priority: 200
+    when: "event.kind == 'VALUATION' && state.status != 'OUTSTANDING'"                # BRK-04
+    outcome: DO_NOT_REPORT
+    reason: EMIR.ACT.VALU_NOT_OUTSTANDING        # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  # A second NEWT for a known derivative is rejected by the TR (3.10); it is a data-quality question,
+  # not a DO_NOT_REPORT (I5: UNDETERMINED never silently becomes DO_NOT_REPORT).
+  - id: D-ACT-08
+    node: ACT                                    # BRK-11
+    priority: 210
+    when: "event.kind == 'NEW' && state.status != 'NOT_REPORTED'"                     # BRK-04
+    outcome: UNDETERMINED
+    reason: EMIR.ACT.DUPLICATE_NEW               # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+  # The mandatory catch-all (spec 6.2): any combination not listed above, for example AMEND on a
+  # derivative that is ERRORED, is UNDETERMINED with a reason and a data-quality item.
+  - id: D-ACT-99
+    node: ACT                                    # BRK-11
+    priority: 9999
+    when: "true"
+    outcome: UNDETERMINED
+    reason: EMIR.ACT.NO_MATCH                    # BRK-11
+    rule_ref: "<RULE-nnnn>"                      # BRK-19
+    cite: [{source_id: "<emir-source>", provision_path: "<provision>", role: BASIS}]
+    rationale: "<RAT-nnnn>"
+    valid: {legal: {from: "<date>"}}
+
+examples:
+  - id: ACT-EX-01
+    provenance: consistency-only
+    input: {kind: NEW, status: NOT_REPORTED}
+    expect: {row: D-ACT-01, outcome: REPORT, action_type: NEWT}
+  - id: ACT-EX-02
+    provenance: consistency-only
+    input: {kind: AMEND, status: OUTSTANDING}
+    expect: {row: D-ACT-02, outcome: REPORT, action_type: MODI}
+  - id: ACT-EX-03
+    provenance: consistency-only
+    input: {kind: TERMINATE, status: OUTSTANDING}
+    expect: {row: D-ACT-03, outcome: REPORT, action_type: TERM}
+  - id: ACT-EX-04
+    provenance: consistency-only
+    input: {kind: CANCEL, status: TERMINATED}
+    expect: {row: D-ACT-04, outcome: REPORT, action_type: EROR}
+  - id: ACT-EX-05
+    provenance: consistency-only
+    input: {kind: REVIVE, status: ERRORED}
+    expect: {row: D-ACT-05, outcome: REPORT, action_type: REVI}
+  - id: ACT-EX-06
+    provenance: consistency-only
+    input: {kind: VALUATION, status: OUTSTANDING}
+    expect: {row: D-ACT-06, outcome: REPORT, action_type: VALU}
+  - id: ACT-EX-07
+    provenance: consistency-only
+    input: {kind: AMEND, status: ERRORED}
+    expect: {row: D-ACT-99, outcome: UNDETERMINED}

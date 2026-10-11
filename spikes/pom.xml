@@ -17,6 +17,7 @@
 
   <modules>
     <module>spike-r</module>
+    <module>spike-g</module>
     <module>spike-x</module>
   </modules>
 

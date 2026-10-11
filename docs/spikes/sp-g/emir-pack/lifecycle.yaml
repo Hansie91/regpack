@@ -1,0 +1,99 @@
+# lifecycle.yaml of the spike pack emir.eu (SP-G paper exercise).
+# Spec 6.1 names its content: business_key, TRN policy, correction rules, successor_gate, due_at rule.
+# Everything below that goes beyond those names carries a "# BRK-nn" marker (a marker on a line that
+# opens a block covers the block). Placeholders in angle brackets are values the exercise does not know.
+# Sources: research brief 03 (3.3, 3.4, 3.10), spec 6.1, 9.2, 9.7, 10. Assumptions A-n: see README.md.
+provenance: consistency-only
+
+# Spec 10: business_key, EMIR form. It is the unique key and the in-flight guard key (version_seq is
+# monotonic per key), so the guard is per derivative side; research 3.10 (c) allows one in-flight
+# attempt per record_key instead (BRK-17).
+business_key: [reporting_counterparty_lei, uti, level]   # BRK-17
+
+# Research 3.10: the destination correlates a record by a longer tuple than business_key.
+record_key:                                      # BRK-01 (block)
+  parts: [regime, endpoint_profile, reporting_counterparty_lei, uti, level, action_type, event_date, event_type]
+  extra_parts_by_action: {VALU: [valuation_timestamp]}
+
+# Spec 6.1 "TRN policy": EMIR has no TRN; the UTI comes from the source and is used unaltered (3.3).
+trn: {policy: none}                              # BRK-02
+identifiers:                                     # BRK-02 (block)
+  uti: {policy: source, field: uti, alter: never}
+
+# BRK-03 tested, not a break: the version order of spec 10 rule 6 (source_version or a declared
+# ordering) and the event-date order of the status fold are two different orders. A late report with a
+# past event date is an ordinary new version; nothing in this file declares an ordering.
+# Research 3.4: status per reporting counterparty and UTI (and level); late reports with past event
+# dates are legitimate and the TR rebuilds state in event-date order.
+status_model:                                    # BRK-04 (block)
+  key: [reporting_counterparty_lei, uti, level]
+  basis: projected_versions                      # every earlier version of the key, sent or not
+  fold_order: [event_date, version_seq]          # the TR rebuilds in event-date order (see BRK-03)
+  initial: NOT_REPORTED
+  states: [NOT_REPORTED, OUTSTANDING, TERMINATED, ERRORED]
+  transitions:
+    - {from: NOT_REPORTED, on: NEWT, to: OUTSTANDING}
+    - {from: OUTSTANDING, on: TERM, to: TERMINATED}
+    - {from: OUTSTANDING, on: EROR, to: ERRORED}
+    - {from: TERMINATED, on: EROR, to: ERRORED}                        # assumption A-4
+    - {from: ERRORED, on: REVI, to: OUTSTANDING, guard: "event.event_date <= derivative.maturity_date"}   # BRK-04
+    - {from: ERRORED, on: REVI, to: TERMINATED, guard: "event.event_date > derivative.maturity_date"}   # BRK-04
+    - {from: TERMINATED, on: REVI, to: OUTSTANDING, guard: "event.event_date <= derivative.maturity_date"}   # BRK-04
+    - {from: TERMINATED, on: REVI, to: TERMINATED, guard: "event.event_date > derivative.maturity_date"}   # BRK-04
+  no_status_change: [MODI, VALU]                 # 3.4: MODI, CORR, VALU and MARU never change status
+
+# Spec 6.1 "correction rules".
+corrections:                                     # BRK-16 (block)
+  rejected_record: RESEND_ORIGINAL_ACTION        # spec 10 rule 2 and research 3.10
+  # Accepted-but-wrong data is a CORR with the event date of the day the correction applies from (3.4).
+  # CORR is not one of the six action types of this exercise and is not encoded.
+
+# Spec 9.7: the pack holds the regime default; an endpoint profile overrides it. The shape of the gate
+# is {mode, max_wait, on_expiry}. Research 3.10: dependants stay BLOCKED until the predecessor is
+# ACCEPTED_PROVISIONAL, so the gate waits for feedback and never proceeds on expiry (assumption A-9).
+successor_gate:
+  mode: FEEDBACK_ACCEPTED
+  max_wait: "<Compliance-owned>"
+  on_expiry: ESCALATE
+  # Research 3.10 says that every later event of a UTI waits for its predecessor, which one gate
+  # already does. Restricting the gate to the pairs below is the plan's hypothesis H7 and not a
+  # research fact (assumption A-10); the list is not closed under the status machine (for example
+  # TERM before EROR or REVI is not listed), see the note of BRK-07.
+  pairs:                                         # BRK-07 (block); assumption A-10
+    - {predecessor: NEWT, successors: [MODI, TERM, VALU, EROR]}   # assumption A-10
+    - {predecessor: EROR, successors: [REVI]}    # assumption A-10
+
+# Spec 6.1 "due_at rule": T+1 working day on the TARGET calendar (assumption A-1).
+due_at:                                          # BRK-16 (block)
+  anchor: event_date
+  offset: {working_days: 1}
+  calendar: TARGET
+  at: end_of_day
+
+# Research 3.3: a UTI that is not available by 10:00 UTC on T+1 may no longer be invented by the
+# receiver; a late UTI means an EROR of the old report and a new one. A second clock beside due_at.
+# The brief says only "T+1": it does not say working day, so the offset is one calendar day (the
+# working-day reading of assumption A-1 covers due_at only).
+uti_cutoff:                                      # BRK-08 (block)
+  anchor: event_date
+  offset: {calendar_days: 1}
+  at: "10:00:00Z"
+  on_expiry: ESCALATE
+
+examples:
+  - id: LC-EX-01
+    provenance: consistency-only
+    what: a trade that is valued and terminated on later days
+    events: [NEWT@2026-01-05, VALU@2026-01-06, TERM@2026-01-07]
+    status_after: [OUTSTANDING, OUTSTANDING, TERMINATED]
+  - id: LC-EX-02
+    provenance: consistency-only
+    what: a trade that is errored and revived before its (assumed) maturity date 2026-12-31
+    events: [NEWT@2026-01-05, EROR@2026-01-06, REVI@2026-01-08]
+    status_after: [OUTSTANDING, ERRORED, OUTSTANDING]
+  - id: LC-EX-03
+    provenance: consistency-only
+    what: a TERM reported late, after a later VALU, with an event date between the two (version order 1, 2, 3)
+    events: [NEWT@2026-01-05, VALU@2026-01-09, TERM@2026-01-07]
+    status_after_in_event_date_order: [OUTSTANDING, TERMINATED, TERMINATED]
+    open_question: the VALU of 2026-01-09 now follows a termination; the format has no way to say what happens to it   # BRK-18

@@ -1,0 +1,37 @@
+# pack.yaml of the spike pack emir.eu (SP-G paper exercise), in the layout of spec 6.1.
+# Disposable: nothing here is EMIR content that anybody has reviewed (gate G1).
+# Sources: research brief 03 (sections 3.3, 3.4, 3.10) and the approved spec only (gates G3 and G4).
+# Placeholders in angle brackets are values the exercise does not know and does not invent.
+# A "# BRK-nn" comment marks a line (or the block that the line opens) whose syntax the spec does not
+# define; the matching row is in register.md. A line without a marker uses names and shapes that the
+# spec gives (6.1 to 6.3, 9.2, 10) or is a plain value; the spec fixes the names of the report-definition
+# keys only as "schema, scope tables, endpoint profiles", so the key spellings under reports are a
+# reading, not a quote: BRK-19.
+provenance: consistency-only
+
+id: emir.eu
+semver: 0.1.0
+regime: emir.eu                                  # BRK-14 (spec 10 calls the regime "the report definition")
+jurisdiction: EU
+valid: {legal: {from: "<EMIR application date: not taken from the sources of this exercise>", to: null}}
+# as_at_field is a Legal decision (spec 6.4); event_date is assumption A-2. A late report with a past
+# event date then selects the pack version that was valid on that date.
+as_at_field: event_date
+engine_min: "<engine build and built-in library version: set by P2a>"
+input_schema: "<digest of model/canonical-extension.yaml: set when the canonical input schema is frozen>"
+supersedes: null
+imports:                                         # BRK-13 (spec 6.1 lists no pack.yaml field for common packs)
+  - {pack: "common.parties-and-instruments", digest: "<sha256 of the pinned common pack>"}
+
+# Report definitions: schema, scope tables, endpoint profiles (spec 6.1, 6.7).
+# The report schema itself (field facets equal to the pinned XSD) is not encoded: it would need the
+# XSD, and gate G3 forbids fetching it. Only the trade report is encoded; the margin report is not.
+reports:                                         # BRK-19 (block: the spec names no keys of a report definition)
+  - id: emir.eu                                  # BRK-14
+    schema: "<report schema: needs the XSD, gate G3>"
+    input: model/canonical-extension.yaml
+    scope_tables: []                             # BRK-10 (the action-type table has no home in scope/, see derive/action-type.yaml)
+    derive_tables: [derive/action-type.yaml]
+    validate: [validate/sequencing.yaml]
+    lifecycle: lifecycle.yaml
+    endpoint_profiles: [endpoints/tr-sftp.yaml]

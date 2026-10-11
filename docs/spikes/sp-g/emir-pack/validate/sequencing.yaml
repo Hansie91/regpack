@@ -1,0 +1,95 @@
+# validate/sequencing.yaml of the spike pack emir.eu (SP-G paper exercise): six synthetic L5 rules.
+# Spec 6.1 says validate/ holds layered rules with regulator ids, severity, disposition and
+# predictability; spec 8.1 puts the EMIR action-type state machine in layer L5 (cross-record).
+# The ids SYN-EMIR-SEQ-nn are synthetic and are not regulator rule ids (gate G3: no workbook text, no
+# regulator ids). The rules restate the status machine of research 3.4 and the duplicate rule of 3.10;
+# they were not taken from any validation catalogue. A rule fires (raises a finding) when its `when`
+# holds, as a scope row fires when its `when` holds.
+# The spec gives the attributes of a rule but no row shape (no field for the layer, the condition, the
+# message or the action a rule is about, and no polarity of the condition): BRK-19. `when` follows the
+# row shape of spec 6.1. Every rule reads the derivative status of the key, which the format cannot do:
+# BRK-04. Predictability is partial for every rule (spec 8.2): the TR checks against its own last
+# accepted report, which the platform sees only through feedback.
+# Together the rules say that an ERRORED derivative admits only REVI (assumption A-6).
+provenance: consistency-only
+
+layer: L5
+rules:                                           # BRK-19 (block: the spec gives no row shape for a validate rule)
+  - id: SYN-EMIR-SEQ-01
+    layer: L5
+    action: NEWT
+    severity: BLOCKER
+    disposition: QUARANTINE
+    predictability: partial
+    when: "report.action_type == 'NEWT' && state.status != 'NOT_REPORTED'"            # BRK-04
+    message: a NEWT is only possible while no report of the key exists (research 3.4 and 3.10 b)
+  - id: SYN-EMIR-SEQ-02
+    layer: L5
+    action: MODI
+    severity: BLOCKER
+    disposition: QUARANTINE
+    predictability: partial
+    when: "report.action_type == 'MODI' && state.status != 'OUTSTANDING'"             # BRK-04
+    message: a MODI needs an outstanding derivative (assumption A-3)
+  - id: SYN-EMIR-SEQ-03
+    layer: L5
+    action: TERM
+    severity: BLOCKER
+    disposition: QUARANTINE
+    predictability: partial
+    when: "report.action_type == 'TERM' && state.status != 'OUTSTANDING'"             # BRK-04
+    message: a TERM needs an outstanding derivative (research 3.4)
+  - id: SYN-EMIR-SEQ-04
+    layer: L5
+    action: EROR
+    severity: BLOCKER
+    disposition: QUARANTINE
+    predictability: partial
+    when: "report.action_type == 'EROR' && !(state.status in ['OUTSTANDING', 'TERMINATED'])"   # BRK-04
+    message: an EROR needs a derivative that is outstanding or terminated (assumption A-4)
+  - id: SYN-EMIR-SEQ-05
+    layer: L5
+    action: REVI
+    severity: BLOCKER
+    disposition: QUARANTINE
+    predictability: partial
+    when: "report.action_type == 'REVI' && !(state.status in ['ERRORED', 'TERMINATED'])"      # BRK-04
+    message: a REVI is not possible while the derivative is outstanding or was never reported (research 3.4)
+  - id: SYN-EMIR-SEQ-06
+    layer: L5
+    action: VALU
+    severity: BLOCKER
+    disposition: QUARANTINE
+    predictability: partial
+    when: "report.action_type == 'VALU' && state.status != 'OUTSTANDING'"             # BRK-04
+    message: a VALU needs an outstanding derivative (assumption A-5)
+
+examples:
+  - id: SEQ-EX-01
+    provenance: consistency-only
+    given: {status: OUTSTANDING, action_type: NEWT}
+    expect: {fires: [SYN-EMIR-SEQ-01]}
+  - id: SEQ-EX-02
+    provenance: consistency-only
+    given: {status: TERMINATED, action_type: MODI}
+    expect: {fires: [SYN-EMIR-SEQ-02]}
+  - id: SEQ-EX-03
+    provenance: consistency-only
+    given: {status: ERRORED, action_type: TERM}
+    expect: {fires: [SYN-EMIR-SEQ-03]}
+  - id: SEQ-EX-04
+    provenance: consistency-only
+    given: {status: ERRORED, action_type: EROR}
+    expect: {fires: [SYN-EMIR-SEQ-04]}
+  - id: SEQ-EX-05
+    provenance: consistency-only
+    given: {status: OUTSTANDING, action_type: REVI}
+    expect: {fires: [SYN-EMIR-SEQ-05]}
+  - id: SEQ-EX-06
+    provenance: consistency-only
+    given: {status: ERRORED, action_type: VALU}
+    expect: {fires: [SYN-EMIR-SEQ-06]}
+  - id: SEQ-EX-07
+    provenance: consistency-only
+    given: {status: ERRORED, action_type: REVI}
+    expect: {fires: []}

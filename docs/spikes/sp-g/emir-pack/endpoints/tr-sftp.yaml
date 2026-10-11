@@ -1,0 +1,42 @@
+# endpoints/tr-sftp.yaml of the spike pack emir.eu (SP-G paper exercise): a trade-repository profile in
+# the schema of spec 9.2. Every value is illustrative; real values come from a destination's
+# onboarding documents. Sources: spec 9.2 and research 3.10 only. Names of real repositories, file
+# names, limits and message versions are deliberately not used (they are not in the sources of this
+# exercise). Placeholders in angle brackets are onboarding data.
+provenance: consistency-only
+
+endpoint: emir.eu.<tr>.sftp
+valid: {from: <date>, to: null}
+environment: CONFORMANCE                         # SIMULATOR | CONFORMANCE | PRODUCTION | PARALLEL
+# Assumption A-7: a firm that reports straight to a trade repository is route SELF. The values of
+# spec 9.2 are SELF, ARM and VENUE; a repository as destination authority has no value of its own.
+submission_route: SELF
+channel: {type: sftp, host_key_pin: ref://..., credentials: vault://..., upload: temp_name_then_rename, probe_proof: none}
+# Research 3.10: a resend re-stamps the reporting timestamp, and the timestamp is part of what the
+# repository correlates a record by.
+restamp: {field: reporting_timestamp}            # BRK-06
+# Same-key events never share a file in flight: the gate holds a successor until its predecessor is
+# accepted. `order` lists action types instead of the CANC and NEWT of the MiFIR example.
+file: {name_pattern: "<onboarding>", max_name_len: "<onboarding>", max_reports: "<onboarding>", order: [NEWT, MODI, TERM, EROR, REVI, VALU], separate_files: false}
+calendar: TARGET
+cut_offs: "<onboarding data: send windows of the destination>"
+# Research 3.10 trigger table: the record is correlated by the destination's own tuple and by the
+# reporting timestamp that was actually sent in this attempt.
+correlation: [record_key, attempt.reporting_timestamp, file_id]    # BRK-09
+ack:
+  model: async-file
+  ack_deadline: PT1H                             # 3.10: warn at 60 minutes (a design proposal of the brief)
+  feedback_horizon: P1D                          # illustrative duration, as in the example of spec 9.2 (the 06:00 UTC checkpoint of 3.10 is a design proposal of the brief and is not encoded)
+  pdng_horizon: null                             # 3.10 knows no pending status of the destination
+  successor_gate: {mode: FEEDBACK_ACCEPTED, max_wait: "<Compliance-owned>", on_expiry: ESCALATE, pairs: inherit}    # BRK-07; assumption A-10
+# Research 3.10: ACPT in immediate feedback, RJCT with rule codes, file-level failures.
+vocabulary: {record: {ACPT: ACCEPTED, RJCT: REJECTED}, file: {CRPT: FILE_REJECTED, REJECTED_AT_INGEST: FILE_REJECTED}}
+# Spec 9.3 moves ACCEPTED_PROVISIONAL to ACCEPTED_CONFIRMED by "profile confirmation rule"; research
+# 3.10: the end-of-day activity report contains the key and the end-of-day rejections do not.
+confirmation: {in: end_of_day_activity, absent_from: end_of_day_rejections}    # BRK-15
+resolvers: [sftp_directory_probe, tr_state_report]
+schemas: {"auth.030": "<version>@sha256:..."}
+implicit_accept: false
+refdata_wait: NONE                               # a value of spec 8.3 (placeholder default NONE); not an EMIR fact
+hold_max: "<Compliance-owned>"
+hold_margin: "<Compliance-owned>"
