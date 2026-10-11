@@ -2,3 +2,5 @@
 2026-10-10T20:17:04.501427400Z	PAUSE	waiting for the owner: PackagingFilesTest (regpack-app) pins the five CI jobs, R1 adds the sixth
 2026-10-10T20:37:28.040163400Z	RESUME	
 2026-10-10T22:14:03.009080500Z	PAUSE	waiting for the owner: push, then dispatch of sp-r (R4 step 6)
+2026-10-11T00:49:07.574549400Z	RESUME	artefact of run 38094901948 received
+2026-10-11T01:01:32.878701300Z	STOP	R4 step 9: report written
