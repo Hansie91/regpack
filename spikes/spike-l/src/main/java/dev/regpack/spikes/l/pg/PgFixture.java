@@ -109,6 +109,9 @@ public final class PgFixture implements AutoCloseable {
     Properties properties = new Properties();
     properties.setProperty("ApplicationName", "spike-l");
     properties.setProperty("connectTimeout", "10");
+    // the BATCHED_INSERT loading method of L2 relies on the driver rewriting a batch of single-row
+    // inserts into multi-row inserts; COPY and every other statement are unaffected
+    properties.setProperty("reWriteBatchedInserts", "true");
     Connection connection = DriverManager.getConnection(url, properties);
     opened.removeIf(PgFixture::isClosed);
     opened.add(connection);
