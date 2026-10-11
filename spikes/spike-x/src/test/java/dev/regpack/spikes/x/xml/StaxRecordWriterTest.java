@@ -182,6 +182,22 @@ class StaxRecordWriterTest {
   }
 
   @Test
+  void flushPutsTheWholeRecordIntoTheStreamAndIsHarmlessAfterTheEnd() {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    StaxRecordWriter writer = new StaxRecordWriter(bytes);
+    writer.startDocument("m", 5L);
+    writer.writeTx(new TxModel(List.of("a/b"), List.of("v"), List.of("")));
+    writer.flush();
+    assertThat(bytes.toString(java.nio.charset.StandardCharsets.UTF_8))
+        .as("the record is complete in the stream after the flush")
+        .endsWith("</transaction_record>");
+    writer.endDocument();
+    int size = bytes.size();
+    writer.flush();
+    assertThat(bytes.size()).isEqualTo(size);
+  }
+
+  @Test
   void modelWithMismatchedListsIsRejected() {
     assertThatThrownBy(() -> new TxModel(List.of("a", "b"), List.of("1"), List.of("", "")))
         .isInstanceOf(IllegalArgumentException.class);

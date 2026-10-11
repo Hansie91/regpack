@@ -134,8 +134,14 @@ public final class StaxRecordWriter {
     ended = true;
   }
 
-  /** The bytes that have gone to the stream; the writer is flushed first, so this is exact. */
-  public long bytesWritten() {
+  /**
+   * Pushes what the XML writer has buffered into the stream, so that the bytes of the elements
+   * written so far are all in the stream. A caller that reads a record's bytes from the stream (the
+   * per-record validation) calls this first, so that it does not depend on how much the JDK
+   * implementation buffers. Nothing happens once the document has ended (the end of the document
+   * flushes).
+   */
+  public void flush() {
     if (!ended) {
       try {
         xml.flush();
@@ -143,6 +149,11 @@ public final class StaxRecordWriter {
         throw failure(e);
       }
     }
+  }
+
+  /** The bytes that have gone to the stream; the writer is flushed first, so this is exact. */
+  public long bytesWritten() {
+    flush();
     return sink.count;
   }
 
