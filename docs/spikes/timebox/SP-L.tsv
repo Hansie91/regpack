@@ -1,2 +1,4 @@
 2026-10-11T05:38:34.982743200Z	START	
 2026-10-11T08:15:32.373854Z	PAUSE	waiting for the owner: push and smoke dispatch of sp-l (L4 step 3)
+2026-10-11T17:40:43.259518900Z	RESUME	smoke artefacts of run 38153007292 received
+2026-10-11T17:41:32.167760200Z	PAUSE	waiting for the owner: full dispatch of sp-l (L4 step 4)
