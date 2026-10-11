@@ -206,6 +206,78 @@ public final class PartitionStudy {
     return List.copyOf(out);
   }
 
+  /**
+   * Checks the arguments of {@link #runPoint}: the same rules as {@link #validate}, for one point.
+   *
+   * @throws IllegalArgumentException for a plan that cannot hold the populated days or a
+   *     non-positive size
+   */
+  static void validatePoint(
+      Granularity granularity,
+      int count,
+      int populatedPartitions,
+      int rowsPerPopulatedPartition,
+      int blocks,
+      int lookupsPerBlock) {
+    if (count <= 0) {
+      throw new IllegalArgumentException("the partition count must be positive: " + count);
+    }
+    if (populatedPartitions <= 0 || rowsPerPopulatedPartition <= 0) {
+      throw new IllegalArgumentException(
+          "populated partitions and rows per partition must be positive");
+    }
+    if (blocks <= 0 || lookupsPerBlock <= 0) {
+      throw new IllegalArgumentException("blocks and lookups per block must be positive");
+    }
+    if (granularity == Granularity.DAILY) {
+      if (count < populatedPartitions) {
+        throw new IllegalArgumentException(
+            "a daily plan of " + count + " cannot hold " + populatedPartitions + " populated days");
+      }
+    } else if (windowStart(populatedPartitions)
+        .isBefore(LAST_DAY.withDayOfMonth(1).minusMonths(count - 1L))) {
+      throw new IllegalArgumentException(
+          "the monthly plan of "
+              + count
+              + " months does not reach back over the "
+              + populatedPartitions
+              + " populated days");
+    }
+  }
+
+  /**
+   * Runs one point of the study on its own, so that a caller can look at the disk, or restart the
+   * cluster, between points. The cleaning of the schema is the same as in {@link #run}.
+   *
+   * @param granularity daily or monthly
+   * @param count the number of partitions of {@code decision}
+   */
+  public static Point runPoint(
+      PgFixture pg,
+      Granularity granularity,
+      int count,
+      int populatedPartitions,
+      int rowsPerPopulatedPartition,
+      int blocks,
+      int lookupsPerBlock)
+      throws SQLException {
+    validatePoint(
+        granularity,
+        count,
+        populatedPartitions,
+        rowsPerPopulatedPartition,
+        blocks,
+        lookupsPerBlock);
+    return point(
+        pg,
+        granularity,
+        count,
+        populatedPartitions,
+        rowsPerPopulatedPartition,
+        blocks,
+        lookupsPerBlock);
+  }
+
   private static Point point(
       PgFixture pg,
       Granularity granularity,

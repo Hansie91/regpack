@@ -85,6 +85,7 @@ class PgScriptsTest {
             "pg-basebackup.sh",
             "pg-restore.sh",
             "pg-drop-caches.sh",
+            "pg-baseline.sh",
             "runner-capture.sh");
   }
 

@@ -171,8 +171,12 @@ public final class RestoreRun {
    * @param gapRecords records ingested between the backup and the stop (the replay rate is {@code
    *     replayNanos / gapRecords})
    * @param gapObjects journal objects that were applied from the evidence journal
+   * @param bytesPerKey the bytes that one loaded key takes with its indexes, read after the load
+   *     and the checkpoint and <b>before</b> the gap ingest and the backup: the schema holds the
+   *     gap (about a million candidates at the burst rate) and its objects afterwards, which would
+   *     inflate the figure several times at the smaller sizes
    */
-  public record Outcome(Point point, long gapRecords, long gapObjects) {}
+  public record Outcome(Point point, long gapRecords, long gapObjects, long bytesPerKey) {}
 
   // ------------------------------------------------------------------ pure parts
 
@@ -278,6 +282,7 @@ public final class RestoreRun {
 
     Content before;
     long gapRecords;
+    long perKey;
     try (Connection c = pg.primary()) {
       c.setAutoCommit(true);
       SchemaInstaller.drop(c, SCHEMA);
@@ -285,6 +290,7 @@ public final class RestoreRun {
       JournalGapReplay.createTable(c, SCHEMA);
       loadKeys(c, keys, day);
       checkpoint(c);
+      perKey = bytesPerKey(c, SCHEMA, keys);
 
       shell.script("pg-standby.sh", "drop");
       checkpoint(c);
@@ -340,7 +346,7 @@ public final class RestoreRun {
       }
     }
     Point point = point(keys, script, fsync, gapObjectsNanos, analyzeNanos, verifyNanos);
-    return new Outcome(point, gapRecords, objects.size());
+    return new Outcome(point, gapRecords, objects.size(), perKey);
   }
 
   /**

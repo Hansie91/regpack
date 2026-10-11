@@ -86,6 +86,25 @@ class BurstSamplerTest {
   }
 
   @Test
+  void everyFailedSampleIsCountedEvenWhenTheReasonsAreCapped() {
+    VirtualClock clock = new VirtualClock();
+    BurstSampler sampler =
+        new BurstSampler(
+            () -> {
+              throw new java.io.IOException("connection refused");
+            },
+            clock);
+    for (int i = 0; i < 250; i++) {
+      sampler.sampleOnce();
+      clock.advance(VirtualClock.SECOND);
+    }
+    assertThat(sampler.reasons()).as("the reasons are capped").hasSizeLessThan(250);
+    assertThat(sampler.sampleFailures())
+        .as("a long outage must not under-count the violating samples (L-13)")
+        .isEqualTo(250);
+  }
+
+  @Test
   void deltasOfCountersArePerSecond() {
     VirtualClock clock = new VirtualClock();
     BurstSampler sampler =

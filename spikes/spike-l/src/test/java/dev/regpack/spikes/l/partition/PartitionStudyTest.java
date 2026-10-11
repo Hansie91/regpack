@@ -30,6 +30,33 @@ class PartitionStudyTest {
   }
 
   @Test
+  void aSinglePointIsCheckedLikeTheWholeStudy() {
+    // daily: the count must hold the populated days; monthly: the months must reach back over them
+    PartitionStudy.validatePoint(PartitionPlan.Granularity.DAILY, 1_826, 30, 300_000, 15, 200);
+    PartitionStudy.validatePoint(PartitionPlan.Granularity.MONTHLY, 60, 30, 300_000, 15, 200);
+    assertThatThrownBy(
+            () ->
+                PartitionStudy.validatePoint(PartitionPlan.Granularity.DAILY, 20, 30, 1_000, 3, 10))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("populated");
+    assertThatThrownBy(
+            () ->
+                PartitionStudy.validatePoint(
+                    PartitionPlan.Granularity.MONTHLY, 1, 40, 1_000, 3, 10))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("monthly");
+    assertThatThrownBy(
+            () -> PartitionStudy.validatePoint(PartitionPlan.Granularity.DAILY, 30, 10, 0, 3, 10))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                PartitionStudy.runPoint(
+                    null, PartitionPlan.Granularity.DAILY, 30, 10, 1_000, 0, 10))
+        .as("the arguments are checked before the server is touched")
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void theWindowOfPopulatedDaysEndsOnTheLastDay() {
     assertThat(PartitionStudy.LAST_DAY).isEqualTo(LocalDate.of(2026, 9, 30));
     assertThat(PartitionStudy.windowStart(30)).isEqualTo(LocalDate.of(2026, 9, 1));

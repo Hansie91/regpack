@@ -70,7 +70,9 @@ public final class MicroBatchWriter implements BurstRunner.BatchSink {
   /** A value that is a jsonb document, so that the loaders can tell it from text. */
   record Jsonb(String text) {}
 
-  static final String REGIME = "EMIR";
+  /** The regime of the sketch: the only one that the load model writes. */
+  public static final String REGIME = "EMIR";
+
   private static final long PATH_SEED = 17L;
   private static final long CONTEXT_ID = 1L;
   private static final int SOURCE_ID = 1;

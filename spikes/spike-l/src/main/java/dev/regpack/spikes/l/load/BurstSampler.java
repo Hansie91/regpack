@@ -79,6 +79,7 @@ public final class BurstSampler implements Runnable, BurstRunner.Monitor {
   private final long created;
   private final List<Row> rows = new ArrayList<>();
   private final List<String> reasons = new ArrayList<>();
+  private long sampleFailures;
   private Map<String, Long> previousCounters = Map.of();
   private long previousNanos;
   private boolean havePrevious;
@@ -101,6 +102,7 @@ public final class BurstSampler implements Runnable, BurstRunner.Monitor {
       reading = source.read();
     } catch (Exception e) {
       invalid = true;
+      sampleFailures++;
       addReason(
           "SAMPLE_FAILED at "
               + offset / SECOND
@@ -180,6 +182,14 @@ public final class BurstSampler implements Runnable, BurstRunner.Monitor {
   @Override
   public synchronized List<String> reasons() {
     return List.copyOf(reasons);
+  }
+
+  /**
+   * The samples that could not be taken at all. The reasons are capped, so a long outage must be
+   * counted here, not read off {@link #reasons()}.
+   */
+  public synchronized long sampleFailures() {
+    return sampleFailures;
   }
 
   /** The samples taken so far. */
