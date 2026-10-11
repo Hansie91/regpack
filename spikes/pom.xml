@@ -19,11 +19,14 @@
     <module>spike-r</module>
     <module>spike-g</module>
     <module>spike-x</module>
+    <module>spike-l</module>
   </modules>
 
   <properties>
     <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
     <cel-java.version>0.14.0</cel-java.version>
+    <postgresql.version>42.7.14</postgresql.version>
+    <checker-qual.version>3.55.1</checker-qual.version>
     <!-- set by each spike module: the class that the runner jar starts -->
     <spike.mainClass></spike.mainClass>
   </properties>
@@ -36,6 +39,9 @@
       <dependency><groupId>dev.cel</groupId><artifactId>runtime</artifactId><version>${cel-java.version}</version></dependency>
       <dependency><groupId>dev.cel</groupId><artifactId>common</artifactId><version>${cel-java.version}</version></dependency>
       <dependency><groupId>dev.cel</groupId><artifactId>protobuf</artifactId><version>${cel-java.version}</version></dependency>
+      <!-- L1: the PostgreSQL JDBC driver (BSD-2-Clause) and its annotation dependency (MIT); both on the licence allow-list, no approval needed -->
+      <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
+      <dependency><groupId>org.checkerframework</groupId><artifactId>checker-qual</artifactId><version>${checker-qual.version}</version></dependency>
     </dependencies>
   </dependencyManagement>
 
@@ -135,6 +141,9 @@
                     <include>org.antlr:antlr4-runtime:4.13.2</include>
                     <include>com.google.re2j:re2j:1.8</include>
                     <include>org.threeten:threeten-extra:1.10.0</include>
+                    <!-- L1: the PostgreSQL JDBC driver and checker-qual, exactly as resolved (P1a plan, task L1) -->
+                    <include>org.postgresql:postgresql:42.7.14</include>
+                    <include>org.checkerframework:checker-qual:3.55.1</include>
                   </includes>
                   <message>Spike dependencies must be listed here with exact versions (P1a plan, Approvals)</message>
                 </bannedDependencies>
