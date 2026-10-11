@@ -216,6 +216,25 @@ public final class BurstRunner {
     }
   }
 
+  /**
+   * Runs the load into a schema that already holds the tables of the ledger sketch with a partition
+   * of {@code decision} and {@code ingest} for {@code day}, the day on which the generator draws
+   * every trade; nothing is installed and nothing is sampled. The restore study uses it to ingest
+   * the gap after a backup: that run has no synchronous standby on purpose, so the caller passes
+   * the monitor (usually {@link Monitor#none()}) and the result never counts for L-1 to L-4.
+   */
+  public static RunResult runInto(
+      PgFixture pg,
+      String schema,
+      LocalDate day,
+      Config config,
+      TradeRecordGen gen,
+      NanoClock clock,
+      Monitor monitor) {
+    return execute(
+        config, pgSinks(pg::primary, schema, config, day), gen, clock, Sleeper.system(), monitor);
+  }
+
   /** Opens a connection for a writer. */
   @FunctionalInterface
   interface Connections {
@@ -229,11 +248,16 @@ public final class BurstRunner {
    * @param day the one day that has a partition; a batch of another day is refused
    */
   static SinkFactory pgSinks(Connections connections, Config config, LocalDate day) {
+    return pgSinks(connections, SCHEMA, config, day);
+  }
+
+  /** As {@link #pgSinks(Connections, Config, LocalDate)}, into a schema of the caller's choice. */
+  static SinkFactory pgSinks(Connections connections, String schema, Config config, LocalDate day) {
     return index -> {
       Connection c = connections.open();
       MicroBatchWriter writer;
       try {
-        writer = new MicroBatchWriter(c, SCHEMA, config.method(), config.variant());
+        writer = new MicroBatchWriter(c, schema, config.method(), config.variant());
       } catch (SQLException | RuntimeException e) {
         try {
           c.close();

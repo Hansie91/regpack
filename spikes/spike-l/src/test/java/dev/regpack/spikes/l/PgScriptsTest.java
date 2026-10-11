@@ -82,6 +82,9 @@ class PgScriptsTest {
             "pg-standby.sh",
             "pg-init-replication.sh",
             "it-pg.sh",
+            "pg-basebackup.sh",
+            "pg-restore.sh",
+            "pg-drop-caches.sh",
             "runner-capture.sh");
   }
 

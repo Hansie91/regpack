@@ -61,9 +61,26 @@ public final class SchemaInstaller {
   public static void install(
       Connection c, String schema, Variant variant, LocalDate firstDay, int days)
       throws SQLException {
-    String quoted = quote(schema);
     List<String> partitions = new ArrayList<>(partitionStatements("decision", firstDay, days));
     partitions.addAll(partitionStatements("ingest", firstDay, days));
+    installTables(c, schema, variant);
+    try (Statement st = c.createStatement()) {
+      for (String statement : partitions) {
+        st.execute(statement);
+      }
+    }
+  }
+
+  /**
+   * Creates {@code schema} and the tables of the sketch, with no partition of {@code decision} or
+   * {@code ingest} (the partition study creates its own), and makes the schema the search path of
+   * the connection. Everything else is as for {@link #install}.
+   *
+   * @throws IllegalArgumentException if the schema name is not a lower-case identifier
+   */
+  public static void installTables(Connection c, String schema, Variant variant)
+      throws SQLException {
+    String quoted = quote(schema);
     try (Statement st = c.createStatement()) {
       st.execute("CREATE SCHEMA " + quoted);
       st.execute("SET search_path TO " + quoted);
@@ -72,9 +89,6 @@ public final class SchemaInstaller {
       }
       if (variant == Variant.E3_VERBOSE) {
         st.execute("ALTER TABLE decision ADD COLUMN path jsonb");
-      }
-      for (String statement : partitions) {
-        st.execute(statement);
       }
     }
   }
