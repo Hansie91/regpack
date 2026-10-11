@@ -25,6 +25,8 @@ import org.xml.sax.SAXException;
  */
 public final class FileGateBench {
   private static final String MESSAGE_ID = "file-gate";
+  private static final String GENERAL_ENTITY_LIMIT = "jdk.xml.maxGeneralEntitySizeLimit";
+  private static final String TOTAL_ENTITY_LIMIT = "jdk.xml.totalEntitySizeLimit";
 
   private FileGateBench() {}
 
@@ -74,17 +76,38 @@ public final class FileGateBench {
   }
 
   /**
-   * Validates the file with one streaming validator (secure processing, no external access) and
-   * returns the nanoseconds of the validation alone.
-   *
-   * @throws IllegalStateException when the file is not valid; the message is the first error
+   * A validator for a whole file: secure processing on, no external access, and the one JDK limit
+   * that a file of generated size breaks lifted. With secure processing on the JDK parser stops a
+   * document that holds more than 100,000 characters of entity references ({@code &amp;} and the
+   * like in the text of the records), and a file of 100,000 records holds about that many; the
+   * first full-size run found it. The limits on the size of general entities (one, and all
+   * together) are switched off here; external access stays off and the entity expansion limit stays
+   * on.
    */
-  public static long validateNanos(Path file, Schema schema) {
+  public static Validator newValidator(Schema schema) {
     Validator validator = schema.newValidator();
     try {
       validator.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
       validator.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
       validator.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+      validator.setProperty(GENERAL_ENTITY_LIMIT, "0");
+      validator.setProperty(TOTAL_ENTITY_LIMIT, "0");
+    } catch (SAXException e) {
+      throw new IllegalStateException(
+          "the JDK validator cannot be configured: " + e.getMessage(), e);
+    }
+    return validator;
+  }
+
+  /**
+   * Validates the file with one streaming validator ({@link #newValidator}) and returns the
+   * nanoseconds of the validation alone.
+   *
+   * @throws IllegalStateException when the file is not valid; the message is the first error
+   */
+  public static long validateNanos(Path file, Schema schema) {
+    Validator validator = newValidator(schema);
+    try {
       StreamSource source = new StreamSource(file.toFile());
       long start = System.nanoTime();
       validator.validate(source);

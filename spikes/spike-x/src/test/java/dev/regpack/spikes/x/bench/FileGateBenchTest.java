@@ -64,6 +64,26 @@ class FileGateBenchTest {
     }
   }
 
+  /**
+   * Found by the first full-size run: with secure processing on, the JDK parser stops a document
+   * that holds more than 100,000 characters of entity references ({@code &amp;} and the like), and
+   * a file of 100,000 records holds about that many. The gate lifts that one limit; the others stay
+   * (external access, expansion and total-size limits).
+   */
+  @Test
+  void aFileWithMoreThanOneHundredThousandEntityReferencesPassesTheGate(@TempDir Path dir)
+      throws IOException, SAXException {
+    String xsd =
+        "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
+            + "<xs:element name=\"t\" type=\"xs:string\"/></xs:schema>";
+    Schema schema =
+        TestSchemas.factory()
+            .newSchema(new javax.xml.transform.stream.StreamSource(new java.io.StringReader(xsd)));
+    Path file = dir.resolve("entities.xml");
+    Files.writeString(file, "<t>" + "&amp;".repeat(100_500) + "</t>", StandardCharsets.UTF_8);
+    assertThat(FileGateBench.validateNanos(file, schema)).isPositive();
+  }
+
   @Test
   void validatorsUseSecureProcessingAndNoExternalAccess(@TempDir Path dir)
       throws IOException, SAXException {
