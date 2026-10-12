@@ -10,7 +10,6 @@ import dev.regpack.bench.eval.ResultsEvaluator;
 import dev.regpack.bench.eval.SpikeResult;
 import dev.regpack.bench.eval.Verdict;
 import dev.regpack.bench.imp.ImportCommand;
-import dev.regpack.bench.report.Git;
 import dev.regpack.bench.report.Publish;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -19,10 +18,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -63,6 +64,49 @@ class SpGMainTest {
     }
     Files.writeString(sp.resolve("register.md"), register, StandardCharsets.UTF_8);
     return tmp;
+  }
+
+  /**
+   * A temporary git repository with one commit that holds what the run, the publish and the import
+   * read: the lock of the criteria and the SP-G documents (pack files and register), copied from
+   * the real repository. It has no {@code docs/spikes/raw}, no summary and no time ledger, and its
+   * HEAD is its own commit, so what the import finds does not depend on the evidence committed in
+   * the real repository. The criteria registry is a resource of the bench module, not a file.
+   */
+  private static Path isolatedRepo(Path dir) throws Exception {
+    Files.createDirectories(dir);
+    git(dir, "init", "-q");
+    git(dir, "config", "user.name", "Test");
+    git(dir, "config", "user.email", "test@example.invalid");
+    git(dir, "config", "commit.gpgsign", "false");
+    Path lock = Path.of("docs/spikes/criteria.lock");
+    Files.createDirectories(dir.resolve(lock).getParent());
+    Files.copy(repo().resolve(lock), dir.resolve(lock));
+    Path documents = Path.of("docs/spikes/sp-g");
+    try (Stream<Path> files = Files.walk(repo().resolve(documents))) {
+      for (Path source : files.filter(Files::isRegularFile).toList()) {
+        Path target = dir.resolve(documents).resolve(repo().resolve(documents).relativize(source));
+        Files.createDirectories(target.getParent());
+        Files.copy(source, target);
+      }
+    }
+    git(dir, "add", "docs");
+    git(dir, "commit", "-q", "-m", "the documents of SP-G");
+    return dir;
+  }
+
+  private static String git(Path dir, String... args) throws Exception {
+    List<String> command = new ArrayList<>(List.of("git", "-C", dir.toString()));
+    command.addAll(List.of(args));
+    ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
+    // a repository chosen by the environment of a hook must not replace the one we were given
+    builder.environment().keySet().removeAll(List.of("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"));
+    Process process = builder.start();
+    String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    if (process.waitFor() != 0) {
+      throw new IllegalStateException("git " + List.of(args) + " failed: " + output);
+    }
+    return output;
   }
 
   private static MeasurementSet run(Path repo, Path out) throws IOException {
@@ -121,36 +165,66 @@ class SpGMainTest {
     assertThat(count(set, "G-4"))
         .as("failures of the coexistence check on the P0 in-memory ledger")
         .isEqualTo(new CountValue("G-4", 0, 1));
+  }
 
-    // the directory publishes and imports; the lock exists, so --allow-no-lock stays off
-    Optional<String> head = Git.head(repo());
-    assertThat(head).as("the test runs inside the repository").isPresent();
-    Map<String, String> runner = Map.of("GITHUB_ACTIONS", "true", "GITHUB_SHA", head.get());
+  /**
+   * The directory that {@code run} writes publishes, seals and imports with {@code --allow-no-lock}
+   * off because a lock exists. It does so in a temporary git repository of its own, never in the
+   * real one: the importer looks under {@code docs/spikes/raw/<ID>} of the repository it is given,
+   * and the raw evidence the real repository has committed (another configuration, or this very
+   * configuration already passing) is not what this test is about.
+   */
+  @Test
+  void theWrittenDirectoryPublishesSealsAndImportsInARepositoryOfItsOwn(@TempDir Path tmp)
+      throws Exception {
+    Path isolated = isolatedRepo(tmp.resolve("repository"));
+    assertThat(isolated.resolve("docs/spikes/raw"))
+        .as("no committed raw evidence in the repository under test")
+        .doesNotExist();
+    assertThat(isolated.resolve("docs/spikes/SP-G.summary.json"))
+        .as("no committed summary in the repository under test")
+        .doesNotExist();
+    Path out = tmp.resolve("results-local");
+    MeasurementSet set = run(isolated, out);
+    String head = git(isolated, "rev-parse", "HEAD").strip();
+    assertThat(set.runs()).extracting(r -> r.gitSha()).containsExactly(head);
+
+    // the status the criteria give for these measurements, whatever the register says
+    Verdict expected = evaluate(set).status();
+    List<Register.Row> register =
+        Register.parse(
+            Files.readString(
+                isolated.resolve("docs/spikes/sp-g/register.md"), StandardCharsets.UTF_8));
+    if (Register.open(register) > 0) {
+      assertThat(expected).isEqualTo(Verdict.INCONCLUSIVE);
+    } else if (Register.unfixable(register) > 0) {
+      assertThat(expected).isEqualTo(Verdict.FAIL);
+    }
+
+    // the directory publishes; the lock exists, so --allow-no-lock stays off
+    Map<String, String> runner = Map.of("GITHUB_ACTIONS", "true", "GITHUB_SHA", head);
     ByteArrayOutputStream published = new ByteArrayOutputStream();
     ByteArrayOutputStream problems = new ByteArrayOutputStream();
-    int sealed = Publish.run(out, "local", runner, repo(), stream(published), stream(problems));
+    int sealed = Publish.run(out, "local", runner, isolated, stream(published), stream(problems));
     assertThat(text(problems)).isEmpty();
     assertThat(sealed).isZero();
     assertThat(out.resolve("manifest.sha256")).exists();
+    assertThat(text(published)).contains("status=" + expected);
 
     ByteArrayOutputStream imported = new ByteArrayOutputStream();
     ByteArrayOutputStream importProblems = new ByteArrayOutputStream();
     int exit =
         ImportCommand.run(
             new ImportCommand.Options("SP-G", List.of(out), Optional.empty(), false, true),
-            repo(),
+            isolated,
             Instant.parse("2026-10-11T00:00:00Z"),
             stream(imported),
             stream(importProblems));
     assertThat(text(importProblems)).isEmpty();
     assertThat(exit).isZero();
-    assertThat(text(imported)).contains("import: OK (dry run) SP-G status=");
-    if (open > 0) {
-      assertThat(text(published)).contains("status=INCONCLUSIVE");
-      assertThat(text(imported)).contains("status=INCONCLUSIVE");
-    } else if (Register.unfixable(register) > 0) {
-      assertThat(text(imported)).contains("status=FAIL");
-    }
+    assertThat(text(imported))
+        .contains("import: OK (dry run) SP-G status=" + expected + " evidence=RAW");
+    assertThat(isolated.resolve("docs/spikes/raw")).as("a dry run writes nothing").doesNotExist();
   }
 
   @Test
