@@ -20,6 +20,18 @@ class LatencyBudgetTest {
   private static final double MARGIN_HOURS = 4;
   private static final int THREADS = 4;
 
+  /**
+   * What the shared ledger figure is: pooled over the burst runs, and L-2 is INCONCLUSIVE on it.
+   */
+  private static final String POOLED_CLAUSE =
+      "pooled over all batches of the cache-hot runs under the burst (SP-L runs A1 and A2);"
+          + " L-2 on this quantity is INCONCLUSIVE (see results.md)";
+
+  /** The loaded-lane remark: a figure derived from the SP-X report, not quoted from it. */
+  private static final String DERIVED_REMARK =
+      "about 1.9 times as long with four lanes busy (derived from the SP-X report: about 1.3 s"
+          + " against about 0.7 s for a file of 10,000 records)";
+
   private static Map<String, Map<String, Object>> decisions() {
     Map<String, Object> sr = new LinkedHashMap<>();
     sr.put("decide.usPerRecordWorst", new BigDecimal("17.902"));
@@ -143,6 +155,24 @@ class LatencyBudgetTest {
   }
 
   @Test
+  void sumSkipsTheSharedIntervalInsteadOfSubtractingItSoItIsExact() {
+    // a figure far larger than the others: adding it twice and taking it away again would lose the
+    // low bits of the small intervals, skipping the duplicate leaves them intact
+    double huge = 1e16;
+    Map<String, Map<String, Object>> d = decisions();
+    d.get("SP-L").put("ledger.ingestCommitP99Ms", new BigDecimal("1E+16"));
+    d.get("SP-L").put("ledger.commitP99Ms", new BigDecimal("1E+16"));
+    Result result = budget(d);
+    double decide = N * 17.902 / THREADS / 1000.0;
+    double expected = 0.0 + (fill() + huge) + decide + 401.137;
+    assertThat(result.measuredP99SumMillis()).isEqualTo(expected);
+
+    // and with the real figure: the same exact sum, in the order of the intervals
+    Result real = budget(decisions());
+    assertThat(real.measuredP99SumMillis()).isEqualTo(0.0 + (fill() + 9582.423) + decide + 401.137);
+  }
+
+  @Test
   void sharedLedgerMeasurementIsShownTwiceAndCountedOnce() {
     Result result = budget(decisions());
     Interval landed = result.intervals().get(0);
@@ -155,6 +185,26 @@ class LatencyBudgetTest {
     assertThat(versioned.composition())
         .contains("ledger.peakBacklogSeconds 30.259 s")
         .contains("ledger.openLoopP99Ms 24183.532 ms");
+  }
+
+  @Test
+  void bothLedgerIntervalsSayTheFigureIsPooledOverTheBurstRunsAndL2IsInconclusive() {
+    Result result = budget(decisions());
+    assertThat(result.intervals().get(0).composition()).contains(POOLED_CLAUSE);
+    assertThat(result.intervals().get(4).composition()).contains(POOLED_CLAUSE);
+    // the figure is the ledger commit p99 under either key, shared or not
+    Map<String, Map<String, Object>> d = decisions();
+    d.get("SP-L").put("ledger.ingestCommitP99Ms", new BigDecimal("100"));
+    d.get("SP-L").put("ledger.commitP99Ms", new BigDecimal("200"));
+    Result differing = budget(d);
+    assertThat(differing.intervals().get(0).composition()).contains(POOLED_CLAUSE);
+    assertThat(differing.intervals().get(4).composition()).contains(POOLED_CLAUSE);
+    // the other measured intervals do not carry it, and a pending one has no figure to qualify
+    assertThat(result.intervals().get(2).composition()).doesNotContain("INCONCLUSIVE");
+    assertThat(result.intervals().get(5).composition()).doesNotContain("INCONCLUSIVE");
+    Map<String, Map<String, Object>> missing = decisions();
+    missing.get("SP-L").put("ledger.commitP99Ms", "NOT_MEASURED");
+    assertThat(budget(missing).intervals().get(4).composition()).doesNotContain("INCONCLUSIVE");
   }
 
   @Test
@@ -196,7 +246,8 @@ class LatencyBudgetTest {
     assertThat(assembled.p99Millis()).contains(401.137);
     assertThat(assembled.composition())
         .contains("assemble.latencyMs.5000")
-        .contains("about 1.9 times as long with four lanes busy")
+        .contains(DERIVED_REMARK)
+        .doesNotContain("(SP-X report)")
         .contains("not a p99");
 
     // 22,000 x 0.5 x 1.5 = 16,500 is nearer to 25,000 than to 5,000
@@ -242,6 +293,7 @@ class LatencyBudgetTest {
     assertThat(text).contains("SP-N (P1b)", "SP-S (P1b)", "SP-W (P1b)", "P5 (validation layers");
     assertThat(text).contains("14400000 ms");
     assertThat(text).contains("counted once");
+    assertThat(text).contains(POOLED_CLAUSE).contains(DERIVED_REMARK);
     assertThat(text).doesNotContain("T0").doesNotContain("2026-");
   }
 

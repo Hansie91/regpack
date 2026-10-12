@@ -27,6 +27,11 @@ class ConsolidateCommandsTest {
   private static final Criteria CRITERIA = Criteria.load();
   private static final Instant NOW = Instant.parse("2026-10-11T10:00:00Z");
 
+  /** The date and the time of day of the clock handed to the command: no output may carry them. */
+  private static final String NOW_DATE = NOW.toString().substring(0, 10);
+
+  private static final String NOW_TIME = NOW.toString().substring(11, 19);
+
   @TempDir Path repo;
 
   private final ByteArrayOutputStream outBytes = new ByteArrayOutputStream();
@@ -134,6 +139,7 @@ class ConsolidateCommandsTest {
     String text = new String(first, StandardCharsets.UTF_8);
     assertThat(text).doesNotContain("\r").contains("| SP-M | DEFERRED");
     assertThat(text).contains("| L-2 | INCONCLUSIVE |");
+    assertDoesNotCarryTheClock(text);
   }
 
   @Test
@@ -145,6 +151,52 @@ class ConsolidateCommandsTest {
     String text = new String(first, StandardCharsets.UTF_8);
     assertThat(text).contains("verdict: PARTIAL").doesNotContain("\r").doesNotContain("FITS");
     assertThat(text).contains("margin: 4 h = 14400000 ms");
+    assertThat(text).contains("L-2 on this quantity is INCONCLUSIVE (see results.md)");
+    assertDoesNotCarryTheClock(text);
+  }
+
+  /** The commands get the clock but the generated files must not read it. */
+  private static void assertDoesNotCarryTheClock(String text) {
+    assertThat(text)
+        .doesNotContain(NOW.toString())
+        .doesNotContain(NOW_DATE)
+        .doesNotContain(NOW_TIME);
+  }
+
+  @Test
+  void decoyRawAndInboxFilesDoNotChangeTheGeneratedBytes() throws IOException {
+    assertThat(bench("results", "--write", "docs/spikes/results.md")).isZero();
+    assertThat(bench("budget", "--write", "docs/spikes/latency-budget.md")).isZero();
+    byte[] results = Files.readAllBytes(repo.resolve("docs/spikes/results.md"));
+    byte[] budget = Files.readAllBytes(repo.resolve("docs/spikes/latency-budget.md"));
+
+    // files that look like imported evidence, with other values than the committed summaries
+    Map<String, Object> otherL = decisionsL();
+    otherL.put("ledger.ingestCommitP99Ms", new BigDecimal("1.5"));
+    otherL.put("ledger.commitP99Ms", new BigDecimal("1.5"));
+    for (String id : List.of("SP-R", "SP-G", "SP-L", "SP-X")) {
+      Path dir = repo.resolve("docs/spikes/raw").resolve(id).resolve("decoy");
+      Files.createDirectories(dir);
+      Files.writeString(
+          dir.resolve("measurements.json"),
+          "{\"schema\":\"decoy\",\"spike\":\"" + id + "\",\"value\":123456789}\n",
+          StandardCharsets.UTF_8);
+    }
+    Path inbox = repo.resolve("spikes/inbox/decoy");
+    Files.createDirectories(inbox);
+    Files.writeString(
+        inbox.resolve("summary.json"),
+        spike("SP-L", Verdict.PASS, otherL, row("L-2", Verdict.PASS)).toJson() + "\n",
+        StandardCharsets.UTF_8);
+    assertThat(repo.resolve("docs/spikes/raw/SP-L/decoy/measurements.json")).isRegularFile();
+    assertThat(repo.resolve("spikes/inbox/decoy/summary.json")).isRegularFile();
+
+    assertThat(bench("results", "--write", "docs/spikes/results-with-decoys.md")).isZero();
+    assertThat(bench("budget", "--write", "docs/spikes/latency-budget-with-decoys.md")).isZero();
+    assertThat(Files.readAllBytes(repo.resolve("docs/spikes/results-with-decoys.md")))
+        .isEqualTo(results);
+    assertThat(Files.readAllBytes(repo.resolve("docs/spikes/latency-budget-with-decoys.md")))
+        .isEqualTo(budget);
   }
 
   @Test

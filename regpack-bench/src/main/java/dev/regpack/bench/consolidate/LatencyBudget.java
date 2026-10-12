@@ -3,6 +3,7 @@ package dev.regpack.bench.consolidate;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -41,9 +42,22 @@ public final class LatencyBudget {
 
   static final double LEGS = 1.5;
 
-  /** What the SP-X report says about a file cycle with four lanes busy. */
+  /**
+   * What the SP-X report gives for a file cycle with four lanes busy: the factor is derived from
+   * two figures of the report, it is not stated there.
+   */
   static final String LOADED_ASSEMBLE_REMARK =
-      "the stage needs about 1.9 times as long with four lanes busy (SP-X report)";
+      "the stage needs about 1.9 times as long with four lanes busy (derived from the SP-X report:"
+          + " about 1.3 s against about 0.7 s for a file of 10,000 records)";
+
+  /**
+   * What the ledger commit p99 is in the SP-L report: one pooled figure over the burst runs, and
+   * the criterion L-2 on this quantity is INCONCLUSIVE. It is printed in every interval that shows
+   * {@code ledger.ingestCommitP99Ms} or {@code ledger.commitP99Ms}, which are this figure.
+   */
+  static final String POOLED_BURST_CLAUSE =
+      "pooled over all batches of the cache-hot runs under the burst (SP-L runs A1 and A2);"
+          + " L-2 on this quantity is INCONCLUSIVE (see results.md)";
 
   private static final String ASSEMBLE_PREFIX = "assemble.latencyMs.";
 
@@ -159,7 +173,8 @@ public final class LatencyBudget {
             "validated",
             "the validation layers of P5: no spike exists for this interval",
             "P5 (validation layers; no spike)"));
-    intervals.add(validatedToVersioned(sl, commit, shared));
+    Interval validatedToVersioned = validatedToVersioned(sl, commit, shared);
+    intervals.add(validatedToVersioned);
     intervals.add(versionedToAssembled(sx, microBatchN));
     intervals.add(
         pending(
@@ -172,11 +187,12 @@ public final class LatencyBudget {
 
     double sum = 0;
     for (Interval interval : intervals) {
+      if (shared && interval.equals(validatedToVersioned)) {
+        // the second interval that shows the shared measurement adds nothing: it is skipped, not
+        // subtracted afterwards, so that the sum is exactly the sum of the other figures
+        continue;
+      }
       sum += interval.p99Millis().orElse(0.0);
-    }
-    if (shared) {
-      // the second interval that shows the shared measurement adds nothing to the sum
-      sum -= commit.get();
     }
     List<Interval> pending = intervals.stream().filter(i -> i.basis() == Basis.PENDING).toList();
     return new Result(intervals, sum, marginHours * 3_600_000.0, pending, Verdict.PARTIAL);
@@ -226,7 +242,8 @@ public final class LatencyBudget {
             + ms(fillMillis)
             + " ms (DERIVED) + ledger.ingestCommitP99Ms "
             + ms(ingest.get())
-            + " ms (SP-L, MEASURED p99 of the two synchronous transactions of a micro-batch"
+            + " ms (SP-L, MEASURED p99 of the two synchronous transactions of a micro-batch, "
+            + POOLED_BURST_CLAUSE
             + (shared
                 ? "; the same measurement as ledger.commitP99Ms in validated to versioned,"
                     + " a shared measurement counted once in the sum"
@@ -292,7 +309,8 @@ public final class LatencyBudget {
           SP_L);
     }
     StringBuilder text = new StringBuilder();
-    text.append("ledger.commitP99Ms ").append(ms(commit.get())).append(" ms (SP-L, MEASURED p99");
+    text.append("ledger.commitP99Ms ").append(ms(commit.get())).append(" ms (SP-L, MEASURED p99, ");
+    text.append(POOLED_BURST_CLAUSE);
     if (shared) {
       text.append("; the same measurement as ledger.ingestCommitP99Ms in arrival to landed,");
       text.append(" a shared measurement counted once in the sum");
@@ -387,7 +405,7 @@ public final class LatencyBudget {
         sizes.add(Integer.parseInt(rest));
       }
     }
-    sizes.sort(null);
+    sizes.sort(Comparator.naturalOrder());
     return sizes;
   }
 
