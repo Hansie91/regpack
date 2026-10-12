@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.regpack.bench.data.GeneratedPack;
 import dev.regpack.bench.data.PackShape;
 import dev.regpack.bench.data.RulePackGen;
+import dev.regpack.ports.exec.CostBudget;
 import dev.regpack.spikes.r.bench.HotSwap.Detail;
 import dev.regpack.spikes.r.bench.HotSwap.Pinning;
 import dev.regpack.spikes.r.bench.HotSwap.Run;
@@ -16,6 +17,8 @@ import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Signature;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class HotSwapTest {
@@ -62,6 +65,38 @@ class HotSwapTest {
         .isEqualTo(21);
     assertThat(java.util.Arrays.stream(detail.run().activationNanos()).allMatch(n -> n > 0))
         .isTrue();
+  }
+
+  @Test
+  void recordsThatAreNotDecidedAreCountedAsLost() {
+    // fault injection: the evaluator skips every 10th record of the ring position it was handed
+    AtomicLong calls = new AtomicLong();
+    HotSwap.Decider skipping =
+        (executor, program, record) ->
+            calls.incrementAndGet() % 10 == 0
+                ? Optional.empty()
+                : Optional.of(executor.execute(program, record, new CostBudget(Long.MAX_VALUE)));
+    Detail detail =
+        HotSwap.measureDetailed(
+            LAYER, pack(1L, 20), pack(2L, 20), 2, 5, Pinning.PER_BATCH, 100, skipping);
+    assertThat(detail.submitted()).isPositive();
+    assertThat(detail.run().lostRecords()).as("skipped records are lost").isPositive();
+    assertThat(detail.run().lostRecords()).isEqualTo(detail.submitted() - detail.evaluated());
+    assertThat(detail.evaluated()).isLessThan(detail.submitted());
+  }
+
+  @Test
+  void everyKindOfDecisionCountsAsEvaluated() {
+    // a failed or budget-exhausted record is still decided (one decision per record), not lost
+    CostBudget tiny = new CostBudget(1L);
+    HotSwap.Decider exhausting =
+        (executor, program, record) -> Optional.of(executor.execute(program, record, tiny));
+    Detail detail =
+        HotSwap.measureDetailed(
+            LAYER, pack(1L, 20), pack(2L, 20), 2, 5, Pinning.PER_BATCH, 100, exhausting);
+    assertThat(detail.submitted()).isPositive();
+    assertThat(detail.run().lostRecords()).isZero();
+    assertThat(detail.evaluated()).isEqualTo(detail.submitted());
   }
 
   @Test

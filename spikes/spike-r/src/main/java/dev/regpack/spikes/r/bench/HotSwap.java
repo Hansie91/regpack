@@ -19,6 +19,7 @@ import java.security.Signature;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
@@ -68,6 +69,20 @@ public final class HotSwap {
   /** The run with the evidence behind it. */
   record Detail(Run run, long submitted, long evaluated, int generationsEvaluated) {}
 
+  /**
+   * Decides one record under the pinned program. An empty result means the record was not evaluated
+   * (the production decider never returns empty; a test double does, to prove that the lost-records
+   * count can become positive).
+   */
+  @FunctionalInterface
+  interface Decider {
+    Optional<ExecutionResult<TableDecision>> decide(
+        MeteredExecutor executor, RuleTableProgram program, TradeRecord record);
+  }
+
+  private static final Decider METERED =
+      (executor, program, record) -> Optional.of(executor.execute(program, record, UNLIMITED));
+
   private HotSwap() {}
 
   /**
@@ -104,6 +119,18 @@ public final class HotSwap {
       int swaps,
       Pinning pinning,
       int batchSize) {
+    return measureDetailed(layer, a, b, evaluatorThreads, swaps, pinning, batchSize, METERED);
+  }
+
+  static Detail measureDetailed(
+      Expression layer,
+      GeneratedPack a,
+      GeneratedPack b,
+      int evaluatorThreads,
+      int swaps,
+      Pinning pinning,
+      int batchSize,
+      Decider decider) {
     if (evaluatorThreads < 1 || swaps < 1 || batchSize < 1) {
       throw new IllegalArgumentException("threads, swaps and batch size must be at least 1");
     }
@@ -120,7 +147,7 @@ public final class HotSwap {
         new Shared(holder, ThroughputBench.ring(2L, RING), swaps + 1, pinning, batchSize);
     List<Thread> threads = new ArrayList<>();
     for (int i = 0; i < evaluatorThreads; i++) {
-      Thread thread = new Thread(new EvaluatorLoop(shared), "spike-r-swap-eval-" + i);
+      Thread thread = new Thread(new EvaluatorLoop(shared, decider), "spike-r-swap-eval-" + i);
       thread.setDaemon(true);
       threads.add(thread);
       thread.start();
@@ -198,11 +225,13 @@ public final class HotSwap {
     private final Shared shared;
     private final MeteredExecutor executor = new MeteredExecutor();
     private final BatchAudit audit = new BatchAudit();
+    private final Decider decider;
     private long cachedGeneration = -1;
     private RuleTableProgram program;
 
-    EvaluatorLoop(Shared shared) {
+    EvaluatorLoop(Shared shared, Decider decider) {
       this.shared = shared;
+      this.decider = decider;
     }
 
     @Override
@@ -217,8 +246,14 @@ public final class HotSwap {
                 shared.pinning == Pinning.PER_RECORD ? shared.holder.current() : pinned;
             RuleTableProgram current = programFor(active);
             TradeRecord record = shared.ring[(int) ((first + k) % shared.ring.length)];
-            audit.record(label(ruleId(executor.execute(current, record, UNLIMITED))));
-            done++;
+            // one decision per record, whichever of the three results it is; a record without a
+            // decision stays in "submitted" only, and that difference is the lost-records count
+            Optional<ExecutionResult<TableDecision>> decision =
+                decider.decide(executor, current, record);
+            if (decision.isPresent()) {
+              audit.record(label(ruleId(decision.get())));
+              done++;
+            }
             if (k == 0 || shared.pinning == Pinning.PER_RECORD) {
               shared.markSeen(active.generation());
             }

@@ -206,17 +206,59 @@ class PackFilesTest {
   }
 
   @Test
-  void everyUndispositionedFixQuotesTheSpecVerbatim() throws IOException {
-    String spec = spec();
-    for (Register.Row row : register()) {
+  void everyFixQuotesTheSpecVerbatim() throws IOException {
+    List<Register.Row> rows = register();
+    assertThat(rows.stream().filter(r -> r.proposedFix().contains("OLD<<")).count())
+        .as("the loop must have something to check")
+        .isPositive();
+    assertThat(registerFixProblems(rows, spec())).isEmpty();
+  }
+
+  /**
+   * The problems of the fixes of a register: every row with an OLD wording is checked against the
+   * spec whatever its status (an ACCEPTED fix is still a quotation of the spec text that it
+   * changes), a PROPOSED row must have one, and an OPEN row has none.
+   */
+  static List<String> registerFixProblems(List<Register.Row> rows, String spec) {
+    List<String> problems = new ArrayList<>();
+    for (Register.Row row : rows) {
       String fix = row.proposedFix();
-      if (row.status().equals("PROPOSED")) {
-        assertThat(fixProblems(fix, spec)).as("%s proposed_fix", row.id()).isEmpty();
-      } else if (row.status().equals("OPEN")) {
+      if (fix.contains("OLD<<") || row.status().equals("PROPOSED")) {
+        for (String problem : fixProblems(fix, spec)) {
+          problems.add(row.id() + " (" + row.status() + ") proposed_fix: " + problem);
+        }
+      }
+      if (row.status().equals("OPEN") && fix.contains("OLD<<")) {
         // an OPEN row has no fix: it is the honest state of a refuted hypothesis or a missing fix
-        assertThat(fix).as("%s has no fix text", row.id()).doesNotContain("OLD<<");
+        problems.add(row.id() + " is OPEN but has a fix text");
       }
     }
+    return problems;
+  }
+
+  @Test
+  void theRegisterFixCheckFailsOnAnAcceptedRowWhoseOldWordingIsNotInTheSpec() {
+    String spec = "## 2. Two\nother wording of the second section appears here\n";
+    Register.Row good =
+        new Register.Row(
+            "BRK-01",
+            "H1",
+            "ACCEPTED",
+            "FIX_BEFORE_FREEZE",
+            "§2 OLD<<other wording of the second section>> NEW<<changed wording of two>>");
+    Register.Row stale =
+        new Register.Row(
+            "BRK-02",
+            "H2",
+            "ACCEPTED",
+            "FIX_BEFORE_FREEZE",
+            "§2 OLD<<wording that the spec does not contain>> NEW<<changed wording of two>>");
+    Register.Row noFix = new Register.Row("BRK-03", "H3", "REJECTED_NOT_NEEDED", "P12_ONLY", "-");
+    assertThat(registerFixProblems(List.of(good, noFix), spec)).isEmpty();
+    assertThat(registerFixProblems(List.of(good, stale, noFix), spec))
+        .singleElement()
+        .asString()
+        .contains("BRK-02", "ACCEPTED", "not in section 2");
   }
 
   @Test
@@ -337,18 +379,50 @@ class PackFilesTest {
   }
 
   @Test
-  void everyProposedRowHasAMarkerOnALineWithContent() throws IOException {
+  void everyRowWithAFixHasAMarkerOnALineWithContent() throws IOException {
     Set<String> inline = new TreeSet<>();
     for (String file : PACK_FILES) {
       inline.addAll(inlineMarkers(read(pack().resolve(file))));
     }
-    for (Register.Row row : register()) {
-      if (row.status().equals("PROPOSED")) {
-        // a marker that sits in a prose comment points at no encoded line: the hypothesis would be
-        // "confirmed" without an encoding that exposes it
-        assertThat(inline).as("%s has an inline marker", row.id()).contains(row.id());
+    List<Register.Row> rows = register();
+    assertThat(rows.stream().filter(r -> hasFix(r.proposedFix())).count())
+        .as("the loop must have something to check")
+        .isPositive();
+    assertThat(markerProblems(rows, inline)).isEmpty();
+  }
+
+  /** True when a proposed_fix cell holds a fix and not just the empty placeholder. */
+  static boolean hasFix(String fix) {
+    String s = fix.strip();
+    return !s.isEmpty() && !s.equals("-") && !s.equals("–") && !s.equals("—");
+  }
+
+  /**
+   * A row with a fix (whatever its status: an ACCEPTED or PROPOSED fix is only evidence if an
+   * encoded line exposes the break) needs its marker on a line with content, because a marker that
+   * sits in a prose comment points at no encoded line.
+   */
+  static List<String> markerProblems(List<Register.Row> rows, Set<String> inline) {
+    List<String> problems = new ArrayList<>();
+    for (Register.Row row : rows) {
+      if (hasFix(row.proposedFix()) && !inline.contains(row.id())) {
+        problems.add(row.id() + " (" + row.status() + ") has a fix but no inline marker");
       }
     }
+    return problems;
+  }
+
+  @Test
+  void theMarkerCheckFailsOnAnAcceptedRowWithoutAnInlineMarker() {
+    Register.Row accepted =
+        new Register.Row("BRK-01", "H1", "ACCEPTED", "FIX_BEFORE_FREEZE", "§2 OLD<<x>> NEW<<y>>");
+    Register.Row rejected =
+        new Register.Row("BRK-02", "H2", "REJECTED_NOT_NEEDED", "P12_ONLY", "-");
+    assertThat(markerProblems(List.of(accepted, rejected), Set.of("BRK-01"))).isEmpty();
+    assertThat(markerProblems(List.of(accepted, rejected), Set.of("BRK-02")))
+        .singleElement()
+        .asString()
+        .contains("BRK-01", "ACCEPTED");
   }
 
   @Test
