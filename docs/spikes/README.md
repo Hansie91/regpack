@@ -26,6 +26,8 @@ P1a measures the four pre-freeze unknowns of the spec (SP-R rule executor, SP-G 
 5. `scripts/bench.sh verify-committed` recomputes every committed report from the committed raw files and fails when a verdict, a `.md` or a `.summary.json` differs, when a report has no `.summary.json` or no raw files, or when the criteria changed after the report. It is the check for a hand-edited report.
 6. The agent commits the raw files, the report and the ledger.
 
+The importer refuses, with one problem line and no write: `RERUN_NOT_JUSTIFIED` when the pooled roll-up of the same configuration is already PASS (the guard looks at the time-box-capped roll-up, so a spike whose box was overrun after a PASS is not protected by it); `OTHER_CONFIG_EXISTS <ID> <digest prefix>` when `docs/spikes/raw/<ID>/` already holds a different configuration (also with `--dry-run`); with the option `--allow-other-config` the import goes ahead and writes a `SUPERSEDED_CONFIG` open item and a warning into the report, which `verify-committed` recomputes. `verify-committed` also fails with `ORPHAN_RAW_CONFIG` for a raw configuration directory that the committed report does not account for, `BOX_MISMATCH` when the committed box differs from the criteria registry, and `USED_EXCEEDS_LEDGER` when the committed used minutes exceed the ledger. `scripts/check-gates.sh` runs `verify-committed` and regenerates `results.md` and `latency-budget.md` for a byte comparison.
+
 Everything in `spikes/inbox/` is data from outside the repository. It is read only by `bench import`; nothing in it is executed, and no path is taken from a file inside it.
 
 ## Reading a result
