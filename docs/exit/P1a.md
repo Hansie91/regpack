@@ -69,6 +69,8 @@ Final ledger values (agent working time; CI and owner waits are not counted, a d
 
 Raw directories per spike: SP-R 1, SP-X 1, SP-L 1 (three parts of one run), SP-G 1 (local), and one dispatch each in the Actions listing (`spikes-run <spike> full`). Re-runs: none. The two smoke dispatches of SP-L and the selftest are not evidence for any verdict.
 
+CI on the final head `51a2d7b` (pushed 2026-10-11, owner-approved): [run 38194213639](https://github.com/Hansie91/regpack/actions/runs/38194213639), all seven jobs `success` (build on ubuntu-24.04 and windows-2025, determinism, the `spikes` job, and the three smokes: systemd, Windows Server service, kind and Helm). The tag for the owner to set after sign-off is `git tag p1a-spikes-final` (not set, not pushed); the merge of `p1a/spikes` into `main` is the owner's and conflicts only on the stub `spikes-run.yml` (take the `p1a/spikes` version).
+
 ## Exit criterion deviations
 
 - The only file outside the allowed list that changed is `regpack-app/src/test/java/dev/regpack/app/PackagingFilesTest.java` (one job id added to the exact CI job list, owner-approved, recorded in `docs/spikes/decisions.md`). No release module changed otherwise.
