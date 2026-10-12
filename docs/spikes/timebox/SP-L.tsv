@@ -4,3 +4,5 @@
 2026-10-11T17:41:32.167760200Z	PAUSE	waiting for the owner: full dispatch of sp-l (L4 step 4)
 2026-10-11T23:22:15.633159900Z	RESUME	artefacts of full run 38175053709 received
 2026-10-11T23:24:41.188622200Z	PAUSE	full run 38175053709 imported (FAIL on L-4); waiting for the owner: next step
+2026-10-11T23:51:50.698850800Z	RESUME	owner: write the report now, no further run
+2026-10-12T00:08:36.352862700Z	STOP	L4 step 6: report written
