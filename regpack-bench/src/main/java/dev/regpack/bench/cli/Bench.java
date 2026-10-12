@@ -3,6 +3,7 @@ package dev.regpack.bench.cli;
 import dev.regpack.bench.consolidate.LatencyBudget;
 import dev.regpack.bench.consolidate.ResultsTable;
 import dev.regpack.bench.eval.Criteria;
+import dev.regpack.bench.eval.Criterion;
 import dev.regpack.bench.eval.MeasurementSet;
 import dev.regpack.bench.eval.MeasurementSet.CountValue;
 import dev.regpack.bench.eval.MeasurementSet.ForkStat;
@@ -299,6 +300,7 @@ public final class Bench {
     Args a = Args.parse(args, 1, Set.of("--write"), Set.of()).noPositionals();
     String target = a.required("--write");
     Map<String, Map<String, Object>> decisions = new LinkedHashMap<>();
+    Optional<SpikeResult> l2Source = Optional.empty();
     for (String id : List.of(LatencyBudget.SP_R, LatencyBudget.SP_L, LatencyBudget.SP_X)) {
       Path file = summaryFile(repo, id);
       if (!Files.isRegularFile(file)) {
@@ -309,7 +311,14 @@ public final class Bench {
       if (read.isEmpty()) {
         return 1;
       }
+      if (!"RAW".equals(read.get().evidenceLevel())) {
+        err.println("budget: SUMMARY_EVIDENCE " + id);
+        return 1;
+      }
       decisions.put(id, read.get().decisions());
+      if (id.equals(LatencyBudget.SP_L)) {
+        l2Source = Optional.of(read.get());
+      }
     }
     Optional<String> missing = LatencyBudget.firstMissing(decisions);
     if (missing.isPresent()) {
@@ -321,7 +330,21 @@ public final class Bench {
     double margin = criteria.param("availableMarginHours").orElseThrow().doubleValue();
     int n = LatencyBudget.DEFAULT_MICRO_BATCH_N;
     int threads = LatencyBudget.DEFAULT_THREADS;
-    LatencyBudget.Result result = LatencyBudget.assemble(decisions, n, burst, margin, threads);
+    String l2Verdict =
+        l2Source.orElseThrow().criteria().stream()
+            .filter(row -> row.id().equals("L-2"))
+            .findFirst()
+            .map(row -> row.verdict().name())
+            .orElse("NOT_RUN (no L-2 row)");
+    BigDecimal l2Threshold = criteria.byId("L-2").flatMap(Criterion::threshold).orElseThrow();
+    LatencyBudget.Result result =
+        LatencyBudget.assemble(
+            decisions,
+            n,
+            burst,
+            margin,
+            threads,
+            new LatencyBudget.L2Reading(l2Verdict, l2Threshold));
     writeText(repo.resolve(target), LatencyBudget.render(result, n, burst, margin, threads));
     out.println(
         "budget: wrote "

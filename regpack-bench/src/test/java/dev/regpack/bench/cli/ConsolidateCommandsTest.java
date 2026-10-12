@@ -50,11 +50,20 @@ class ConsolidateCommandsTest {
 
   private static SpikeResult spike(
       String id, Verdict status, Map<String, Object> decisions, CriterionResult... rows) {
+    return spike(id, status, "RAW", decisions, rows);
+  }
+
+  private static SpikeResult spike(
+      String id,
+      Verdict status,
+      String evidenceLevel,
+      Map<String, Object> decisions,
+      CriterionResult... rows) {
     return new SpikeResult(
         id,
         status,
         "FULL",
-        "RAW",
+        evidenceLevel,
         List.of(rows),
         decisions,
         List.of(),
@@ -151,7 +160,10 @@ class ConsolidateCommandsTest {
     String text = new String(first, StandardCharsets.UTF_8);
     assertThat(text).contains("verdict: PARTIAL").doesNotContain("\r").doesNotContain("FITS");
     assertThat(text).contains("margin: 4 h = 14400000 ms");
-    assertThat(text).contains("L-2 on this quantity is INCONCLUSIVE (see results.md)");
+    assertThat(text)
+        .contains("this is not the L-2 value and no criterion judges it")
+        .contains("(verdict INCONCLUSIVE in the SP-L summary)")
+        .contains("9.6 times the L-2 threshold of 1000 ms");
     assertDoesNotCarryTheClock(text);
   }
 
@@ -207,6 +219,24 @@ class ConsolidateCommandsTest {
     assertThat(bench("budget", "--write", "docs/spikes/latency-budget.md")).isEqualTo(1);
     assertThat(err()).contains("budget: MISSING SP-L ledger.commitP99Ms");
     assertThat(repo.resolve("docs/spikes/latency-budget.md")).doesNotExist();
+  }
+
+  @Test
+  void budgetRefusesASummaryEvidenceSummaryAndWritesNothing() throws IOException {
+    write(spike("SP-L", Verdict.FAIL, "SUMMARY", decisionsL(), row("L-2", Verdict.INCONCLUSIVE)));
+    assertThat(bench("budget", "--write", "docs/spikes/latency-budget.md")).isEqualTo(1);
+    assertThat(err()).contains("budget: SUMMARY_EVIDENCE SP-L");
+    assertThat(repo.resolve("docs/spikes/latency-budget.md")).doesNotExist();
+  }
+
+  @Test
+  void resultsShowSummaryEvidenceAsPendingNotPass() throws IOException {
+    write(spike("SP-X", Verdict.PASS, "SUMMARY", decisionsX(), row("X-1a", Verdict.PASS)));
+    assertThat(bench("results", "--write", "docs/spikes/results.md")).isZero();
+    String text = read("docs/spikes/results.md");
+    assertThat(text).contains("| SP-X | PENDING (computed PASS) | SUMMARY |");
+    assertThat(text).contains("| X-1a | PENDING (computed PASS");
+    assertThat(text).doesNotContain("| X-1a | PASS");
   }
 
   @Test

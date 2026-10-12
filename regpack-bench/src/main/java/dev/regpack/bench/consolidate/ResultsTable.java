@@ -19,8 +19,9 @@ import java.util.Optional;
  * The results table of the four spikes, built from the committed summaries only. It shows per spike
  * the status and the evidence level, and per criterion the verdict with its labels (EXTRAPOLATED,
  * single VM, an alternative group that did not pass). A verdict other than PASS is never written
- * with the word PASS, and the deferred spikes are listed as deferred. The text has LF line ends and
- * no timestamp, so that regenerating it from the same summaries gives the same bytes.
+ * with the word PASS, a result on SUMMARY evidence is written as PENDING (computed ...), and the
+ * deferred spikes are listed as deferred. The text has LF line ends and no timestamp, so that
+ * regenerating it from the same summaries gives the same bytes.
  */
 public final class ResultsTable {
   /** The spikes P1a runs, in the order of the plan. */
@@ -123,7 +124,14 @@ public final class ResultsTable {
     out.append("on a projection, (single VM) when a noisy criterion was measured on one virtual ");
     out.append("machine, and (alternative group ... did not pass) when the criterion belongs to ");
     out.append("an alternative that did not pass as a whole. A spike passes when one alternative ");
-    out.append("group passes, so a spike PASS can sit beside a failed alternative.\n\n");
+    out.append("group passes, so a spike PASS can sit beside a failed alternative. A result that ");
+    out.append("rests on SUMMARY evidence (a pasted job summary) can never satisfy a gate: its ");
+    out.append(
+        "status and its verdicts are written as PENDING (computed ...) and never as a plain ");
+    out.append("PASS.\n\n");
+    out.append("Projection bounds (Theil-Sen, label theil-sen-projection) cover the slope of the ");
+    out.append("part that grows with size only, not the intercept or any modelled term; they are ");
+    out.append("not 95% order-statistic bounds.\n\n");
 
     out.append("## Spikes\n\n");
     out.append("| Spike | Status | Evidence | Scope | VMs | Alternatives | Time-box | Report |\n");
@@ -202,7 +210,7 @@ public final class ResultsTable {
       Optional<Criterion> c = criteria.byId(row.id());
       Optional<String> group = c.flatMap(Criterion::group);
       out.append("| ").append(row.id());
-      out.append(" | ").append(verdictText(row, c, group, groups, r.vmCount()));
+      out.append(" | ").append(verdictText(row, c, group, groups, r.vmCount(), isRaw(r)));
       out.append(" | ").append(row.basis().name());
       out.append(" | ").append(group.map(g -> g + " (" + word(groups.get(g)) + ")").orElse("-"));
       out.append(" | ").append(threshold(row, c));
@@ -226,6 +234,17 @@ public final class ResultsTable {
 
   /** A PASS carries its labels; any other verdict is plain text and never contains PASS. */
   private static String verdictText(
+      CriterionResult row,
+      Optional<Criterion> c,
+      Optional<String> group,
+      Map<String, Verdict> groups,
+      int vmCount,
+      boolean raw) {
+    String computed = computedVerdictText(row, c, group, groups, vmCount);
+    return raw ? computed : "PENDING (computed " + computed + ")";
+  }
+
+  private static String computedVerdictText(
       CriterionResult row,
       Optional<Criterion> c,
       Optional<String> group,
@@ -302,7 +321,17 @@ public final class ResultsTable {
     return result;
   }
 
+  /** Only RAW evidence can satisfy a gate; any other level is shown as pending. */
+  private static boolean isRaw(SpikeResult r) {
+    return "RAW".equals(r.evidenceLevel());
+  }
+
   private static String statusText(SpikeResult r, Map<String, Verdict> groups) {
+    String computed = computedStatusText(r, groups);
+    return isRaw(r) ? computed : "PENDING (computed " + computed + ")";
+  }
+
+  private static String computedStatusText(SpikeResult r, Map<String, Verdict> groups) {
     if (r.status() != Verdict.PASS) {
       return r.status().name();
     }

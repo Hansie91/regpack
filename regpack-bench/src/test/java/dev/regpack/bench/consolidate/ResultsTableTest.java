@@ -213,4 +213,53 @@ class ResultsTableTest {
             r.runs());
     assertThat(render(other)).contains("SP-R was evaluated against another criteria digest");
   }
+
+  private static SpikeResult withEvidence(SpikeResult r, String evidenceLevel) {
+    return new SpikeResult(
+        r.spike(),
+        r.status(),
+        r.scope(),
+        evidenceLevel,
+        r.criteria(),
+        r.decisions(),
+        r.open(),
+        r.source(),
+        r.env(),
+        r.timeBox(),
+        r.criteriaDigest(),
+        r.vmCount(),
+        r.mixedHardware(),
+        r.runs());
+  }
+
+  @Test
+  void summaryEvidenceIsNeverRenderedAsPass() {
+    SpikeResult pasted = withEvidence(sampleSpR(), "SUMMARY");
+    String text = render(pasted);
+    // the Spikes table and the per-spike section both say PENDING with the computed status
+    assertThat(line(text, "| SP-R |"))
+        .contains("| PENDING (computed PASS (alternative group did not pass: layer:cel)) |")
+        .contains("| SUMMARY |");
+    assertThat(line(text, "- status:"))
+        .isEqualTo("- status: PENDING (computed PASS (alternative group did not pass: layer:cel))");
+    // no criterion verdict cell of the result is a plain PASS
+    for (String id : List.of("R-1a", "R-1b", "R-2a", "R-3", "R-6a", "R-6b")) {
+      assertThat(line(text, "| " + id + " |")).as(id).contains("| PENDING (computed PASS");
+    }
+    assertThat(line(text, "| R-1a |")).doesNotContain("| PASS");
+    assertThat(line(text, "| R-2b |")).contains("| PENDING (computed FAIL) |");
+    assertThat(text).contains("rests on SUMMARY evidence: it cannot satisfy a gate");
+    // the same result with RAW evidence still reads PASS
+    String raw = render(sampleSpR());
+    assertThat(line(raw, "| R-1a |")).contains("| PASS |");
+  }
+
+  @Test
+  void theLegendStatesWhatTheProjectionBoundsCover() {
+    assertThat(render(sampleSpR()))
+        .contains(
+            "Projection bounds (Theil-Sen, label theil-sen-projection) cover the slope of the part"
+                + " that grows with size only, not the intercept or any modelled term; they are not"
+                + " 95% order-statistic bounds");
+  }
 }

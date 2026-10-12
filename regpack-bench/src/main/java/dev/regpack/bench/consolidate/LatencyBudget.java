@@ -51,13 +51,43 @@ public final class LatencyBudget {
           + " about 1.3 s against about 0.7 s for a file of 10,000 records)";
 
   /**
-   * What the ledger commit p99 is in the SP-L report: one pooled figure over the burst runs, and
-   * the criterion L-2 on this quantity is INCONCLUSIVE. It is printed in every interval that shows
-   * {@code ledger.ingestCommitP99Ms} or {@code ledger.commitP99Ms}, which are this figure.
+   * What the ledger commit p99 is in the SP-L report: one pooled p99 over all batches of the burst
+   * runs. It is not the L-2 value (the median of the per-window p99 values) and no criterion judges
+   * it. It is printed in every interval that shows {@code ledger.ingestCommitP99Ms} or {@code
+   * ledger.commitP99Ms}, which are this figure.
    */
-  static final String POOLED_BURST_CLAUSE =
-      "pooled over all batches of the cache-hot runs under the burst (SP-L runs A1 and A2);"
-          + " L-2 on this quantity is INCONCLUSIVE (see results.md)";
+  static String pooledBurstClause(double figureMillis, L2Reading l2) {
+    String ratio =
+        BigDecimal.valueOf(figureMillis)
+            .divide(l2.thresholdMillis(), 1, RoundingMode.HALF_EVEN)
+            .toPlainString();
+    return "pooled p99 over all batches of the cache-hot runs under the burst (SP-L runs A1 and"
+        + " A2); this is not the L-2 value and no criterion judges it: L-2 is the median of the"
+        + " per-window p99 values (verdict "
+        + l2.verdict()
+        + " in the SP-L summary), and this figure is "
+        + ratio
+        + " times the L-2 threshold of "
+        + l2.thresholdMillis().stripTrailingZeros().toPlainString()
+        + " ms";
+  }
+
+  /**
+   * What the budget says about criterion L-2 beside the pooled figure.
+   *
+   * @param verdict the verdict of L-2 as the SP-L summary records it, or a phrase saying it has
+   *     none
+   * @param thresholdMillis the L-2 threshold of the criteria registry, in milliseconds
+   */
+  public record L2Reading(String verdict, BigDecimal thresholdMillis) {
+    public L2Reading {
+      Objects.requireNonNull(verdict, "verdict");
+      Objects.requireNonNull(thresholdMillis, "thresholdMillis");
+      if (thresholdMillis.signum() <= 0) {
+        throw new IllegalArgumentException("the L-2 threshold must be positive");
+      }
+    }
+  }
 
   private static final String ASSEMBLE_PREFIX = "assemble.latencyMs.";
 
@@ -139,13 +169,16 @@ public final class LatencyBudget {
    * @param burstRecordsPerSecond the burst rate
    * @param marginHours the available margin in hours
    * @param threads the threads of the decide stage
+   * @param l2 the L-2 verdict and threshold, for the text beside the pooled ledger figure
    */
   public static Result assemble(
       Map<String, Map<String, Object>> decisionsBySpike,
       int microBatchN,
       double burstRecordsPerSecond,
       double marginHours,
-      int threads) {
+      int threads,
+      L2Reading l2) {
+    Objects.requireNonNull(l2, "l2");
     if (microBatchN < 1 || threads < 1 || !(burstRecordsPerSecond > 0) || !(marginHours > 0)) {
       throw new IllegalArgumentException("N, threads, burst and margin must be positive");
     }
@@ -159,7 +192,7 @@ public final class LatencyBudget {
     boolean shared = ingest.isPresent() && commit.isPresent() && ingest.get().equals(commit.get());
 
     List<Interval> intervals = new ArrayList<>();
-    intervals.add(arrivalToLanded(microBatchN, burstRecordsPerSecond, ingest, shared));
+    intervals.add(arrivalToLanded(microBatchN, burstRecordsPerSecond, ingest, shared, l2));
     intervals.add(
         pending(
             "landed",
@@ -173,7 +206,7 @@ public final class LatencyBudget {
             "validated",
             "the validation layers of P5: no spike exists for this interval",
             "P5 (validation layers; no spike)"));
-    Interval validatedToVersioned = validatedToVersioned(sl, commit, shared);
+    Interval validatedToVersioned = validatedToVersioned(sl, commit, shared, l2);
     intervals.add(validatedToVersioned);
     intervals.add(versionedToAssembled(sx, microBatchN));
     intervals.add(
@@ -224,7 +257,7 @@ public final class LatencyBudget {
   // ---------------------------------------------------------------- the four measured intervals
 
   private static Interval arrivalToLanded(
-      int n, double burst, Optional<Double> ingest, boolean shared) {
+      int n, double burst, Optional<Double> ingest, boolean shared, L2Reading l2) {
     if (ingest.isEmpty()) {
       return pending(
           "arrival",
@@ -243,7 +276,7 @@ public final class LatencyBudget {
             + " ms (DERIVED) + ledger.ingestCommitP99Ms "
             + ms(ingest.get())
             + " ms (SP-L, MEASURED p99 of the two synchronous transactions of a micro-batch, "
-            + POOLED_BURST_CLAUSE
+            + pooledBurstClause(ingest.get(), l2)
             + (shared
                 ? "; the same measurement as ledger.commitP99Ms in validated to versioned,"
                     + " a shared measurement counted once in the sum"
@@ -300,7 +333,7 @@ public final class LatencyBudget {
   }
 
   private static Interval validatedToVersioned(
-      Map<String, Object> sl, Optional<Double> commit, boolean shared) {
+      Map<String, Object> sl, Optional<Double> commit, boolean shared, L2Reading l2) {
     if (commit.isEmpty()) {
       return pending(
           "validated",
@@ -310,7 +343,7 @@ public final class LatencyBudget {
     }
     StringBuilder text = new StringBuilder();
     text.append("ledger.commitP99Ms ").append(ms(commit.get())).append(" ms (SP-L, MEASURED p99, ");
-    text.append(POOLED_BURST_CLAUSE);
+    text.append(pooledBurstClause(commit.get(), l2));
     if (shared) {
       text.append("; the same measurement as ledger.ingestCommitP99Ms in arrival to landed,");
       text.append(" a shared measurement counted once in the sum");
@@ -457,6 +490,10 @@ public final class LatencyBudget {
     out.append("- margin: ").append(plain(marginHours)).append(" h = ");
     out.append(plain(result.marginMillis())).append(" ms (`availableMarginHours`)\n\n");
     out.append("## Intervals\n\n");
+    out.append("Two remarks in the compositions are derived text, not read from the summaries: ");
+    out.append("the factor of about 1.9 for the loaded file cycle (derived from two figures of ");
+    out.append("the SP-X report) and the ratio of the pooled ledger p99 to the L-2 threshold ");
+    out.append("(computed here from the figure and the criteria registry).\n\n");
     out.append("| # | From | To | Figure (ms) | Basis | Owner | Composition |\n");
     out.append("|---|---|---|---|---|---|---|\n");
     int index = 1;

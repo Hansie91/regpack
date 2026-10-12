@@ -20,12 +20,18 @@ class LatencyBudgetTest {
   private static final double MARGIN_HOURS = 4;
   private static final int THREADS = 4;
 
-  /**
-   * What the shared ledger figure is: pooled over the burst runs, and L-2 is INCONCLUSIVE on it.
-   */
-  private static final String POOLED_CLAUSE =
-      "pooled over all batches of the cache-hot runs under the burst (SP-L runs A1 and A2);"
-          + " L-2 on this quantity is INCONCLUSIVE (see results.md)";
+  /** The L-2 reading of the committed SP-L run: the verdict and the threshold of the registry. */
+  private static final LatencyBudget.L2Reading L2 =
+      new LatencyBudget.L2Reading("INCONCLUSIVE", new BigDecimal("1000"));
+
+  /** What the shared ledger figure is: a pooled p99 that no criterion judges. */
+  private static String pooledClause(String ratio) {
+    return "pooled p99 over all batches of the cache-hot runs under the burst (SP-L runs A1 and"
+        + " A2); this is not the L-2 value and no criterion judges it: L-2 is the median of the"
+        + " per-window p99 values (verdict INCONCLUSIVE in the SP-L summary), and this figure is "
+        + ratio
+        + " times the L-2 threshold of 1000 ms";
+  }
 
   /** The loaded-lane remark: a figure derived from the SP-X report, not quoted from it. */
   private static final String DERIVED_REMARK =
@@ -59,7 +65,7 @@ class LatencyBudgetTest {
   }
 
   private static Result budget(Map<String, Map<String, Object>> d) {
-    return LatencyBudget.assemble(d, N, BURST, MARGIN_HOURS, THREADS);
+    return LatencyBudget.assemble(d, N, BURST, MARGIN_HOURS, THREADS, L2);
   }
 
   private static double fill() {
@@ -108,7 +114,7 @@ class LatencyBudgetTest {
     Map<String, Map<String, Object>> tiny = decisions();
     tiny.get("SP-L").put("ledger.ingestCommitP99Ms", new BigDecimal("0.001"));
     tiny.get("SP-L").put("ledger.commitP99Ms", new BigDecimal("0.001"));
-    Result small = LatencyBudget.assemble(tiny, N, BURST, 1000, THREADS);
+    Result small = LatencyBudget.assemble(tiny, N, BURST, 1000, THREADS, L2);
     assertThat(small.measuredP99SumMillis()).isLessThan(small.marginMillis());
     assertThat(small.verdict()).isEqualTo(LatencyBudget.Verdict.PARTIAL);
     assertThat(small.pending()).hasSize(4);
@@ -136,7 +142,7 @@ class LatencyBudgetTest {
     assertThat(result.measuredP99SumMillis()).isCloseTo(fill() + 9582.423, within(1e-6));
     assertThat(result.verdict()).isEqualTo(LatencyBudget.Verdict.PARTIAL);
 
-    Result empty = LatencyBudget.assemble(Map.of(), N, BURST, MARGIN_HOURS, THREADS);
+    Result empty = LatencyBudget.assemble(Map.of(), N, BURST, MARGIN_HOURS, THREADS, L2);
     assertThat(empty.pending()).hasSize(8);
     assertThat(empty.measuredP99SumMillis()).isZero();
   }
@@ -188,23 +194,33 @@ class LatencyBudgetTest {
   }
 
   @Test
-  void bothLedgerIntervalsSayTheFigureIsPooledOverTheBurstRunsAndL2IsInconclusive() {
+  void bothLedgerIntervalsSayWhatThePooledFigureIsAndThatNoCriterionJudgesIt() {
     Result result = budget(decisions());
-    assertThat(result.intervals().get(0).composition()).contains(POOLED_CLAUSE);
-    assertThat(result.intervals().get(4).composition()).contains(POOLED_CLAUSE);
-    // the figure is the ledger commit p99 under either key, shared or not
+    // 9582.423 / 1000 = 9.6
+    assertThat(result.intervals().get(0).composition()).contains(pooledClause("9.6"));
+    assertThat(result.intervals().get(4).composition()).contains(pooledClause("9.6"));
+    assertThat(result.intervals().get(0).composition())
+        .doesNotContain("L-2 on this quantity")
+        .doesNotContain("see results.md");
+    // each interval states the ratio of its own figure, shared or not
     Map<String, Map<String, Object>> d = decisions();
     d.get("SP-L").put("ledger.ingestCommitP99Ms", new BigDecimal("100"));
-    d.get("SP-L").put("ledger.commitP99Ms", new BigDecimal("200"));
+    d.get("SP-L").put("ledger.commitP99Ms", new BigDecimal("2050"));
     Result differing = budget(d);
-    assertThat(differing.intervals().get(0).composition()).contains(POOLED_CLAUSE);
-    assertThat(differing.intervals().get(4).composition()).contains(POOLED_CLAUSE);
+    assertThat(differing.intervals().get(0).composition()).contains(pooledClause("0.1"));
+    assertThat(differing.intervals().get(4).composition()).contains(pooledClause("2.0"));
+    // the verdict and the threshold come from the caller, not from a constant
+    LatencyBudget.L2Reading other = new LatencyBudget.L2Reading("PASS", new BigDecimal("500.0"));
+    Result changed = LatencyBudget.assemble(decisions(), N, BURST, MARGIN_HOURS, THREADS, other);
+    assertThat(changed.intervals().get(4).composition())
+        .contains("(verdict PASS in the SP-L summary)")
+        .contains("19.2 times the L-2 threshold of 500 ms");
     // the other measured intervals do not carry it, and a pending one has no figure to qualify
-    assertThat(result.intervals().get(2).composition()).doesNotContain("INCONCLUSIVE");
-    assertThat(result.intervals().get(5).composition()).doesNotContain("INCONCLUSIVE");
+    assertThat(result.intervals().get(2).composition()).doesNotContain("L-2");
+    assertThat(result.intervals().get(5).composition()).doesNotContain("L-2");
     Map<String, Map<String, Object>> missing = decisions();
     missing.get("SP-L").put("ledger.commitP99Ms", "NOT_MEASURED");
-    assertThat(budget(missing).intervals().get(4).composition()).doesNotContain("INCONCLUSIVE");
+    assertThat(budget(missing).intervals().get(4).composition()).doesNotContain("L-2");
   }
 
   @Test
@@ -251,13 +267,13 @@ class LatencyBudgetTest {
         .contains("not a p99");
 
     // 22,000 x 0.5 x 1.5 = 16,500 is nearer to 25,000 than to 5,000
-    Result large = LatencyBudget.assemble(decisions(), 22_000, BURST, MARGIN_HOURS, THREADS);
+    Result large = LatencyBudget.assemble(decisions(), 22_000, BURST, MARGIN_HOURS, THREADS, L2);
     assertThat(large.intervals().get(5).p99Millis()).contains(1576.724);
     // 600 x 0.75 = 450 is nearest to 1,000
-    Result small = LatencyBudget.assemble(decisions(), 600, BURST, MARGIN_HOURS, THREADS);
+    Result small = LatencyBudget.assemble(decisions(), 600, BURST, MARGIN_HOURS, THREADS, L2);
     assertThat(small.intervals().get(5).p99Millis()).contains(104.02);
     // 20,000 x 0.75 = 15,000 is equally far from 5,000 and 25,000: the smaller size wins
-    Result tie = LatencyBudget.assemble(decisions(), 20_000, BURST, MARGIN_HOURS, THREADS);
+    Result tie = LatencyBudget.assemble(decisions(), 20_000, BURST, MARGIN_HOURS, THREADS, L2);
     assertThat(tie.intervals().get(5).p99Millis()).contains(401.137);
   }
 
@@ -293,15 +309,18 @@ class LatencyBudgetTest {
     assertThat(text).contains("SP-N (P1b)", "SP-S (P1b)", "SP-W (P1b)", "P5 (validation layers");
     assertThat(text).contains("14400000 ms");
     assertThat(text).contains("counted once");
-    assertThat(text).contains(POOLED_CLAUSE).contains(DERIVED_REMARK);
+    assertThat(text).contains(pooledClause("9.6")).contains(DERIVED_REMARK);
+    assertThat(text)
+        .contains("Two remarks in the compositions are derived text, not read from the summaries");
     assertThat(text).doesNotContain("T0").doesNotContain("2026-");
   }
 
   @Test
   void rejectsNonsenseParameters() {
-    assertThatThrownBy(() -> LatencyBudget.assemble(decisions(), 0, BURST, MARGIN_HOURS, THREADS))
+    assertThatThrownBy(
+            () -> LatencyBudget.assemble(decisions(), 0, BURST, MARGIN_HOURS, THREADS, L2))
         .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> LatencyBudget.assemble(decisions(), N, 0, MARGIN_HOURS, THREADS))
+    assertThatThrownBy(() -> LatencyBudget.assemble(decisions(), N, 0, MARGIN_HOURS, THREADS, L2))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> new Interval("a", "b", "c", Optional.of(1.0), Basis.PENDING, "x"))
         .isInstanceOf(IllegalArgumentException.class);
