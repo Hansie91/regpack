@@ -13,7 +13,9 @@ exited_plans: P0
 
 | row | closes_in | kind | ref | store | ci | note |
 |---|---|---|---|---|---|---|
-| R1 | P1 | NONE | - | NA | NA | no evidence yet |
+| R1 | P1a,P1b | NONE | - | NA | NA | no evidence yet |
+| R1 | P1a,P1b | SPIKE | docs/spikes/SP-R.md | NA | NA | measured on a GitHub-hosted runner, see the report |
+| R1 | P1a,P1b | SPIKE | docs/spikes/SP-X.md | NA | NA | measured on a GitHub-hosted runner, see the report |
 | R2 | P9b | NONE | - | NA | NA | no evidence yet |
 | R3 | P7a | NONE | - | NA | NA | no evidence yet |
 | R4 | P3,P4 | NONE | - | NA | NA | no evidence yet |
