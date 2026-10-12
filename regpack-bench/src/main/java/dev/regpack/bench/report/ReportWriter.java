@@ -290,7 +290,7 @@ public final class ReportWriter {
   }
 
   /** Escapes text from a result field for a Markdown table cell or list item. */
-  static String cell(String text) {
+  public static String cell(String text) {
     StringBuilder out = new StringBuilder();
     for (int i = 0; i < text.length(); i++) {
       char ch = text.charAt(i);

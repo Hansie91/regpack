@@ -1,5 +1,7 @@
 package dev.regpack.bench.cli;
 
+import dev.regpack.bench.consolidate.LatencyBudget;
+import dev.regpack.bench.consolidate.ResultsTable;
 import dev.regpack.bench.eval.Criteria;
 import dev.regpack.bench.eval.MeasurementSet;
 import dev.regpack.bench.eval.MeasurementSet.CountValue;
@@ -8,7 +10,9 @@ import dev.regpack.bench.eval.MeasurementSet.ForkValues;
 import dev.regpack.bench.eval.MeasurementSet.RunInfo;
 import dev.regpack.bench.eval.MeasurementSet.Series;
 import dev.regpack.bench.eval.Resource;
+import dev.regpack.bench.eval.SpikeResult;
 import dev.regpack.bench.imp.ImportCommand;
+import dev.regpack.bench.imp.SummaryJson;
 import dev.regpack.bench.imp.TimeLedger;
 import dev.regpack.bench.proto.EnvCapture;
 import dev.regpack.bench.report.Git;
@@ -47,6 +51,7 @@ public final class Bench {
           + " | selftest --out <dir> | publish --dir <dir> --os <label>"
           + " | import --spike <ID> (--dir <dir>... | --summary-text <file>) [--allow-no-lock]"
           + " [--dry-run] | verify-committed"
+          + " | results --write <file> | budget --write <file>"
           + " | timebox start|pause|resume|stop|status <ID> [--note <text>] [--at <instant>]";
 
   private Bench() {}
@@ -84,6 +89,8 @@ public final class Bench {
           yield ImportCommand.verifyCommitted(repo, out, err);
         }
         case "timebox" -> timebox(args, repo, now, out, err);
+        case "results" -> results(args, repo, out, err);
+        case "budget" -> budget(args, repo, out, err);
         default -> throw new IllegalArgumentException("unknown command " + args[0]);
       };
     } catch (IllegalArgumentException | DateTimeParseException e) {
@@ -252,6 +259,103 @@ public final class Bench {
             a.flag("--allow-no-lock"),
             a.flag("--dry-run"));
     return ImportCommand.run(options, repo, now, out, err);
+  }
+
+  // ---------------------------------------------------------------- consolidation
+
+  /**
+   * Writes the results table from the committed summaries. A spike without a committed summary is
+   * listed as having no report; a summary that does not parse is a problem with the data.
+   */
+  private static int results(String[] args, Path repo, PrintStream out, PrintStream err)
+      throws IOException {
+    Args a = Args.parse(args, 1, Set.of("--write"), Set.of()).noPositionals();
+    String target = a.required("--write");
+    Map<String, SpikeResult> results = new LinkedHashMap<>();
+    for (String id : ResultsTable.SPIKES) {
+      Path file = summaryFile(repo, id);
+      if (!Files.isRegularFile(file)) {
+        continue;
+      }
+      Optional<SpikeResult> read = readSummary(file, id, "results", err);
+      if (read.isEmpty()) {
+        return 1;
+      }
+      results.put(id, read.get());
+    }
+    String text = ResultsTable.render(Criteria.load(), results);
+    writeText(repo.resolve(target), text);
+    out.println("results: wrote " + target + " (" + results.size() + " summaries)");
+    return 0;
+  }
+
+  /**
+   * Writes the partial latency budget from the committed SP-R, SP-L and SP-X summaries. A missing
+   * summary or decision key prints {@code budget: MISSING <spike> <key>} and writes nothing.
+   */
+  private static int budget(String[] args, Path repo, PrintStream out, PrintStream err)
+      throws IOException {
+    Args a = Args.parse(args, 1, Set.of("--write"), Set.of()).noPositionals();
+    String target = a.required("--write");
+    Map<String, Map<String, Object>> decisions = new LinkedHashMap<>();
+    for (String id : List.of(LatencyBudget.SP_R, LatencyBudget.SP_L, LatencyBudget.SP_X)) {
+      Path file = summaryFile(repo, id);
+      if (!Files.isRegularFile(file)) {
+        err.println("budget: MISSING " + id + " summary.json");
+        return 1;
+      }
+      Optional<SpikeResult> read = readSummary(file, id, "budget", err);
+      if (read.isEmpty()) {
+        return 1;
+      }
+      decisions.put(id, read.get().decisions());
+    }
+    Optional<String> missing = LatencyBudget.firstMissing(decisions);
+    if (missing.isPresent()) {
+      err.println("budget: MISSING " + missing.get());
+      return 1;
+    }
+    Criteria criteria = Criteria.load();
+    double burst = criteria.param("burstRecordsPerSecond").orElseThrow().doubleValue();
+    double margin = criteria.param("availableMarginHours").orElseThrow().doubleValue();
+    int n = LatencyBudget.DEFAULT_MICRO_BATCH_N;
+    int threads = LatencyBudget.DEFAULT_THREADS;
+    LatencyBudget.Result result = LatencyBudget.assemble(decisions, n, burst, margin, threads);
+    writeText(repo.resolve(target), LatencyBudget.render(result, n, burst, margin, threads));
+    out.println(
+        "budget: wrote "
+            + target
+            + " (verdict "
+            + result.verdict()
+            + ", "
+            + result.pending().size()
+            + " pending intervals)");
+    return 0;
+  }
+
+  private static Path summaryFile(Path repo, String id) {
+    return repo.resolve("docs").resolve("spikes").resolve(id + ".summary.json");
+  }
+
+  private static Optional<SpikeResult> readSummary(
+      Path file, String id, String command, PrintStream err) throws IOException {
+    try {
+      SpikeResult result = SummaryJson.parse(Files.readString(file, StandardCharsets.UTF_8));
+      if (!result.spike().equals(id)) {
+        err.println(command + ": " + id + ".summary.json holds the summary of " + result.spike());
+        return Optional.empty();
+      }
+      return Optional.of(result);
+    } catch (IllegalArgumentException e) {
+      err.println(command + ": " + id + ".summary.json: " + e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /** UTF-8, no byte order mark, the text as given (it holds LF only). */
+  private static void writeText(Path file, String text) throws IOException {
+    createParent(file);
+    Files.writeString(file, text, StandardCharsets.UTF_8);
   }
 
   // ---------------------------------------------------------------- time ledger

@@ -22,8 +22,8 @@ import java.util.Set;
  * unknown key, a missing key, a value of the wrong type and every {@code double} is refused. The
  * result is data to compare with a recomputation, never a verdict that is trusted.
  */
-final class SummaryJson {
-  static final String SCHEMA = "regpack.bench.summary/1";
+public final class SummaryJson {
+  public static final String SCHEMA = "regpack.bench.summary/1";
 
   private SummaryJson() {}
 
@@ -32,7 +32,7 @@ final class SummaryJson {
    *
    * @throws IllegalArgumentException for any deviation from the schema
    */
-  static SpikeResult parse(String json) {
+  public static SpikeResult parse(String json) {
     Object root;
     try {
       root = Json.parse(json);
