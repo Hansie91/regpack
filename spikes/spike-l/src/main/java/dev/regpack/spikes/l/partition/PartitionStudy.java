@@ -93,6 +93,8 @@ public final class PartitionStudy {
    *
    * @param granularity daily or monthly
    * @param partitions the number of partitions of {@code decision}
+   * @param rowsPerPopulatedPartition rows loaded into each populated day (300,000 in the plan; a
+   *     smaller figure means the point was reduced to fit the disk)
    * @param lookupP99NanosPerBlock p99 of the lookup by event identity without the partition key,
    *     one value per block (the fork-like series of L-10)
    * @param headThenPrunedFetchP99NanosPerBlock p99 of the head lookup followed by the pruned fetch,
@@ -103,6 +105,7 @@ public final class PartitionStudy {
   public record Point(
       Granularity granularity,
       int partitions,
+      int rowsPerPopulatedPartition,
       double[] lookupP99NanosPerBlock,
       double[] headThenPrunedFetchP99NanosPerBlock,
       long detachNanos,
@@ -331,7 +334,7 @@ public final class PartitionStudy {
           detach = t1 - t0;
           drop = t2 - t1;
         }
-        return new Point(granularity, count, byIdentity, viaHead, detach, drop);
+        return new Point(granularity, count, rows, byIdentity, viaHead, detach, drop);
       } catch (SQLException e) {
         if ("53200".equals(e.getSQLState())) {
           throw new SQLException(

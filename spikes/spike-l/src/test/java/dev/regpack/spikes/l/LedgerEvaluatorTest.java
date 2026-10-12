@@ -592,11 +592,81 @@ class LedgerEvaluatorTest {
   }
 
   private static PartitionStudy.Point point(Granularity g, int partitions, double lookupNanos) {
+    return point(g, partitions, 300_000, lookupNanos);
+  }
+
+  private static PartitionStudy.Point point(
+      Granularity g, int partitions, int rowsPerDay, double lookupNanos) {
     double[] lookups = new double[15];
     double[] fetches = new double[15];
     java.util.Arrays.fill(lookups, lookupNanos);
     java.util.Arrays.fill(fetches, lookupNanos / 10);
-    return new PartitionStudy.Point(g, partitions, lookups, fetches, 2_000_000L, 3_000_000L);
+    return new PartitionStudy.Point(
+        g, partitions, rowsPerDay, lookups, fetches, 2_000_000L, 3_000_000L);
+  }
+
+  private static MiscData withPartitions(MiscData base, List<PartitionStudy.Point> points) {
+    return new MiscData(
+        base.checks(),
+        base.rowSizeE1(),
+        base.rowSizeE3(),
+        points,
+        base.fetch(),
+        base.hotRow(),
+        base.cells(),
+        base.volume(),
+        base.violatingSamples(),
+        base.console());
+  }
+
+  @Test
+  void l10IsJudgedOnlyAtTheFullPointOf1826DailyPartitions() {
+    MiscData base = smallMisc();
+    // the full case: the series is the 1,826 point and the decision names it
+    Output full =
+        LedgerEvaluator.misc(
+            withPartitions(
+                base,
+                List.of(
+                    point(Granularity.DAILY, 365, 3_000_000),
+                    point(Granularity.DAILY, 1_826, 8_000_000))));
+    assertThat(((ForkValues) series(full, "L-10")).forks().get(0).statistic().doubleValue())
+        .isEqualTo(8.0);
+    assertThat(full.decisions()).containsEntry("partition.l10Partitions", 1_826L);
+
+    // the 1,826 point failed (out of shared memory, a disk fault): the 365 point must not stand in
+    Output missing =
+        LedgerEvaluator.misc(
+            withPartitions(
+                base,
+                List.of(
+                    point(Granularity.DAILY, 30, 2_000_000),
+                    point(Granularity.DAILY, 365, 3_000_000),
+                    point(Granularity.MONTHLY, 60, 3_000_000))));
+    assertThat(missing.series()).extracting(Series::criterionId).doesNotContain("L-10");
+    assertThat(missing.decisions()).doesNotContainKey("partition.l10Partitions");
+    assertThat(String.join("\n", missing.open()))
+        .contains("L-10")
+        .contains("1,826")
+        .contains("not run");
+    assertThat(result(evaluate(set(missing, "misc")), "L-10").verdict()).isEqualTo(Verdict.NOT_RUN);
+
+    // the 1,826 point ran, but on fewer rows per populated day than the 300,000 of the plan
+    Output reduced =
+        LedgerEvaluator.misc(
+            withPartitions(
+                base,
+                List.of(
+                    point(Granularity.DAILY, 365, 3_000_000),
+                    point(Granularity.DAILY, 1_826, 120_000, 8_000_000))));
+    assertThat(reduced.series()).extracting(Series::criterionId).doesNotContain("L-10");
+    assertThat(reduced.decisions()).doesNotContainKey("partition.l10Partitions");
+    assertThat(String.join("\n", reduced.open()))
+        .contains("L-10")
+        .contains("120,000")
+        .contains("300,000");
+    // the measured points stay in the decisions either way
+    assertThat(reduced.decisions()).containsKey("partition.daily1826.lookupP99Ms");
   }
 
   @Test
@@ -669,7 +739,10 @@ class LedgerEvaluatorTest {
     Output out = LedgerEvaluator.misc(smallMisc());
     MeasurementSet.MeasuredOnly l14 = (MeasurementSet.MeasuredOnly) series(out, "L-14");
     assertThat(l14.invariantsHold()).isTrue();
-    assertThat(l14.n()).isGreaterThanOrEqualTo(2);
+    // the byte tables (one E1 measurement, whose row size and bytes per day are one component) and
+    // the evidence model: two distinct components, not three
+    assertThat(l14.n()).isEqualTo(2);
+    assertThat(l14.unit()).doesNotContainIgnoringCase("not measured");
     // 400,000 bytes of decision for 1,000 decision rows is 400 bytes a row; the day has 50M
     // candidates
     assertThat(out.decisions()).containsKey("bytes.perDay.decision");
@@ -695,7 +768,7 @@ class LedgerEvaluatorTest {
   }
 
   @Test
-  void l14WithoutByteTablesSaysSoInsteadOfPrintingZeroBytes() {
+  void l14WithoutByteTablesIsNotRunInsteadOfAPassOnAPlaceholder() {
     MiscData base = smallMisc();
     MiscData noRows =
         new MiscData(
@@ -710,13 +783,11 @@ class LedgerEvaluatorTest {
             0,
             Optional.empty());
     Output out = LedgerEvaluator.misc(noRows);
-    MeasurementSet.MeasuredOnly l14 = (MeasurementSet.MeasuredOnly) series(out, "L-14");
-    assertThat(l14.unit()).containsIgnoringCase("not measured");
+    // the evidence model alone is a component of L-14, but not the bytes per day: no series
+    assertThat(out.series()).extracting(Series::criterionId).doesNotContain("L-14");
+    assertThat(out.decisions()).containsKey("volume.landingObjectsPerDay");
     assertThat(String.join("\n", out.open())).contains("L-14").contains("bytes per day");
-    // with the byte tables the unit is the plain one
-    MeasurementSet.MeasuredOnly full =
-        (MeasurementSet.MeasuredOnly) series(LedgerEvaluator.misc(base), "L-14");
-    assertThat(full.unit()).doesNotContainIgnoringCase("not measured");
+    assertThat(result(evaluate(set(out, "misc")), "L-14").verdict()).isEqualTo(Verdict.NOT_RUN);
   }
 
   @Test

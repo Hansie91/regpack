@@ -992,6 +992,8 @@ public final class SpLRunner {
     Sizes z = plan.profile().sizes();
     Optional<MemoryPlan> memoryLimit = Optional.empty();
     if (limited) {
+      // the limit is the intended value passed to pg-restart.sh; it is not read back from the
+      // container (only shared_buffers and max_wal_size are read back from the server)
       memoryLimit = Optional.of(memoryPlan());
       memory = memoryLimit;
     }

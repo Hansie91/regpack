@@ -37,6 +37,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -73,8 +74,17 @@ public final class LedgerEvaluator {
   /** The records of the day that the sketch is sized for (spec 5.6). */
   public static final long DAY_RECORDS = 50_000_000L;
 
-  /** The memory of the reference machine of a full day (spec 5.2): 16 GiB. */
+  /**
+   * The memory a full day is sized against: 16 GiB, the plan's reference size for the day's
+   * table-to-memory ratio (spec 5.2 states no memory figure).
+   */
   public static final long DAY_MEMORY_BYTES = 16L << 30;
+
+  /** The daily partitions at which L-10 is defined. */
+  public static final int L10_PARTITIONS = 1_826;
+
+  /** The rows on each populated day at which L-10 is defined. */
+  public static final int L10_ROWS_PER_DAY = 300_000;
 
   /** The least memory that run B gets: below it PostgreSQL cannot run a meaningful workload. */
   public static final long MIN_B_MEMORY_BYTES = 512L << 20;
@@ -756,6 +766,7 @@ public final class LedgerEvaluator {
     List<String> open = new ArrayList<>();
     decisions.put("extrapolationNote", EXTRAPOLATION_NOTE);
     int l14Components = 0;
+    boolean bytesMeasured = false;
     BigDecimal bytesPerDay = BigDecimal.ZERO;
 
     constraints(in, series, open);
@@ -764,17 +775,20 @@ public final class LedgerEvaluator {
       RowSizeData e1 = in.rowSizeE1().get();
       series.add(rowSize(e1.rows(), e1.heapBytes(), e1.indexBytes()));
       rowSizeDecisions(e1, decisions);
-      l14Components++;
       bytesPerDay = bytesPerDay(e1, decisions);
-      l14Components++;
+      // the row size and the bytes per day come from the one E1 measurement: one component
+      bytesMeasured = !e1.tableBytes().isEmpty();
     }
     in.rowSizeE3().ifPresent(e3 -> rowSizeDecisions(e3, decisions));
 
-    partitions(in, series, decisions);
+    partitions(in, series, decisions, open);
     in.fetch().ifPresent(f -> fetch(f, series, open));
     long hotViolations = hotRow(in, series, decisions, open);
 
     int knee = matrix(in, decisions, open);
+    if (bytesMeasured) {
+      l14Components++;
+    }
     if (knee > 0) {
       l14Components++;
     }
@@ -782,23 +796,21 @@ public final class LedgerEvaluator {
       volume(in.volume().get(), decisions);
       l14Components++;
     }
-    if (l14Components > 0) {
-      boolean bytesMeasured = in.rowSizeE1().isPresent();
+    if (bytesMeasured) {
+      // the bytes per day are the core of L-14: without the byte tables the other components are
+      // in the decisions, but the criterion is not recorded (a placeholder 0 would read PASS)
       series.add(
           new MeasuredOnly(
               "L-14",
-              true,
+              bytesPerDay.signum() > 0,
               l14Components,
               bytesPerDay.setScale(0, RoundingMode.CEILING),
-              bytesMeasured
-                  ? "bytes per day (ledger tables of a 50M-record day)"
-                  : "bytes per day: NOT MEASURED (the row size did not run, so 0 is a placeholder;"
-                      + " the other components of L-14 are in the decisions)"));
-      if (!bytesMeasured) {
-        open.add(
-            "L-14: the bytes per day were not measured because the row size step did not run; the"
-                + " value 0 is a placeholder, not a size");
-      }
+              "bytes per day (ledger tables of a 50M-record day)"));
+    } else if (l14Components > 0) {
+      open.add(
+          "L-14 not recorded: the bytes per day were not measured because the row size step did"
+              + " not run (or recorded no table sizes); the other components of L-14 are in the"
+              + " decisions");
     }
     in.console()
         .ifPresent(
@@ -900,7 +912,8 @@ public final class LedgerEvaluator {
     return total;
   }
 
-  private static void partitions(MiscData in, List<Series> series, Map<String, Object> decisions) {
+  private static void partitions(
+      MiscData in, List<Series> series, Map<String, Object> decisions, List<String> open) {
     for (PartitionStudy.Point p : in.partitions()) {
       String key =
           "partition."
@@ -913,14 +926,34 @@ public final class LedgerEvaluator {
       decisions.put(key + "detachMs", ms(p.detachNanos()));
       decisions.put(key + "dropMs", ms(p.dropNanos()));
     }
-    in.partitions().stream()
-        .filter(p -> p.granularity() == Granularity.DAILY)
-        .max(Comparator.comparingInt(PartitionStudy.Point::partitions))
-        .ifPresent(
-            largestDaily -> {
-              series.add(forks("L-10", "ms", boxed(largestDaily.lookupP99NanosPerBlock(), 1e6)));
-              decisions.put("partition.l10Partitions", (long) largestDaily.partitions());
-            });
+    if (in.partitions().isEmpty()) {
+      return;
+    }
+    // L-10 is defined at 1,826 daily partitions with 300,000 rows on each populated day: a smaller
+    // plan or a reduced point is not a stand-in, so the criterion stays NOT_RUN without that point
+    Optional<PartitionStudy.Point> full =
+        in.partitions().stream()
+            .filter(p -> p.granularity() == Granularity.DAILY && p.partitions() == L10_PARTITIONS)
+            .findFirst();
+    if (full.isEmpty()) {
+      open.add(
+          "L-10 not run: the daily point with "
+              + String.format(Locale.ROOT, "%,d", L10_PARTITIONS)
+              + " partitions is missing (it failed or was not reached), and a smaller plan is not"
+              + " judged in its place");
+    } else if (full.get().rowsPerPopulatedPartition() != L10_ROWS_PER_DAY) {
+      open.add(
+          "L-10 not run: the daily point with "
+              + String.format(Locale.ROOT, "%,d", L10_PARTITIONS)
+              + " partitions ran with "
+              + String.format(Locale.ROOT, "%,d", full.get().rowsPerPopulatedPartition())
+              + " rows per populated day instead of "
+              + String.format(Locale.ROOT, "%,d", L10_ROWS_PER_DAY)
+              + ", so it is not the point L-10 is defined at");
+    } else {
+      series.add(forks("L-10", "ms", boxed(full.get().lookupP99NanosPerBlock(), 1e6)));
+      decisions.put("partition.l10Partitions", (long) L10_PARTITIONS);
+    }
   }
 
   private static void fetch(FetchData f, List<Series> series, List<String> open) {
