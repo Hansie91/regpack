@@ -6,6 +6,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * The time ledger of one spike ({@code docs/spikes/timebox/<ID>.tsv}): one line per event, {@code
@@ -14,8 +15,10 @@ import java.util.Objects;
  * holds instants, never reads a clock: the caller passes {@code now}.
  *
  * <p>The sequence is strict: START first, then PAUSE and RESUME alternating, STOP once at the end,
- * and instants that never go back. A ledger that breaks this is refused when it is read, so a
- * hand-edited file cannot hide time.
+ * and instants that never go back. A ledger that breaks this is refused when it is read. That is
+ * all it guarantees: a file with a valid order can still be edited (a later START, an earlier
+ * PAUSE), so the ledger is a record kept in good faith, not proof; {@code verify-committed} checks
+ * a committed report against it, and the review of the file in git is what catches an edit.
  */
 public final class TimeLedger {
   /** The events of a ledger. */
@@ -122,6 +125,11 @@ public final class TimeLedger {
     if (!ok) {
       throw new IllegalArgumentException(event + " cannot follow " + last.event());
     }
+  }
+
+  /** The instant of the last event, or empty for a ledger without events. */
+  public Optional<Instant> lastEventAt() {
+    return entries.isEmpty() ? Optional.empty() : Optional.of(entries.get(entries.size() - 1).at());
   }
 
   /** True while the clock runs: the last event is START or RESUME. */

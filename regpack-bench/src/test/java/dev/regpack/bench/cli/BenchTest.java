@@ -239,6 +239,31 @@ class BenchTest {
   }
 
   @Test
+  void timeboxRefusesAnInstantBeforeTheLastEventAndWritesNothing() throws Exception {
+    Path ledger = repo.resolve("docs/spikes/timebox/SP-R.tsv");
+    assertThat(bench("timebox", "start", "SP-R", "--at", "2026-10-11T08:00:00Z")).isEqualTo(0);
+    assertThat(bench("timebox", "pause", "SP-R", "--at", "2026-10-11T09:00:00Z")).isEqualTo(0);
+    String before = Files.readString(ledger, StandardCharsets.UTF_8);
+
+    // every event: an instant before the last one is one problem line, exit 1, no note, no write
+    for (String action : List.of("start", "pause", "resume", "stop")) {
+      assertThat(bench("timebox", action, "SP-R", "--at", "2026-10-11T08:30:00Z"))
+          .as(action)
+          .isEqualTo(1);
+      assertThat(err().strip().split("\n")).as(action).hasSize(1);
+      assertThat(err())
+          .contains("bench: timebox SP-R: " + action + " at 2026-10-11T08:30:00Z")
+          .contains("earlier than the last event")
+          .contains("2026-10-11T09:00:00Z")
+          .doesNotContain("note");
+      assertThat(Files.readString(ledger, StandardCharsets.UTF_8)).isEqualTo(before);
+    }
+
+    // the very instant of the last event is not before it
+    assertThat(bench("timebox", "resume", "SP-R", "--at", "2026-10-11T09:00:00Z")).isEqualTo(0);
+  }
+
+  @Test
   void unexpectedWordsAreUsageErrors() {
     // a typo that leaves --dir out must not be read as a different command
     assertThat(bench("import", "--spike", "SP-R", "somedir")).isEqualTo(2);

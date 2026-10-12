@@ -113,6 +113,10 @@ class ImportCommandTest {
     return run(new Options(spike, List.of(dirs), Optional.empty(), false, dryRun));
   }
 
+  private int importDirsAllowingOtherConfig(String spike, boolean dryRun, Path... dirs) {
+    return run(new Options(spike, List.of(dirs), Optional.empty(), false, dryRun, true));
+  }
+
   private String out() {
     return outBytes.toString(StandardCharsets.UTF_8);
   }
@@ -404,9 +408,9 @@ class ImportCommandTest {
     assertThat(report).contains("| 100 |").contains("| 200 |");
     assertThat(fileNames(docs("raw/SP-R/" + CONFIG_A))).containsExactly("100-1-all", "200-1-all");
 
-    // a different configuration does not pool: its own 15 forks
+    // a different configuration does not pool: its own 15 forks (and it is said to supersede)
     Path other = artefact("three", CONFIG_B, "300", sha1, marginal());
-    assertThat(importDirs("SP-R", false, other)).isEqualTo(0);
+    assertThat(importDirsAllowingOtherConfig("SP-R", false, other)).as(err()).isEqualTo(0);
     assertThat(summaryOfCommitted().criteria().stream().filter(c -> c.id().equals("R-2a")))
         .allSatisfy(c -> assertThat(c.estimate().orElseThrow().n()).isEqualTo(15));
     assertThat(fileNames(docs("raw/SP-R"))).containsExactly(CONFIG_A, CONFIG_B);
@@ -457,6 +461,216 @@ class ImportCommandTest {
     // the dry run applies the same rule
     assertThat(importDirs("SELFTEST", true, second)).isEqualTo(1);
     assertThat(err()).contains("RERUN_NOT_JUSTIFIED");
+  }
+
+  /** The in-house layer passes and the cel layer fails: the roll-up passes through its group. */
+  private static MeasurementSet inhousePassCelFails(String config, String runId, String gitSha) {
+    return set(
+        "SP-R",
+        config,
+        runId,
+        gitSha,
+        new CountValue("R-1a", 0, 1),
+        new CountValue("R-1b", 2, 1),
+        forks("R-2a", 12_000, 400),
+        new CountValue("R-6a", 0, 1),
+        forks("R-4", 50, 5),
+        new CountValue("R-5", 0, 1),
+        new CountValue("R-7", 0, 1));
+  }
+
+  @Test
+  void rerunOfAPassThroughAnAlternativeGroupIsRefused() throws Exception {
+    Path first = artefact("one", inhousePassCelFails(CONFIG_A, "100", sha1));
+    assertThat(importDirs("SP-R", false, first)).as(err()).isEqualTo(0);
+    SpikeResult stored = summaryOfCommitted();
+    assertThat(stored.status()).isEqualTo(Verdict.PASS);
+    // some required criterion fails, so "every required criterion passes" is never true here
+    assertThat(stored.criteria())
+        .anySatisfy(
+            c -> {
+              assertThat(c.id()).isEqualTo("R-1b");
+              assertThat(c.verdict()).isEqualTo(Verdict.FAIL);
+            });
+
+    Path second = artefact("two", inhousePassCelFails(CONFIG_A, "200", sha1));
+    assertThat(importDirs("SP-R", false, second)).isEqualTo(1);
+    assertThat(err()).contains("RERUN_NOT_JUSTIFIED");
+    assertThat(importDirs("SP-R", true, second)).isEqualTo(1);
+    assertThat(err()).contains("RERUN_NOT_JUSTIFIED");
+    assertThat(fileNames(docs("raw/SP-R/" + CONFIG_A))).containsExactly("100-1-all");
+  }
+
+  @Test
+  void aRerunIsAcceptedWhileTheRollupIsNotAPass() throws Exception {
+    // both layers fail: the roll-up is FAIL
+    Path first =
+        artefact(
+            "one",
+            set(
+                "SP-R",
+                CONFIG_A,
+                "100",
+                sha1,
+                new CountValue("R-1a", 2, 1),
+                new CountValue("R-1b", 2, 1)));
+    assertThat(importDirs("SP-R", false, first)).as(err()).isEqualTo(0);
+    assertThat(summaryOfCommitted().status()).isEqualTo(Verdict.FAIL);
+    Path second = artefact("two", set("SP-R", CONFIG_A, "200", sha1, new CountValue("R-1a", 0, 1)));
+    assertThat(importDirs("SP-R", false, second)).as(err()).isEqualTo(0);
+    assertThat(fileNames(docs("raw/SP-R/" + CONFIG_A))).containsExactly("100-1-all", "200-1-all");
+  }
+
+  @Test
+  void aPassCappedByTheTimeBoxIsNotAPassForTheRerunGuard() throws Exception {
+    writeLedger("SP-R", ago("10H") + "\tSTART\t\n");
+    Path first = artefact("one", inhouseLayerOnly(CONFIG_A, "100", sha1));
+    assertThat(importDirs("SP-R", false, first)).as(err()).isEqualTo(0);
+    assertThat(summaryOfCommitted().status()).isEqualTo(Verdict.INCONCLUSIVE);
+    Path second = artefact("two", inhouseLayerOnly(CONFIG_A, "200", sha1));
+    assertThat(importDirs("SP-R", false, second)).as(err()).isEqualTo(0);
+  }
+
+  // another configuration (RF4: an earlier configuration replaced without a trace)
+
+  private static SpikeResult withOpen(SpikeResult r, List<String> open) {
+    return new SpikeResult(
+        r.spike(),
+        r.status(),
+        r.scope(),
+        r.evidenceLevel(),
+        r.criteria(),
+        r.decisions(),
+        open,
+        r.source(),
+        r.env(),
+        r.timeBox(),
+        r.criteriaDigest(),
+        r.vmCount(),
+        r.mixedHardware(),
+        r.runs());
+  }
+
+  @Test
+  void anotherConfigurationIsRefusedUnlessAllowed() throws Exception {
+    Path first = artefact("one", CONFIG_A, "100", sha1, new CountValue("R-1a", 2, 1), marginal());
+    assertThat(importDirs("SP-R", false, first)).as(err()).isEqualTo(0);
+    String reportBefore = Files.readString(docs("SP-R.md"), StandardCharsets.UTF_8);
+    String summaryBefore = Files.readString(docs("SP-R.summary.json"), StandardCharsets.UTF_8);
+
+    Path other = artefact("two", CONFIG_B, "200", sha1, marginal());
+    for (boolean dryRun : new boolean[] {true, false}) {
+      assertThat(importDirs("SP-R", dryRun, other)).isEqualTo(1);
+      assertThat(err().strip().split("\n")).hasSize(1);
+      assertThat(err()).contains("import: OTHER_CONFIG_EXISTS SP-R " + "a".repeat(12));
+      assertThat(err()).doesNotContain("a".repeat(13));
+    }
+    assertThat(fileNames(docs("raw/SP-R"))).containsExactly(CONFIG_A);
+    assertThat(Files.readString(docs("SP-R.md"), StandardCharsets.UTF_8)).isEqualTo(reportBefore);
+    assertThat(Files.readString(docs("SP-R.summary.json"), StandardCharsets.UTF_8))
+        .isEqualTo(summaryBefore);
+
+    // the same configuration is never "another"
+    Path same = artefact("three", CONFIG_A, "300", sha1, marginal());
+    assertThat(importDirs("SP-R", false, same)).as(err()).isEqualTo(0);
+  }
+
+  @Test
+  void aSupersededConfigurationIsNamedInTheReportAndStaysVerified() throws Exception {
+    Path first = artefact("one", CONFIG_A, "100", sha1, new CountValue("R-1a", 2, 1), marginal());
+    assertThat(importDirs("SP-R", false, first)).as(err()).isEqualTo(0);
+    assertThat(summaryOfCommitted().status()).isEqualTo(Verdict.INCONCLUSIVE);
+
+    Path other = artefact("two", CONFIG_B, "200", sha1, marginal());
+    assertThat(importDirsAllowingOtherConfig("SP-R", true, other)).as(err()).isEqualTo(0);
+    assertThat(importDirsAllowingOtherConfig("SP-R", false, other)).as(err()).isEqualTo(0);
+
+    String item = "SUPERSEDED_CONFIG " + CONFIG_A + " status=INCONCLUSIVE runs=100-1-all";
+    SpikeResult stored = summaryOfCommitted();
+    assertThat(stored.open()).contains(item);
+    assertThat(stored.source().get("configDigest")).isEqualTo(CONFIG_B);
+    String report = Files.readString(docs("SP-R.md"), StandardCharsets.UTF_8);
+    String warnings =
+        report.substring(report.indexOf("## Warnings"), report.indexOf("## Decisions"));
+    assertThat(warnings).contains("supersedes").contains(CONFIG_A).contains("runs=100-1-all");
+    assertThat(fileNames(docs("raw/SP-R"))).containsExactly(CONFIG_A, CONFIG_B);
+    assertThat(verify()).as(err()).isEqualTo(0);
+
+    // the item cannot be dropped from the report or the summary without verify-committed saying so
+    Files.writeString(
+        docs("SP-R.summary.json"),
+        withOpen(stored, List.of()).toJson() + "\n",
+        StandardCharsets.UTF_8);
+    assertThat(verify()).isEqualTo(1);
+    assertThat(err()).contains("ORPHAN_RAW_CONFIG SP-R " + CONFIG_A);
+  }
+
+  @Test
+  void verifyCommittedFailsForARawConfigurationTheSummaryDoesNotAccountFor() throws Exception {
+    Path first = artefact("one", CONFIG_A, "100", sha1, new CountValue("R-1a", 2, 1), marginal());
+    assertThat(importDirs("SP-R", false, first)).as(err()).isEqualTo(0);
+    assertThat(verify()).as(err()).isEqualTo(0);
+
+    // a second configuration put under raw/ by hand, next to the committed one
+    Path stray = docs("raw/SP-R/" + CONFIG_B + "/200-1-all");
+    Files.createDirectories(stray);
+    Files.copy(
+        artefact("two", CONFIG_B, "200", sha1, marginal()).resolve("measurements.json"),
+        stray.resolve("measurements.json"));
+    assertThat(verify()).isEqualTo(1);
+    assertThat(err()).contains("ORPHAN_RAW_CONFIG SP-R " + CONFIG_B);
+
+    // so is a directory that holds no run at all
+    deleteTree(docs("raw/SP-R/" + CONFIG_B));
+    assertThat(verify()).as(err()).isEqualTo(0);
+    Files.createDirectories(docs("raw/SP-R/junk"));
+    assertThat(verify()).isEqualTo(1);
+    assertThat(err()).contains("ORPHAN_RAW_CONFIG SP-R junk");
+  }
+
+  // the time-box of a committed report against the registry and the ledger (RF6)
+
+  @Test
+  void verifyCommittedComparesTheBoxWithTheRegistry() throws Exception {
+    Path dir = artefact("one", CONFIG_A, "100", sha1, new CountValue("R-1a", 2, 1), marginal());
+    assertThat(importDirs("SP-R", false, dir)).as(err()).isEqualTo(0);
+    Path summary = docs("SP-R.summary.json");
+    String text = Files.readString(summary, StandardCharsets.UTF_8);
+    assertThat(text).contains("\"boxMinutes\":480");
+    Files.writeString(
+        summary, text.replace("\"boxMinutes\":480", "\"boxMinutes\":9999"), StandardCharsets.UTF_8);
+    assertThat(verify()).isEqualTo(1);
+    assertThat(err()).contains("BOX_MISMATCH SP-R committed=9999 registry=480");
+  }
+
+  @Test
+  void verifyCommittedComparesTheUsedMinutesWithTheLedger() throws Exception {
+    // no ledger file: nothing to compare with
+    Path dir = artefact("one", inhouseLayerOnly(CONFIG_A, "100", sha1));
+    assertThat(importDirs("SP-R", false, dir)).as(err()).isEqualTo(0);
+    assertThat(verify()).as(err()).isEqualTo(0);
+
+    // a ledger still running: the clock counts, the committed 600 minutes are what it said then
+    writeLedger("SP-R", ago("10H") + "\tSTART\t\n");
+    deleteTree(docs("raw"));
+    Files.delete(docs("SP-R.md"));
+    Files.delete(docs("SP-R.summary.json"));
+    assertThat(importDirs("SP-R", false, dir)).as(err()).isEqualTo(0);
+    assertThat(summaryOfCommitted().usedMinutes()).isEqualByComparingTo("600");
+    assertThat(verify()).as(err()).isEqualTo(0);
+
+    // later the ledger is stopped at 600 minutes: equal is fine
+    writeLedger("SP-R", ago("10H") + "\tSTART\t\n" + ago("0S") + "\tSTOP\tdone\n");
+    assertThat(verify()).as(err()).isEqualTo(0);
+
+    // a ledger of 60 minutes cannot account for 600 committed ones
+    writeLedger("SP-R", ago("10H") + "\tSTART\t\n" + ago("9H") + "\tSTOP\tdone\n");
+    assertThat(verify()).isEqualTo(1);
+    assertThat(err()).contains("USED_EXCEEDS_LEDGER SP-R committed=600 ledger=60");
+
+    writeLedger("SP-R", "yesterday\tSTART\t\n");
+    assertThat(verify()).isEqualTo(1);
+    assertThat(err()).contains("BAD_TIME_LEDGER SP-R");
   }
 
   private Path selftestArtefact(String name, String runId) throws IOException {
@@ -555,11 +769,7 @@ class ImportCommandTest {
   void verifyCommittedAcceptsWhatImportWrote() throws Exception {
     Path dir = artefact("one", CONFIG_A, "100", sha1, new CountValue("R-1a", 2, 1), marginal());
     assertThat(importDirs("SP-R", false, dir)).isEqualTo(0);
-    int code =
-        ImportCommand.verifyCommitted(
-            repo,
-            new PrintStream(outBytes, true, StandardCharsets.UTF_8),
-            new PrintStream(errBytes, true, StandardCharsets.UTF_8));
+    int code = verify();
     assertThat(code).as(err()).isEqualTo(0);
     assertThat(out()).contains("verify-committed: OK 1 report");
   }
@@ -742,7 +952,7 @@ class ImportCommandTest {
 
     writeLedger("SELFTEST", ago("2H") + "\tSTART\t\n");
     Path two = artefact("two", set("HARNESS", CONFIG_B, "200", sha1, new CountValue("ST-1", 0, 1)));
-    assertThat(importDirs("SELFTEST", false, two)).isEqualTo(0);
+    assertThat(importDirsAllowingOtherConfig("SELFTEST", false, two)).isEqualTo(0);
     assertThat(summaryOfSelftest().usedMinutes()).isEqualByComparingTo("120");
     assertThat(summaryOfSelftest().boxMinutes()).isEqualByComparingTo("480");
   }
@@ -1025,6 +1235,7 @@ class ImportCommandTest {
     errBytes.reset();
     return ImportCommand.verifyCommitted(
         repo,
+        NOW,
         new PrintStream(outBytes, true, StandardCharsets.UTF_8),
         new PrintStream(errBytes, true, StandardCharsets.UTF_8));
   }

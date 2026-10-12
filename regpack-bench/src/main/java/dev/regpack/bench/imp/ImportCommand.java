@@ -1,7 +1,6 @@
 package dev.regpack.bench.imp;
 
 import dev.regpack.bench.eval.Criteria;
-import dev.regpack.bench.eval.Criterion;
 import dev.regpack.bench.eval.CriterionResult;
 import dev.regpack.bench.eval.MeasurementSet;
 import dev.regpack.bench.eval.MeasurementSet.RunInfo;
@@ -13,6 +12,7 @@ import dev.regpack.bench.report.ReportWriter;
 import dev.regpack.bench.report.ResultSeal;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -56,13 +56,26 @@ public final class ImportCommand {
    * @param summaryText a pasted job summary: a PENDING report without recomputation
    * @param allowNoLock accept a missing {@code criteria.lock}: for a dry run or the self-test only
    * @param dryRun do steps 1 to 5 and 7 (the pooled verdict), write nothing
+   * @param allowOtherConfig accept a configuration other than the one(s) already under {@code
+   *     docs/spikes/raw/<ID>}; the report then names each superseded configuration
    */
   public record Options(
       String spike,
       List<Path> dirs,
       Optional<Path> summaryText,
       boolean allowNoLock,
-      boolean dryRun) {}
+      boolean dryRun,
+      boolean allowOtherConfig) {
+    /** The options without {@code --allow-other-config}. */
+    public Options(
+        String spike,
+        List<Path> dirs,
+        Optional<Path> summaryText,
+        boolean allowNoLock,
+        boolean dryRun) {
+      this(spike, dirs, summaryText, allowNoLock, dryRun, false);
+    }
+  }
 
   private static final long MAX_BYTES = 2L * 1024 * 1024;
   private static final Pattern ID = Pattern.compile("SP-[A-Z]|SELFTEST");
@@ -199,7 +212,19 @@ public final class ImportCommand {
     }
     fail(problems);
     String config = configs.iterator().next();
-    Path rawConfig = docs(repo).resolve("raw").resolve(id).resolve(config);
+    Path rawId = docs(repo).resolve("raw").resolve(id);
+    Path rawConfig = rawId.resolve(config);
+    // the report of another configuration would replace the one of the earlier configuration,
+    // whose evidence would then be orphaned: it is refused, or said in the report
+    List<Path> others = otherConfigDirs(rawId, config);
+    if (!o.allowOtherConfig()) {
+      for (Path other : others) {
+        String name = safe(String.valueOf(other.getFileName()));
+        problems.add(
+            "OTHER_CONFIG_EXISTS " + id + " " + name.substring(0, Math.min(12, name.length())));
+      }
+    }
+    fail(problems);
     Map<String, Object> timeBox = timeBox(repo, id, spike, criteria, now);
     for (Artefact a : artefacts) {
       if (Files.exists(rawConfig.resolve(a.runName()), LinkOption.NOFOLLOW_LINKS)) {
@@ -209,10 +234,12 @@ public final class ImportCommand {
     fail(problems);
     Map<String, MeasurementSet> raw = loadRawRuns(rawConfig, config);
     if (!raw.isEmpty()) {
+      // the roll-up of the spike, after the time-box cap, exactly as the status of the report: a
+      // spike that passes through an alternative group has a failing required criterion
       SpikeResult sofar = evaluate(pool(raw, config), criteria, timeBox);
-      if (allRequiredPass(sofar, criteria)) {
+      if (sofar.status() == Verdict.PASS) {
         throw new Failure(
-            "RERUN_NOT_JUSTIFIED every required criterion of "
+            "RERUN_NOT_JUSTIFIED "
                 + id
                 + " already passes on this configuration; a PASS is never re-run");
       }
@@ -226,6 +253,18 @@ public final class ImportCommand {
       all.put(a.runName(), a.set());
     }
     SpikeResult result = evaluate(pool(all, config), criteria, timeBox);
+    List<String> superseded = new ArrayList<>();
+    for (Path other : others) {
+      superseded.add(
+          supersededItem(other, criteria, timeBox)
+              .orElseThrow(
+                  () ->
+                      new Failure(
+                          "BAD_RAW_CONFIG "
+                              + safe(String.valueOf(other.getFileName()))
+                              + " cannot be read as a superseded configuration")));
+    }
+    result = withSuperseded(result, superseded);
     if (o.dryRun()) {
       out.println("import: OK (dry run) " + id + " status=" + result.status() + " evidence=RAW");
       return;
@@ -421,7 +460,7 @@ public final class ImportCommand {
    *
    * @return 0 when every report is what the evidence gives, 1 with problem lines otherwise
    */
-  public static int verifyCommitted(Path repo, PrintStream out, PrintStream err) {
+  public static int verifyCommitted(Path repo, Instant now, PrintStream out, PrintStream err) {
     List<String> problems = new ArrayList<>();
     int count = 0;
     Path docs = docs(repo);
@@ -453,7 +492,7 @@ public final class ImportCommand {
       for (String id : ids) {
         count++;
         try {
-          problems.addAll(verifyOne(repo, id, criteria));
+          problems.addAll(verifyOne(repo, id, criteria, now));
         } catch (Failure f) {
           problems.addAll(List.of(f.getMessage().split("\n")));
         }
@@ -471,7 +510,7 @@ public final class ImportCommand {
     return 0;
   }
 
-  private static List<String> verifyOne(Path repo, String id, Criteria criteria)
+  private static List<String> verifyOne(Path repo, String id, Criteria criteria, Instant now)
       throws Failure, IOException {
     List<String> problems = new ArrayList<>();
     String committedText = readText(docs(repo).resolve(id + SUMMARY_SUFFIX), id + SUMMARY_SUFFIX);
@@ -489,6 +528,7 @@ public final class ImportCommand {
       throw new Failure(
           "CRITERIA_DIGEST_MISMATCH " + id + ": the criteria changed after the report");
     }
+    checkTimeBox(repo, id, spike, committed, criteria, now, problems);
     SpikeResult expected;
     if (committed.evidenceLevel().equals("RAW")) {
       Object config = committed.source().get("configDigest");
@@ -503,6 +543,18 @@ public final class ImportCommand {
       box.put("usedMinutes", committed.timeBox().get("usedMinutes"));
       box.put("boxMinutes", committed.timeBox().get("boxMinutes"));
       expected = evaluate(pooled, criteria, box);
+      // every other configuration under raw/<ID> must be accounted for by the committed summary:
+      // the item that names it is the one the raw runs of that configuration give
+      List<String> superseded = new ArrayList<>();
+      for (Path other : otherConfigDirs(docs(repo).resolve("raw").resolve(id), c)) {
+        Optional<String> item = supersededItem(other, criteria, box);
+        if (item.isPresent() && committed.open().contains(item.get())) {
+          superseded.add(item.get());
+        } else {
+          problems.add("ORPHAN_RAW_CONFIG " + id + " " + safe(String.valueOf(other.getFileName())));
+        }
+      }
+      expected = withSuperseded(expected, superseded);
     } else {
       expected = committed;
     }
@@ -528,6 +580,53 @@ public final class ImportCommand {
       problems.add("MD_DIFFERS " + id + ".md differs from the recomputation at line " + (line + 1));
     }
     return problems;
+  }
+
+  /**
+   * The box of a committed report is the box of the registry, and the minutes it used are at most
+   * what the ledger of the id says: the active time up to the last event of a stopped or paused
+   * ledger, up to {@code now} for a ledger that still runs (the report was written at some instant
+   * before). No ledger file, nothing to compare with.
+   */
+  private static void checkTimeBox(
+      Path repo,
+      String id,
+      String spike,
+      SpikeResult committed,
+      Criteria criteria,
+      Instant now,
+      List<String> problems)
+      throws Failure {
+    long registryBox = criteria.box(spike).toMinutes();
+    if (committed.boxMinutes().compareTo(BigDecimal.valueOf(registryBox)) != 0) {
+      problems.add(
+          "BOX_MISMATCH "
+              + id
+              + " committed="
+              + committed.boxMinutes().toPlainString()
+              + " registry="
+              + registryBox);
+    }
+    Path file = docs(repo).resolve("timebox").resolve(id + ".tsv");
+    if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    long ledgerMinutes;
+    try {
+      ledgerMinutes = TimeLedger.parse(readText(file, id + ".tsv")).used(now).toMinutes();
+    } catch (IllegalArgumentException e) {
+      problems.add("BAD_TIME_LEDGER " + id + ": " + e.getMessage());
+      return;
+    }
+    if (committed.usedMinutes().compareTo(BigDecimal.valueOf(ledgerMinutes)) > 0) {
+      problems.add(
+          "USED_EXCEEDS_LEDGER "
+              + id
+              + " committed="
+              + committed.usedMinutes().toPlainString()
+              + " ledger="
+              + ledgerMinutes);
+    }
   }
 
   // ---------------------------------------------------------------- shared
@@ -583,17 +682,72 @@ public final class ImportCommand {
     return problems;
   }
 
-  private static boolean allRequiredPass(SpikeResult r, Criteria criteria) {
-    Map<String, Verdict> verdicts = new LinkedHashMap<>();
-    for (CriterionResult c : r.criteria()) {
-      verdicts.put(c.id(), c.verdict());
+  /** The directories of {@code raw/<ID>} that are not the given configuration, by name. */
+  private static List<Path> otherConfigDirs(Path rawId, String config) throws IOException {
+    List<Path> others = new ArrayList<>();
+    if (!Files.isDirectory(rawId, LinkOption.NOFOLLOW_LINKS)) {
+      return others;
     }
-    for (Criterion c : criteria.forSpike(r.spike())) {
-      if (c.required() && verdicts.get(c.id()) != Verdict.PASS) {
-        return false;
+    try (Stream<Path> list = Files.list(rawId)) {
+      list.filter(p -> Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS))
+          .filter(p -> !p.getFileName().toString().equals(config))
+          .sorted()
+          .forEach(others::add);
+    }
+    return others;
+  }
+
+  /**
+   * The open item that names a superseded configuration: its digest, the status its own raw runs
+   * give under the box, and those runs. Empty when the directory is not a readable configuration (a
+   * name that is no digest, no run, a run of another configuration, runs that cannot be pooled).
+   */
+  private static Optional<String> supersededItem(
+      Path dir, Criteria criteria, Map<String, Object> box) throws IOException {
+    String name = String.valueOf(dir.getFileName());
+    if (!HEX64.matcher(name).matches()) {
+      return Optional.empty();
+    }
+    try {
+      Map<String, MeasurementSet> runs = loadRawRuns(dir, name);
+      if (runs.isEmpty()) {
+        return Optional.empty();
       }
+      SpikeResult r = evaluate(pool(runs, name), criteria, box);
+      return Optional.of(
+          ReportWriter.SUPERSEDED
+              + name
+              + " status="
+              + r.status()
+              + " runs="
+              + String.join(",", runs.keySet()));
+    } catch (Failure f) {
+      return Optional.empty();
     }
-    return true;
+  }
+
+  /** The result with the items that name superseded configurations after its own open items. */
+  private static SpikeResult withSuperseded(SpikeResult r, List<String> items) {
+    if (items.isEmpty()) {
+      return r;
+    }
+    List<String> open = new ArrayList<>(r.open());
+    open.addAll(items);
+    return new SpikeResult(
+        r.spike(),
+        r.status(),
+        r.scope(),
+        r.evidenceLevel(),
+        r.criteria(),
+        r.decisions(),
+        open,
+        r.source(),
+        r.env(),
+        r.timeBox(),
+        r.criteriaDigest(),
+        r.vmCount(),
+        r.mixedHardware(),
+        r.runs());
   }
 
   private static SpikeResult evaluate(

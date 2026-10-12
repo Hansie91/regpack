@@ -35,6 +35,17 @@ class TimeLedgerTest {
   }
 
   @Test
+  void lastEventAtIsTheInstantOfTheLastEvent() {
+    assertThat(TimeLedger.empty().lastEventAt()).isEmpty();
+    TimeLedger ledger =
+        TimeLedger.empty()
+            .append(t("09:00:00"), Event.START, "")
+            .append(t("10:00:00"), Event.PAUSE, "approval");
+    assertThat(ledger.lastEventAt()).contains(t("10:00:00"));
+    assertThat(TimeLedger.parse(ledger.toTsv()).lastEventAt()).contains(t("10:00:00"));
+  }
+
+  @Test
   void pausedWaitsAreNotCounted() {
     TimeLedger ledger =
         TimeLedger.empty()

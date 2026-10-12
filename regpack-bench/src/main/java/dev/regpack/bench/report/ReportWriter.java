@@ -29,6 +29,12 @@ import java.util.TreeSet;
 public final class ReportWriter {
   private static final String PASS = "PASS";
 
+  /**
+   * Starts the open item that names a superseded configuration; the report shows it as a warning
+   * too.
+   */
+  public static final String SUPERSEDED = "SUPERSEDED_CONFIG ";
+
   private ReportWriter() {}
 
   /**
@@ -180,6 +186,13 @@ public final class ReportWriter {
               + shas.size()
               + " different git SHAs: "
               + cell(String.join(", ", shas)));
+    }
+    for (String item : r.open()) {
+      if (item.startsWith(SUPERSEDED)) {
+        warnings.add(
+            "this report supersedes an earlier configuration, whose raw runs are kept: "
+                + cell(item.substring(SUPERSEDED.length())));
+      }
     }
     return warnings;
   }

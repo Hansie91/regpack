@@ -50,7 +50,7 @@ public final class Bench {
       "usage: bench criteria --write <file> | criteria --lock <file> --by <name> --on <date>"
           + " | selftest --out <dir> | publish --dir <dir> --os <label>"
           + " | import --spike <ID> (--dir <dir>... | --summary-text <file>) [--allow-no-lock]"
-          + " [--dry-run] | verify-committed"
+          + " [--allow-other-config] [--dry-run] | verify-committed"
           + " | results --write <file> | budget --write <file>"
           + " | timebox start|pause|resume|stop|status <ID> [--note <text>] [--at <instant>]";
 
@@ -86,7 +86,7 @@ public final class Bench {
         case "import" -> importCommand(args, repo, now, out, err);
         case "verify-committed" -> {
           Args.parse(args, 1, Set.of(), Set.of()).noPositionals();
-          yield ImportCommand.verifyCommitted(repo, out, err);
+          yield ImportCommand.verifyCommitted(repo, now, out, err);
         }
         case "timebox" -> timebox(args, repo, now, out, err);
         case "results" -> results(args, repo, out, err);
@@ -245,7 +245,7 @@ public final class Bench {
                 args,
                 1,
                 Set.of("--spike", "--dir", "--summary-text"),
-                Set.of("--allow-no-lock", "--dry-run"))
+                Set.of("--allow-no-lock", "--allow-other-config", "--dry-run"))
             .noPositionals();
     List<Path> dirs = new ArrayList<>();
     for (String dir : a.all("--dir")) {
@@ -257,7 +257,8 @@ public final class Bench {
             dirs,
             a.single("--summary-text").map(repo::resolve),
             a.flag("--allow-no-lock"),
-            a.flag("--dry-run"));
+            a.flag("--dry-run"),
+            a.flag("--allow-other-config"));
     return ImportCommand.run(options, repo, now, out, err);
   }
 
@@ -372,15 +373,10 @@ public final class Bench {
     Instant at = a.single("--at").map(Instant::parse).orElse(now);
     String note = a.single("--note").orElse("");
     if (a.single("--at").isPresent() && !action.equals("status")) {
-      // --at lets a start be recorded late, but the ledger never holds the future, and an
-      // instant well before the clock is said out loud: a back-dated pause hides active time
+      // --at lets a start be recorded late, but the ledger never holds the future
       if (at.isAfter(now)) {
         err.println("bench: timebox " + id + ": --at " + at + " is later than the clock " + now);
         return 1;
-      }
-      long minutes = Duration.between(at, now).toMinutes();
-      if (minutes > 1) {
-        err.println("bench: note: --at is " + minutes + " minutes before the clock");
       }
     }
     Optional<TimeLedger.Event> event =
@@ -400,11 +396,34 @@ public final class Bench {
               ? TimeLedger.parse(Files.readString(file, StandardCharsets.UTF_8))
               : TimeLedger.empty();
       if (event.isPresent()) {
+        // the ledger never goes back: an instant before its last event is a problem, and
+        // nothing is written
+        Optional<Instant> last = ledger.lastEventAt();
+        if (last.isPresent() && at.isBefore(last.get())) {
+          err.println(
+              "bench: timebox "
+                  + id
+                  + ": "
+                  + action
+                  + " at "
+                  + at
+                  + " is earlier than the last event of the ledger, "
+                  + last.get()
+                  + "; the instants of a ledger never go back");
+          return 1;
+        }
         ledger = ledger.append(at, event.get(), note);
       }
     } catch (IllegalArgumentException e) {
       err.println("bench: timebox " + id + ": " + e.getMessage());
       return 1;
+    }
+    // an instant well before the clock is said out loud: a back-dated pause hides active time
+    if (event.isPresent() && a.single("--at").isPresent()) {
+      long minutes = Duration.between(at, now).toMinutes();
+      if (minutes > 1) {
+        err.println("bench: note: --at is " + minutes + " minutes before the clock");
+      }
     }
     if (event.isEmpty()) {
       long used = ledger.used(now).toMinutes();
