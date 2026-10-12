@@ -12,8 +12,8 @@ Questions are those of Appendix B of the P1a plan. A reading marked "default" is
 - Q4 (time-box accounting): CI waits and owner waits do not count against a box; a day is 8 h of agent work. Accepted by hans, 2026-10-10 (default).
 - Q5 (larger runner): measure smaller restore sizes cold-cache and extrapolate, labelled as an extrapolation; no larger runner. Decided by hans, 2026-10-10.
 - Criteria placeholders: every criterion whose source says PLAN is confirmed by hans in `docs/spikes/criteria.lock` before the first full run. Accepted by hans, 2026-10-10 (default). Q1 to Q3 are answered. Locked by hans on 2026-10-10 as generated, digest d85eca736beb3ba4826bdbd6b160bba9e40cd838f7227b41c97140730d5b9447 (`docs/spikes/criteria.lock`): the 17 placeholder rows and the L-11 assumptions (500 reports per file, 3 other events per second) are final; no threshold changes after this date. Noted at the lock and left unchanged: the SP-L rows use 3,470 records/s (SPEC 5.6) and the SP-X rows 3,472 (the 4 h margin).
-- Q6 (rejected draft `reference/`): stays untracked (excluded locally in `.git/info/exclude`). Default, not yet questioned: OPEN until the owner says otherwise.
-- Q7 (after the exit: keep `spikes/` frozen on `main` or delete): default is keep frozen. OPEN, asked at C2.
+- Q6 (rejected draft `reference/`): stays untracked (excluded locally in `.git/info/exclude`). Default, never questioned: still OPEN (listed in `open-items.md`).
+- Q7 (after the exit: keep `spikes/` and `spikes-run.yml` frozen on `main`, or delete the spike code and keep `docs/spikes`): default is keep frozen. OPEN, for the owner at the sign-off (listed in `open-items.md`).
 - Q8 (who dispositions the SP-G register): the owner (hans). Done 2026-10-10: 16 rows ACCEPTED (15 amendment-list wordings and BRK-18 as a P12 item), 3 REJECTED_NOT_NEEDED (BRK-03, BRK-05, BRK-17); BRK-17 and BRK-18 re-rated P12_ONLY by the owner. The acceptance is a design decision with gate G1 (named Compliance owner) still open, not a Compliance or Legal view of EMIR.
 
 ## T3 harness notes
@@ -31,12 +31,12 @@ Technical notes of the implementer and the fixer of T3, not owner decisions; the
 
 | Id | What | Date | Name | State |
 |---|---|---|---|---|
-| A-1 | `postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336` pulled on the runner by `spikes-run` | | | asked at each dispatch of `sp-l` |
+| A-1 | `postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336` pulled on the runner by `spikes-run` | 2026-10-11 | hans | given by ticking `confirm_downloads`: smoke dispatch 38153007292 and full dispatch 38175053709 (the first smoke dispatch 38148408892 was not ticked and failed at the guard) |
 | A-2 | Licence spellings in the spike POM only: re2j 1.8 "Go License" and threeten-extra 1.10.0 "BSD 3-clause", both mapped to BSD-3-Clause | 2026-10-10 | hans | approved; also recorded in `governance/licence-policy.md` |
-| A-3 | Every push of `p1a/spikes` | | | asked at each push |
-| A-4 | Every workflow dispatch or re-run, and the artefact download | | | asked at each run |
-| A-5 | Merge `p0/foundation` into `main` and put `spikes-run.yml` on `main`, or push a stub | | | asked at T8 step 6 |
-| A-6 | Repository settings (Dependabot alerts and security updates, GitHub-owned actions only, read-only default workflow permissions) | | | OPEN: not enabled when P0 was signed; to be asked again before T8 step 6 |
+| A-3 | Every push of `p1a/spikes` | 2026-10-10 and 2026-10-11 | hans | approved each time: `2a6247c`, `833cba3`, `f1e63d5` (and `4fc44e5`); also the pushes of `main` and `p0/foundation` of 2026-10-10 |
+| A-4 | Every workflow dispatch or re-run, and the artefact download | 2026-10-10 and 2026-10-11 | hans | the owner dispatched: stub 38093437651, selftest 38093544725, sp-r full 38094901948, sp-x full 38108080155, sp-l smoke 38148408892 and 38153007292, sp-l full 38175053709; no re-run; artefacts were downloaded by the owner |
+| A-5 | Merge `p0/foundation` into `main` and put `spikes-run.yml` on `main`, or push a stub | 2026-10-10 | hans | approved: merge of `p0/foundation` plus a stub `spikes-run.yml` (commit `994fd12`); a later merge of `p1a/spikes` conflicts on that file: take the `p1a/spikes` version |
+| A-6 | Repository settings (Dependabot alerts and security updates, GitHub-owned actions only, read-only default workflow permissions) | 2026-10-10 | hans | **OPEN**: hans answered "I'll do it before dispatching"; not confirmed since. Dependabot update jobs ran on `main` after the first push, so some settings may be in force; the owner confirms or defers |
 
 ## Hand-off channels verified
 

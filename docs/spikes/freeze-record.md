@@ -23,7 +23,7 @@ The whole table with every criterion is `results.md`; the partial latency budget
 
 By this record, once recorded:
 
-1. **The pack-file structure of spec 6.1**, including the accepted SP-G amendments by id: BRK-01, 02, 04, 06, 07, 08, 09, 10, 11, 12, 13, 14, 15, 16 and 19 (the 15 wordings of the amendment list; the specification is edited by the owner, not by the agent). BRK-18 is accepted as a P12 item and changes nothing here.
+1. **The pack-file structure of spec 6.1**, including the accepted SP-G amendments by id: BRK-01, 02, 04, 06, 07, 08, 09, 10, 11, 12, 13, 14, 15, 16 and 19 (the 15 wordings of the amendment list; the specification is edited by the owner, not by the agent). BRK-18 is accepted as a P12 item and changes nothing in the pack format; the ledger contract it touches is frozen without an answer (section 3).
 2. **The ledger and journal-object contracts**, including the adopted SP-L findings and the micro-batch N and T (section 4 lists the candidates).
 3. **The executor choice from SP-R** (throughput and the Tier-1 render only; the spec 6.6 bounded-memory gate is pending SP-M).
 
@@ -43,6 +43,9 @@ Non-PASS required criteria (SP-L, a FAIL and seven INCONCLUSIVE; the noise margi
 - L-9 (INCONCLUSIVE; 0.14 ms cached) — ack: <initials> <date>
 - L-10 (INCONCLUSIVE; 255 ms at 1,826 daily partitions against 50 ms: a failing-level figure that the noise rule refused to call) — ack: <initials> <date>
 - L-11 (INCONCLUSIVE; 1,015 events/s) — ack: <initials> <date>
+- X-2b (FAIL; modelled capacity of policy SAMPLED_10 at defect rates of 0.1% and 1% is 1,032 and 105 records/s against 3,472; the SAMPLED_10 alternative group fails) — ack: <initials> <date>
+- X-3 (FAIL; the capacity model overestimates the integrated stage by 49.2% against a limit of 15%; it was checked for policy ALL at defect rate 0 only, its failure-path terms were never compared with a measurement, and the policy ALL choice rests on the measured X-1a, not on the model) — ack: <initials> <date>
+- BRK-17 and BRK-18 (P12 items that touch ledger contracts the freeze fixes: the in-flight guard stays per `business_key` and the reaction to a late past-dated event is undecided, so the freeze fixes those contracts without a decided answer) — ack: <initials> <date>
 
 EXTRAPOLATED criteria:
 
@@ -67,7 +70,7 @@ Alternative groups, where the passing group is a choice of the owner:
 ## 4. Spec amendments the owner will make
 
 - **SP-G accepted rows (15 wordings):** see `docs/spikes/sp-g/register.md`, column `proposed_fix`, and the by-section list in SP-G.md. Two edits that no proposal contains: the `legs[]` comment of the 6.3 decision record (BRK-12) and the `scope/` and `derive/` lines of the 6.1 file tree (BRK-10).
-- **SP-L findings for the P3 schema design:** the partition granularity (daily with `as_at` in `decision_head`, or monthly; SP-L.md, Partitions), the growth policy of `decision_head` (24 million rows a day in the sketch) and of the unpartitioned `ingest_registry` (7.9 GB a day), the encoding (E1, 335 bytes per decision row, inside the 300 to 500 band; E3, 983, outside), the ledger size per day (48.8 GB, about 2.9 times the decision-only planning figure of spec 5.6).
+- **SP-L findings for the P3 schema design:** the partition granularity (daily with `as_at` in `decision_head`, or monthly; SP-L.md, Partitions), the growth policy of `decision_head` (24 million rows a day in the sketch) and of the unpartitioned `ingest_registry` (7.9 GB a day), the encoding (E1, 335 bytes per decision row, inside the 300 to 500 band; E3, 983, outside), the ledger size per day (48.8 GB, about 2.9 times the measured decision rows of 16.7 GB a day; the spec 5.6 planning range for decision rows is 15 to 25 GB a day).
 - **SP-L and SP-X inputs to the micro-batch rules (spec 7.8):** N (the SP-L knee is 10,000 for four writers; the load model default is 5,000), T (not a measured criterion; final with SP-M in P1b), the SP-X stage latency per file size and its loaded factor.
 - **SP-X:** the per-record XSD policy (ALL by derivation) and the stage latency per file size.
 

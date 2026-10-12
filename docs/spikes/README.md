@@ -36,6 +36,6 @@ Everything in `spikes/inbox/` is data from outside the repository. It is read on
 - NOT_RUN: the criterion was required but was not measured (for example a time-box was hit).
 - PENDING: the criterion has no confirmed threshold yet (the owner has not locked it).
 
-Nobody edits a verdict by hand. A verdict changes only by a new run, imported the same way.
+RAW evidence means that every verdict can be recomputed from the committed measurements, not that the files are authentic: whether a run happened is established by comparing the committed run ids with the GitHub Actions listing (the P1a exit record does this), because the seal is an unkeyed hash list. Nobody edits a verdict by hand. A verdict changes only by a new run, imported the same way.
 
 A report from a pasted job summary has `evidence_level: SUMMARY` and prints status PENDING; it never satisfies a gate. Its `<ID>.summary.json` still holds the status that the job computed, so whatever reads a summary for a gate decision reads `evidenceLevel` as well as the status, and accepts only `RAW`.

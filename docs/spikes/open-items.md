@@ -13,6 +13,7 @@ Written by hand from the four reports (their open lists and limits), the SP-G re
 | D-5 | **SP-X per-record policy**: ALL (derived), on the synthetic schema only. | SP-X.md | P8 entry |
 | D-6 | **SP-L P3 inputs**: partition granularity (daily with `as_at` in `decision_head`, or monthly), the growth and retention policy of `decision_head` and `ingest_registry`, the encoding E1, the ledger size (48.8 GB a day), micro-batch N (knee 10,000 for four writers) and T. | SP-L.md | P3 schema design |
 | D-7 | **Acknowledgements** of the non-PASS, INCONCLUSIVE, EXTRAPOLATED and single-VM criteria. | freeze-record.md, section 3 | recording the freeze |
+| D-8 | **Q6 and Q7 are still open.** Q6: the rejected 62-task draft `docs/superpowers/plans/reference/` stays untracked (excluded locally). Q7: after the exit keep `spikes/` and `spikes-run.yml` frozen on `main` (default) or delete the spike code and keep `docs/spikes`. | decisions.md | the merge to `main` |
 
 ## Findings about the harness that the owner should know (the numbers above rest on it)
 
@@ -23,7 +24,15 @@ Written by hand from the four reports (their open lists and limits), the SP-G re
 | H-3 | **The DISK canary runs right after heavy runs**, so it partly measures the run's own disk backlog (57 sync ops/s after A2). | inflates the margin; the cause is not isolated |
 | H-4 | **The per-second sampler rows (CPU, WAL fsync, checkpoints) were collected but not kept**; only the violation count is in the result. The PostgreSQL logs in the artefacts are the last cluster only. | the cause of the L-4 failure and of the commit stalls cannot be established |
 | H-5 | **The time-box lines inside the generated reports** are the import-time ledger values (SP-R 105, SP-G 35, SP-X 95, SP-L 157 minutes). The final values are in `docs/exit/P1a.md`. | cosmetic |
-| H-6 | **A re-run cannot repair H-2 or H-3 under the plan's rules** (pooling only adds samples); the owner decided on 2026-10-11 not to re-run SP-L. | the L-4 FAIL stands as recorded |
+| H-6 | **A re-run could lower the pooled spread but would probably not bring it under 0.50** (16 of the 40 DISK readings are below 2,500 operations a second); the owner decided on 2026-10-11 not to re-run SP-L. | the L-4 FAIL stands as recorded |
+| H-7 | **The 47 semantic vectors are not a neutral oracle.** Several expectations are the spike's own design (D07, D09, D11, T03, E01, T06, the error taxonomy, the cost vectors C01 to C03), and L01 expects T although spec 6.2 says no loops. R-1a and R-1b mean "matches the spike's expectations". | the PASS of R-1a and R-1b is not a conformance statement |
+| H-8 | **The plan's P-6 ("15 forks for gate criteria") is not enforced in code**; the criteria registry is locked, so a per-criterion minimum cannot be added without changing its digest. L-3 was judged on ten windows of one closed-loop run. | a required criterion can be judged on fewer than 15 forks |
+| H-9 | **RAW means recomputable, not authentic.** The seal is an unkeyed hash list, the importer trusts the `GITHUB_*` variables and an ancestor check, and only `measurements.json` and `runner.txt` are committed. The run ids were compared with the Actions listing by hand (exit record). | a hand-edited committed raw file is not detected |
+| H-10 | **The commit matrix of SP-L ended each cell at a cap of 200,000 records** (9 to 24 s, not 30 s), so each cell's per-batch commit p99 is the maximum of about 8 to 41 batches. A next run needs a time-based cap or at least 100 batches at N = 25,000. | the N and T inputs rest on maxima |
+| H-11 | **The burst runner's failure rules contradict each other** (99.9% of 832 batches means every batch, so the tolerance of four queued batches is unreachable) **and a writer blocked in a synchronous commit has no watchdog.** Neither changed this run's verdicts. | a lost standby could hang a run or mis-score it |
+| H-12 | **The generated Environment section shows the first part only** (ingest) for a three-part spike; the container memory limit of run B is set but not read back; `decision_head` and `ingest_registry` accumulate across days and run B starts them empty; the L-5 row size depends on a synthetic path length (about 291 plus 2 bytes per evaluated step). | the environment and row-size statements are conditional |
+| H-13 | **Wording of the criteria registry (locked):** X-3 is a 0/1 flag whose generated reason reads "observed 1, at most 0.15 required" (the deviation is in the decisions); the metric text of L-6 and L-7 says "fewer sizes is NOT_RUN" where the evaluator returns INCONCLUSIVE below three points. Align before the next lock. | confusing generated reasons |
+| H-14 | **`cel-java` as adapted cannot meter what an expression builds** (a chain of string concatenations bypasses the per-record budget), and the hot-swap activation time includes up to one batch of drain time; the hot-swap lost-records count was zero by construction in the run. | the layer comparison on budget enforcement and swap time is incomplete |
 
 Changing H-1 to H-4 would change the evaluation after the results were seen. If the owner wants the SP-L criteria re-evaluated per part, or the diagnostics kept, that is a recorded decision with a new run; nothing in the repository does it silently.
 
@@ -38,7 +47,7 @@ Changing H-1 to H-4 would change the evaluation after the results were seen. If 
 
 ## The latency budget (see `latency-budget.md`)
 
-PARTIAL: four of eight intervals are pending, each with an owner: landed to enriched (SP-N, P1b), decided to validated (P5; no spike measures it, so the owner accepts P5 ownership or amends spec 5.6 and the 16 P1 row), assembled to sealed (SP-W, P1b), sealed to sent (SP-S, P1b). The one dominating measured figure (9,582 ms, the pooled commit p99 of the cache-hot runs) carries the INCONCLUSIVE status of L-2.
+PARTIAL: four of eight intervals are pending, each with an owner: landed to enriched (SP-N, P1b), decided to validated (P5; no spike measures it, so the owner accepts P5 ownership or amends spec 5.6 and the 16 P1 row), assembled to sealed (SP-W, P1b), sealed to sent (SP-S, P1b). The one dominating measured figure (9,582 ms) is the pooled commit p99 over all batches of the cache-hot runs, which no criterion judges: it is 9.6 times the L-2 placeholder of 1,000 ms, while L-2 itself (the median of the per-window p99 values, 1,077 ms) is INCONCLUSIVE.
 
 ## Deferred spikes
 

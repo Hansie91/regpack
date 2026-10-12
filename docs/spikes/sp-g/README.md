@@ -1,6 +1,6 @@
 # SP-G: pack-format paper exercise and spec-freeze gate
 
-Spec 16 asks SP-G to encode the EMIR action types NEWT, MODI, TERM, EROR, REVI and VALU in the pack format, sketch the canonical-model extension, and deliver a written list of pack-format breakages, each fixed before the grammar freezes; the coexistence check of the EMIR and MiFIR chains for one execution follows in task G2. This directory holds the first half: the encoding and the register.
+Spec 16 asks SP-G to encode the EMIR action types NEWT, MODI, TERM, EROR, REVI and VALU in the pack format, sketch the canonical-model extension, and deliver a written list of pack-format breakages, each fixed before the grammar freezes; the coexistence check of the EMIR and MiFIR chains for one execution follows in task G2. This directory holds the encoding and the register; the coexistence check (G2) is code in `spikes/spike-g` and its result is in `docs/spikes/SP-G.md`.
 
 Nothing here is EMIR content that anybody has reviewed. It is a paper exercise whose output is the register.
 
@@ -47,6 +47,6 @@ These are facts about EMIR or choices that the three research sections do not es
 
 ## How to read the result
 
-The register rows are `OPEN` or `PROPOSED`; only the owner dispositions them (`ACCEPTED`, `REJECTED_NOT_NEEDED`, `UNFIXABLE`). The specification file is not edited. Criteria G-1 to G-4 are evaluated by task G2 (the SP-G report); this directory is the evidence for G-1 to G-3. The coexistence of the EMIR and MiFIR chains (G-4) is checked in G2.
+All 19 register rows are dispositioned (owner, 2026-10-10: 16 `ACCEPTED`, 3 `REJECTED_NOT_NEEDED`); only the owner dispositions rows (`ACCEPTED`, `REJECTED_NOT_NEEDED`, `UNFIXABLE`). The specification file is not edited. Criteria G-1 to G-4 are evaluated by task G2 (the SP-G report); this directory is the evidence for G-1 to G-3. The coexistence of the EMIR and MiFIR chains (G-4) is checked by `CoexistenceCheck` (see SP-G.md for what it does and does not evidence).
 
 `MiniYaml` and `Register` in `spikes/spike-g` parse these files; `PackFilesTest`, `MiniYamlTest` and `RegisterTest` are the tests (`spikes/t.sh spike-g 'MiniYamlTest,PackFilesTest,RegisterTest'`).
