@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -41,6 +42,47 @@ class IsolationCheckTest {
     assertThat(IsolationCheck.check(root)).containsExactly("ISO_ROOT_MODULE");
     write("pom.xml", rootPom("<module>regpack-model</module><module> spikes/spike-r </module>"));
     assertThat(IsolationCheck.check(root)).containsExactly("ISO_ROOT_MODULE");
+  }
+
+  @Test
+  void flagsSpellingVariantsOfASpikeModulePath() throws IOException {
+    for (String path :
+        List.of(
+            "./spikes",
+            "../spikes/spike-r",
+            "spike-r",
+            "./spike-r/",
+            "regpack-model/../spikes",
+            "spikes/../spikes",
+            "a\\spikes")) {
+      write("pom.xml", rootPom("<module>regpack-model</module><module>" + path + "</module>"));
+      assertThat(IsolationCheck.check(root)).as(path).contains("ISO_ROOT_MODULE");
+    }
+  }
+
+  @Test
+  void doesNotFlagReleaseModulePathsThatMerelyContainTheWordSpike() throws IOException {
+    for (String path : List.of("regpack-model", "./regpack-model", "libs/spikesaw", "my-spikes")) {
+      write("pom.xml", rootPom("<module>" + path + "</module>"));
+      assertThat(IsolationCheck.check(root)).as(path).doesNotContain("ISO_ROOT_MODULE");
+    }
+  }
+
+  @Test
+  void scansEveryListedModuleWhateverItsDirectoryIsCalled() throws IOException {
+    write("pom.xml", rootPom("<module>./svc/engine</module><module>tools</module>"));
+    write("svc/engine/pom.xml", dependency("regpack-bench", "compile"));
+    write("tools/pom.xml", dependency("spike-r", "test"));
+    assertThat(IsolationCheck.check(root))
+        .containsExactly(
+            "ISO_RELEASE_DEPENDS svc/engine/pom.xml", "ISO_RELEASE_DEPENDS tools/pom.xml");
+  }
+
+  @Test
+  void aListedModuleDirectoryWithoutAPomIsIgnored() throws IOException {
+    write("pom.xml", rootPom("<module>missing</module><module>regpack-model/pom.xml</module>"));
+    write("regpack-model/pom.xml", dependency("regpack-ports", ""));
+    assertThat(IsolationCheck.check(root)).isEmpty();
   }
 
   @Test

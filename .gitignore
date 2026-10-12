@@ -15,4 +15,4 @@ dependency-reduced-pom.xml
 *.key
 settings-security.xml
 spikes/inbox/
-results/
+/results/

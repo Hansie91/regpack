@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -20,7 +22,7 @@ import java.util.regex.Pattern;
  */
 public final class IsolationCheck {
   private static final Pattern COMMENT = Pattern.compile("<!--.*?-->", Pattern.DOTALL);
-  private static final Pattern SPIKE_MODULE = Pattern.compile("<module>\\s*spikes");
+  private static final Pattern MODULE = Pattern.compile("<module>([^<]*)</module>");
   private static final Pattern SPIKE_ARTIFACT = Pattern.compile("<artifactId>\\s*spike-");
   private static final Pattern MANAGEMENT =
       Pattern.compile("<dependencyManagement>.*?</dependencyManagement>", Pattern.DOTALL);
@@ -43,8 +45,22 @@ public final class IsolationCheck {
   public static List<String> check(Path root) {
     List<String> problems = new ArrayList<>();
     String rootPom = read(root.resolve("pom.xml"), "pom.xml", problems);
+    Set<String> poms = new TreeSet<>();
     if (rootPom != null) {
-      if (SPIKE_MODULE.matcher(rootPom).find()) {
+      boolean spikeModule = false;
+      Matcher modules = MODULE.matcher(rootPom);
+      while (modules.find()) {
+        List<String> segments = normalise(modules.group(1));
+        if (segments.stream().anyMatch(IsolationCheck::isSpikeSegment)) {
+          spikeModule = true; // one ISO_ROOT_MODULE says it; the spike POM is not scanned too
+          continue;
+        }
+        String pom = pomPath(segments);
+        if (pom != null) {
+          poms.add(pom);
+        }
+      }
+      if (spikeModule) {
         problems.add("ISO_ROOT_MODULE");
       }
       if (dependsOnBench(rootPom)) {
@@ -52,17 +68,54 @@ public final class IsolationCheck {
       }
     }
     for (String module : releaseModules(root)) {
-      String pom = read(root.resolve(module).resolve("pom.xml"), module + "/pom.xml", problems);
+      poms.add(module + "/pom.xml");
+    }
+    for (String relative : poms) {
+      String pom = read(root.resolve(relative), relative, problems);
       if (pom == null) {
         continue;
       }
-      String relative = module + "/pom.xml";
       boolean spike = SPIKE_ARTIFACT.matcher(pom).find();
-      if (spike || (!module.equals(BENCH) && dependsOnBench(pom))) {
+      if (spike || (!relative.equals(BENCH + "/pom.xml") && dependsOnBench(pom))) {
         problems.add("ISO_RELEASE_DEPENDS " + relative);
       }
     }
     return List.copyOf(problems);
+  }
+
+  /**
+   * A module path as its segments: backslashes read as slashes, empty and {@code .} segments
+   * dropped, {@code ..} resolved against the segment before it (a leading {@code ..} is kept).
+   */
+  private static List<String> normalise(String module) {
+    List<String> segments = new ArrayList<>();
+    for (String segment : module.trim().replace('\\', '/').split("/")) {
+      if (segment.isBlank() || segment.equals(".")) {
+        continue;
+      }
+      if (segment.equals("..") && !segments.isEmpty() && !segments.getLast().equals("..")) {
+        segments.removeLast();
+      } else {
+        segments.add(segment.trim());
+      }
+    }
+    return segments;
+  }
+
+  private static boolean isSpikeSegment(String segment) {
+    return segment.equals("spikes") || segment.startsWith("spike-");
+  }
+
+  /**
+   * The POM file a module path names, relative to the root with slashes, or null for the root
+   * itself and for a path that leaves the repository.
+   */
+  private static String pomPath(List<String> segments) {
+    if (segments.isEmpty() || segments.contains("..")) {
+      return null;
+    }
+    String path = String.join("/", segments);
+    return path.endsWith(".xml") ? path : path + "/pom.xml";
   }
 
   private static boolean dependsOnBench(String pom) {
