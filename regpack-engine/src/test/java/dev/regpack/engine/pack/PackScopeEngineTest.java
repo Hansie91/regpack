@@ -1,6 +1,7 @@
 package dev.regpack.engine.pack;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 import dev.regpack.engine.exec.MeteredExecutor;
 import dev.regpack.engine.expr.Rulings;
@@ -20,6 +21,7 @@ import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.InputDigest;
 import dev.regpack.model.decision.PathStep;
 import dev.regpack.pack.model.LoadedPack;
+import dev.regpack.pack.source.PackSource;
 import dev.regpack.ports.exec.CostBudget;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
 import java.math.BigDecimal;
@@ -28,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -210,6 +213,45 @@ class PackScopeEngineTest {
       assertThat(body.citations()).containsExactly(CATCH_ALL_CITATION);
       assertThat(body.flags()).contains("error_kind=" + mode.getKey(), "rule_id=R-FAIL");
     }
+  }
+
+  @Test
+  void aFailureInTheSecondTableCitesTheLastCatchAll() {
+    // two tables whose catch-alls cite different provisions; the first passes through, the second
+    // fails. The EXEC decision cites the catch-all of the LAST table (companion 5.6, I5).
+    PackSource built =
+        PackBuilder.sample()
+            .chain(
+                List.of(PackBuilder.Rule.of("R-NOVATION", "event.kind == 'NOVATION'")),
+                List.of(PackBuilder.Rule.of("R-FAIL", "1 + 1")))
+            .source();
+    Map<String, String> files = new TreeMap<>();
+    for (String path : built.paths()) {
+      if (!path.equals(PackSource.CHECKSUMS) && !path.equals(PackSource.ATTESTATION)) {
+        files.put(path, built.text(path));
+      }
+    }
+    String lastTable = "scope/second-table.yaml";
+    String guidance = "cite: [{source_id: regpack-spec, provision_path: I5, role: GUIDANCE}]";
+    assertThat(files.get(lastTable)).contains(guidance);
+    files.put(
+        lastTable,
+        files
+            .get(lastTable)
+            .replace(
+                guidance,
+                "cite: [{source_id: sample-law, provision_path: sample/1, role: BASIS}]"));
+    PackRegime provider = regimeOf(SamplePacks.loadSealed(files));
+
+    DecisionBody body = decide(provider, equityOnVenue(), 100);
+
+    assertThat(body.reasonCode()).isEqualTo(new ReasonCode("EXEC_ERROR"));
+    assertThat(body.path())
+        .extracting(PathStep::ruleId)
+        .containsExactly("R-NOVATION", "S-DEFAULT-catch-all");
+    assertThat(body.citations())
+        .extracting(Citation::sourceId, Citation::provisionPath)
+        .containsExactly(tuple("sample-law", "sample/1"));
   }
 
   @Test

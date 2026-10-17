@@ -1,5 +1,7 @@
 package dev.regpack.model.canonical;
 
+import dev.regpack.model.EventIdentity;
+import dev.regpack.model.json.Json;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -32,6 +34,43 @@ public final class CanonicalExecutionCodec {
 
   /** Reads the map form; an {@link IllegalArgumentException} names the offending field. */
   public static CanonicalExecution fromMap(Map<String, Object> map) {
+    CanonicalExecution execution = decode(map);
+    requireRepresentable(execution);
+    return execution;
+  }
+
+  /**
+   * An execution that decodes but could not be given an identity or canonical JSON (a '|' in an
+   * identity part, a {@code tradedAt} finer than a microsecond or outside the years 0000..9999) is
+   * refused here, early, with a bounded message that names the field and never echoes it.
+   */
+  private static void requireRepresentable(CanonicalExecution e) {
+    requireIdentityPart("firmLei", e.firmLei());
+    requireIdentityPart("venueMic", e.venueMic());
+    requireIdentityPart("venueExecutionId", e.venueExecutionId());
+    try {
+      Json.canonical(Map.of("tradedAt", e.tradedAt()));
+    } catch (IllegalArgumentException ex) {
+      throw new IllegalArgumentException(
+          "field tradedAt must have at most microsecond precision and a year in 0000..9999", ex);
+    }
+    try {
+      Json.canonical(toMap(e));
+    } catch (IllegalArgumentException ex) {
+      throw new IllegalArgumentException("the execution has no canonical JSON form", ex);
+    }
+  }
+
+  private static void requireIdentityPart(String field, String value) {
+    try {
+      EventIdentity.of(value);
+    } catch (IllegalArgumentException ex) {
+      throw new IllegalArgumentException(
+          "field " + field + " must be non-blank and free of '|'", ex);
+    }
+  }
+
+  private static CanonicalExecution decode(Map<String, Object> map) {
     return new CanonicalExecution(
         text(map, "firmLei"),
         text(map, "venueMic"),

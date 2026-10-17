@@ -387,6 +387,140 @@ class PackTesterTest {
     assertThat(report.lines()).anyMatch(l -> l.contains("REVIEWER_IS_AUTHOR"));
   }
 
+  private static final String SECOND_CATCH_ALL = "sample.s0.scope2-catch-all";
+
+  /**
+   * A two-table chain with the sample's row ids: T1 holds the novation and natural-person rows, T2
+   * the equity row; each table ends in its own catch-all. The four sample goldens fit it, except
+   * that an unmatched record is decided by the LAST table's catch-all.
+   */
+  private static PackBuilder chain() {
+    return PackBuilder.sample()
+        .chain(
+            List.of(
+                PackBuilder.Rule.of("S-N03-novation", "event.kind in ['NOVATION','ASSIGNMENT']")
+                    .outcome("N03", "DO_NOT_REPORT", "SAMPLE.N03.EXCLUDED"),
+                PackBuilder.Rule.of("S-D14-natural-person", "client.kind == 'NATURAL_PERSON'")
+                    .outcome("N13", "UNDETERMINED", "SAMPLE.N13.NATURAL_PERSON")),
+            List.of(
+                PackBuilder.Rule.of(
+                    "S-N08-equity-on-venue",
+                    "instrument.assetClass == 'EQUITY' && instrument.tradedOnVenue")))
+        .file(
+            "tests/authorship.yaml",
+            sampleFile("tests/authorship.yaml").stripTrailing()
+                + "\n  "
+                + SECOND_CATCH_ALL
+                + ": \"agent:p2a-implementer\"\n");
+  }
+
+  private static final String DEFAULT_GOLDEN = "tests/golden/GC-DEFAULT-1.json";
+
+  /** The unmatched-record golden of the chain: the LAST table's catch-all decides. */
+  private static PackBuilder chainWithGoldens() {
+    return chain()
+        .file(
+            DEFAULT_GOLDEN,
+            SamplePacks.replaced(
+                DEFAULT_GOLDEN,
+                "\"ruleIdsHit\": [\"S-DEFAULT-catch-all\"]",
+                "\"ruleIdsHit\": [\"" + SECOND_CATCH_ALL + "\"]"));
+  }
+
+  @Test
+  void aTwoTableChainPassesWithEveryRowCovered() {
+    PackTestReport report = PackTester.run(chainWithGoldens().source(), NO_REVIEWERS);
+
+    assertThat(report.problems()).isEmpty();
+    assertThat(report.passed()).isTrue();
+    assertThat(report.lines()).contains("golden: 4 of 4 pass");
+    assertThat(report.lines())
+        .contains(
+            "coverage: rows 5/5, reasons 4/4, provisions 2/2 (all cases); rows 0/5 (counting cases)");
+  }
+
+  @Test
+  void aCatchAllThatIsPassedThroughIsCoveredByTheCaseThatReachesTheNextTable() {
+    // no golden decides on the FIRST table's catch-all (it never decides when a second table
+    // follows); the equity case passes through it, which exercises the row
+    PackSource source =
+        chain().file(DEFAULT_GOLDEN, null).file("tests/golden/GC-N13-1.json", null).source();
+
+    PackTestReport report = PackTester.run(source, NO_REVIEWERS);
+
+    assertThat(report.lines()).contains("golden: 2 of 2 pass");
+    assertThat(report.lines())
+        .noneMatch(
+            l ->
+                l.startsWith("problem COVERAGE_ROW_NOT_HIT ")
+                    && l.endsWith(" S-DEFAULT-catch-all"));
+    assertThat(report.lines())
+        .anyMatch(
+            l ->
+                l.startsWith("problem COVERAGE_ROW_NOT_HIT ")
+                    && l.endsWith(" " + SECOND_CATCH_ALL));
+    assertThat(report.lines())
+        .anyMatch(
+            l ->
+                l.startsWith("problem COVERAGE_ROW_NOT_HIT ")
+                    && l.endsWith(" S-D14-natural-person"));
+  }
+
+  @Test
+  void aChainWhoseLaterTableIsNeverReachedFailsTheCoverageGate() {
+    // only the first table's own rows are exercised: the first catch-all, the equity row and the
+    // last catch-all are never matched
+    PackSource source =
+        chain().file(DEFAULT_GOLDEN, null).file("tests/golden/GC-N08-1.json", null).source();
+
+    PackTestReport report = PackTester.run(source, NO_REVIEWERS);
+
+    assertThat(report.passed()).isFalse();
+    assertThat(codes(report)).contains("COVERAGE_ROW_NOT_HIT", "COVERAGE_REASON_NOT_REACHED");
+    assertThat(report.lines()).anyMatch(l -> l.endsWith(" S-DEFAULT-catch-all"));
+    assertThat(report.lines()).anyMatch(l -> l.endsWith(" S-N08-equity-on-venue"));
+    assertThat(report.lines()).anyMatch(l -> l.endsWith(" " + SECOND_CATCH_ALL));
+  }
+
+  @Test
+  void aGoldenExpectingAPassedThroughCatchAllAsTheDecidingRowFails() {
+    // the golden's ruleIdsHit is the DECIDING row; the first table's catch-all never decides
+    // the unchanged sample golden expects [S-DEFAULT-catch-all]
+    PackTestReport report = PackTester.run(chain().source(), NO_REVIEWERS);
+
+    assertThat(codes(report)).contains("GOLDEN_CASE_FAILED");
+    assertThat(report.lines()).contains("golden: 3 of 4 pass");
+  }
+
+  private static final String BAD_TIME = "\"tradedAt\": \"2026-10-09T09:30:00.123456789Z\"";
+  private static final String GOOD_TIME = "\"tradedAt\": \"2026-10-09T09:30:00.123456Z\"";
+
+  @Test
+  void aGoldenInputThatCannotBeCanonicalisedIsReportedNotThrown() {
+    String[][] bad = {
+      {GOOD_TIME, BAD_TIME},
+      {GOOD_TIME, "\"tradedAt\": \"+10000-01-01T00:00:00Z\""},
+      {"\"venueExecutionId\": \"EX-3\"", "\"venueExecutionId\": \"EX|3\""},
+      {"\"firmLei\": \"LEI-FIRM-0001\"", "\"firmLei\": \"LEI|FIRM\""},
+    };
+    for (String[] change : bad) {
+      String text = SamplePacks.replaced("tests/golden/GC-N08-1.json", change[0], change[1]);
+
+      PackTestReport report = runSample(with("tests/golden/GC-N08-1.json", text));
+
+      assertThat(report.passed()).as(change[1]).isFalse();
+      assertThat(report.problems())
+          .as(change[1])
+          .anyMatch(
+              p ->
+                  p.code().equals("GOLDEN_INPUT_INVALID")
+                      && p.path().equals("tests/golden/GC-N08-1.json")
+                      && p.message().length() < 400);
+      assertThat(last(report)).startsWith("pack test: FAIL");
+      assertThat(report.lines()).contains("golden: 3 of 4 pass");
+    }
+  }
+
   @Test
   void theOutputIsDeterministic() {
     PackSource source = PackSource.fromDirectory(SamplePacks.directory());

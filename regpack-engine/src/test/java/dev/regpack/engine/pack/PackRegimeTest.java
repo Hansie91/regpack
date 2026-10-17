@@ -7,6 +7,7 @@ import dev.regpack.engine.exec.MeteredExecutor;
 import dev.regpack.engine.expr.Rulings;
 import dev.regpack.model.IngestKey;
 import dev.regpack.model.Outcome;
+import dev.regpack.model.Sha256;
 import dev.regpack.model.canonical.AssetClass;
 import dev.regpack.model.canonical.CanonicalExecution;
 import dev.regpack.model.canonical.LifecycleKind;
@@ -88,6 +89,96 @@ class PackRegimeTest {
     assertThat(context.engineBuild()).isEqualTo(EngineInfo.BUILD.toString());
     assertThat(context.engineBuild()).isEqualTo("1.0.0+lib1");
     assertThat(context.executor()).isEqualTo(MeteredExecutor.ID);
+  }
+
+  private static EvaluationContext contextOf(PackRegime regime, DecisionContext stamped) {
+    return new EvaluationContext(
+        stamped,
+        new IngestKey("toy-source", "rec-1", 1),
+        Instant.parse("2026-10-09T10:00:00Z"),
+        regime.recordBudget());
+  }
+
+  @Test
+  void aDecisionIsStampedWithTheProvidersOwnContext() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+
+    DecisionBody body = decide(regime, execution(AssetClass.EQUITY));
+
+    assertThat(body.decisionContextId()).isEqualTo(regime.decisionContext().id());
+    assertThat(body.decisionContextId().hex()).hasSize(64);
+  }
+
+  @Test
+  void aContextOfAnotherPackDigestEngineBuildOrExecutorIsRefused() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+    DecisionContext own = regime.decisionContext();
+    DecisionContext otherDigest =
+        new DecisionContext(
+            new Sha256("0".repeat(64)),
+            own.overlayDigest(),
+            own.interpretationPins(),
+            own.referenceSnapshotIds(),
+            own.enrichmentSnapshotIds(),
+            own.firmProfileVersion(),
+            own.mappingVersion(),
+            own.engineBuild(),
+            own.executor());
+    DecisionContext otherBuild = with(own, own.packDigest(), "9.9.9+lib9", own.executor());
+    DecisionContext otherExecutor =
+        with(own, own.packDigest(), own.engineBuild(), "other-executor");
+    CanonicalExecution event = execution(AssetClass.EQUITY);
+
+    assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, otherDigest)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("pack digest");
+    assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, otherBuild)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("engine build")
+        .hasMessageContaining("9.9.9+lib9");
+    assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, otherExecutor)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("executor")
+        .hasMessageContaining("other-executor");
+    assertThatThrownBy(() -> regime.evaluateTraced(event, contextOf(regime, otherDigest)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("pack digest");
+  }
+
+  @Test
+  void aContextThatDiffersOnlyInTheCallersPlaceholdersIsRefusedUntilP2a2() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+    DecisionContext own = regime.decisionContext();
+    DecisionContext profiled =
+        new DecisionContext(
+            own.packDigest(),
+            own.overlayDigest(),
+            own.interpretationPins(),
+            own.referenceSnapshotIds(),
+            own.enrichmentSnapshotIds(),
+            "profile-7",
+            own.mappingVersion(),
+            own.engineBuild(),
+            own.executor());
+
+    assertThatThrownBy(
+            () -> regime.evaluate(execution(AssetClass.EQUITY), contextOf(regime, profiled)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("differs");
+  }
+
+  private static DecisionContext with(
+      DecisionContext own, Sha256 digest, String build, String executor) {
+    return new DecisionContext(
+        digest,
+        own.overlayDigest(),
+        own.interpretationPins(),
+        own.referenceSnapshotIds(),
+        own.enrichmentSnapshotIds(),
+        own.firmProfileVersion(),
+        own.mappingVersion(),
+        build,
+        executor);
   }
 
   @Test

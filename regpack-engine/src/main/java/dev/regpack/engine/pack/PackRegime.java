@@ -220,6 +220,7 @@ public final class PackRegime implements RegimeProvider {
       Optional<RuleCircuit> poisonCircuit) {
     Objects.requireNonNull(event, "event");
     Objects.requireNonNull(context, "context");
+    requireOwnContext(context.decisionContext());
     CanonicalExecution execution =
         switch (event) {
           case CanonicalExecution e -> e;
@@ -287,6 +288,48 @@ public final class PackRegime implements RegimeProvider {
                   Map.of());
         };
     return new Traced(new Result(body, List.of(), Optional.empty()), program.rowTraces());
+  }
+
+  /**
+   * A decision is stamped with the id of the context it is evaluated under, and the replay rules
+   * (I3, Tier 2) rest on that stamp. The pack digest, the engine build and the executor are facts
+   * of this provider, so a context that names others is refused instead of stamping a decision the
+   * provider did not make. The overlay, pins, Firm Profile and snapshots are placeholders in P2a
+   * and so are the provider's own too: until P2a-2 relaxes the components that really come from the
+   * caller, the whole context must equal {@link #decisionContext()} and every decision is stamped
+   * with it.
+   */
+  private void requireOwnContext(DecisionContext given) {
+    if (!given.packDigest().equals(decisionContext.packDigest())) {
+      throw new IllegalArgumentException(
+          "the decision context names pack digest "
+              + given.packDigest().hex()
+              + " but this provider runs "
+              + decisionContext.packDigest().hex());
+    }
+    if (!given.engineBuild().equals(decisionContext.engineBuild())) {
+      throw new IllegalArgumentException(
+          "the decision context names engine build '"
+              + bounded(given.engineBuild())
+              + "' but this provider is "
+              + decisionContext.engineBuild());
+    }
+    if (!given.executor().equals(decisionContext.executor())) {
+      throw new IllegalArgumentException(
+          "the decision context names executor '"
+              + bounded(given.executor())
+              + "' but this provider uses "
+              + decisionContext.executor());
+    }
+    if (!given.equals(decisionContext)) {
+      throw new IllegalArgumentException(
+          "the decision context differs from the one of this provider in its overlay, pins,"
+              + " snapshots, Firm Profile or mapping version (P2a-2 supplies these)");
+    }
+  }
+
+  private static String bounded(String text) {
+    return text.length() <= 64 ? text : text.substring(0, 64) + "...";
   }
 
   /**

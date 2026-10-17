@@ -14,6 +14,7 @@ import dev.regpack.model.IngestKey;
 import dev.regpack.model.canonical.CanonicalExecution;
 import dev.regpack.model.canonical.CanonicalExecutionCodec;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.PathStep;
 import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
 import dev.regpack.pack.check.ProblemSink;
@@ -30,10 +31,12 @@ import dev.regpack.pack.source.PackSource;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The pack-level test of spec 6.5 (plan T20): load and check the pack, run every golden case
@@ -316,7 +319,21 @@ public final class PackTester {
               new IngestKey("golden", c.id(), 1),
               EVALUATED_AT_INSTANT,
               regime.recordBudget());
-      DecisionBody body = regime.evaluate(execution, context).decision();
+      DecisionBody body;
+      try {
+        body = regime.evaluate(execution, context).decision();
+      } catch (RuntimeException e) {
+        // defence in depth: the codec refuses what cannot be canonicalised, so this is a case
+        // that no decision can be built for. It is a reported problem, never a crash of the run.
+        problems.add(
+            new PackProblem(
+                "GOLDEN_INPUT_INVALID",
+                path,
+                0,
+                "no decision can be made for the input: "
+                    + PackProblem.excerpt(String.valueOf(e.getMessage()))));
+        return new CaseOutcome(c.id(), false, List.of(), "", false);
+      }
 
       List<String> differences = new ArrayList<>();
       if (body.outcome() != c.expected().outcome()) {
@@ -348,8 +365,20 @@ public final class PackTester {
         problems.add(
             new PackProblem("GOLDEN_CASE_FAILED", path, 0, String.join("; ", differences)));
       }
+      // the golden compares the DECIDING row; coverage credits every row that matched on the way
+      // to it, so a catch-all that was passed through to the next table counts as exercised
       return new CaseOutcome(
-          c.id(), passed, body.ruleIdsHit(), body.reasonCode().value(), passed && counts);
+          c.id(), passed, matchedRows(body), body.reasonCode().value(), passed && counts);
+    }
+
+    private static List<String> matchedRows(DecisionBody body) {
+      Set<String> rows = new LinkedHashSet<>(body.ruleIdsHit());
+      for (PathStep step : body.path()) {
+        if (step.matched()) {
+          rows.add(step.ruleId());
+        }
+      }
+      return List.copyOf(rows);
     }
   }
 }

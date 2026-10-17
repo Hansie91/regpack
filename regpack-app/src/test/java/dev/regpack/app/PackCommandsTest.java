@@ -318,6 +318,53 @@ class PackCommandsTest {
     assertThat(stdout()).isEmpty();
   }
 
+  private static final String[][] UNREPRESENTABLE = {
+    {
+      "\"tradedAt\":\"2026-10-09T09:30:00.123456Z\"",
+      "\"tradedAt\":\"2026-10-09T09:30:00.123456789Z\""
+    },
+    {"\"tradedAt\":\"2026-10-09T09:30:00.123456Z\"", "\"tradedAt\":\"+10000-01-01T00:00:00Z\""},
+    {"\"venueExecutionId\":\"EX-1\"", "\"venueExecutionId\":\"EX|1\""},
+  };
+
+  @Test
+  void explainEventReportsAnUnrepresentableEventAndNeverThrows() throws IOException {
+    for (String[] change : UNREPRESENTABLE) {
+      Path event = temp.resolve("bad-event.json");
+      Files.writeString(event, EVENT.replace(change[0], change[1]), UTF_8);
+      outBytes.reset();
+      errBytes.reset();
+
+      int exit = run("pack", "explain", pack.toString(), "--event", event.toString());
+
+      assertThat(exit).as(change[1]).isEqualTo(2);
+      assertThat(stderr()).as(change[1]).contains("the event file is not a canonical execution");
+      assertThat(stderr()).doesNotContain("Exception").doesNotContain("\tat ");
+      assertThat(stdout()).isEmpty();
+    }
+  }
+
+  @Test
+  void testReportsAnUnrepresentableGoldenInputAndNeverThrows() throws IOException {
+    String goldenInput = text(GOLDEN);
+    for (String[] change : UNREPRESENTABLE) {
+      String from = change[0].replace(":\"", ": \"");
+      String to = change[1].replace(":\"", ": \"");
+      write(GOLDEN, goldenInput.replace(from, to));
+      assertThat(text(GOLDEN)).as(change[1]).isNotEqualTo(goldenInput);
+      Seal.seal(pack);
+      outBytes.reset();
+      errBytes.reset();
+
+      int exit = run("pack", "test", pack.toString());
+
+      assertThat(exit).as(change[1]).isEqualTo(1);
+      assertThat(stdout()).contains("problem GOLDEN_INPUT_INVALID " + GOLDEN);
+      assertThat(last(stdoutLines())).startsWith("pack test: FAIL (");
+      assertThat(stderr()).isEmpty();
+    }
+  }
+
   // ---- pack seal ------------------------------------------------------------------------------
 
   @Test

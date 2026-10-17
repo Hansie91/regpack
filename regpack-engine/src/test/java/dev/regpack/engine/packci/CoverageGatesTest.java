@@ -2,6 +2,7 @@ package dev.regpack.engine.packci;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.regpack.engine.pack.PackBuilder;
 import dev.regpack.engine.pack.SamplePacks;
 import dev.regpack.engine.packci.CoverageGates.CaseOutcome;
 import dev.regpack.engine.packci.CoverageGates.CoverageResult;
@@ -208,6 +209,57 @@ class CoverageGatesTest {
     assertThat(result.coverage().reasonsReached()).isEqualTo(4);
     assertThat(result.coverage().provisionsCited()).isEqualTo(4);
     assertThat(result.coverage().provisionsExercised()).isEqualTo(4);
+  }
+
+  private static final String SECOND_CATCH_ALL = "sample.s0.scope2-catch-all";
+
+  private static LoadedPack chainPack() {
+    return PackBuilder.sample()
+        .chain(
+            List.of(
+                PackBuilder.Rule.of("S-N03-novation", "event.kind in ['NOVATION','ASSIGNMENT']")
+                    .outcome("N03", "DO_NOT_REPORT", R_N03),
+                PackBuilder.Rule.of("S-D14-natural-person", "client.kind == 'NATURAL_PERSON'")
+                    .outcome("N13", "UNDETERMINED", R_D14)),
+            List.of(
+                PackBuilder.Rule.of(
+                    "S-N08-equity-on-venue",
+                    "instrument.assetClass == 'EQUITY' && instrument.tradedOnVenue")))
+        .load();
+  }
+
+  @Test
+  void aChainIsFullyCoveredWhenThePassedThroughCatchAllIsCredited() {
+    LoadedPack chain = chainPack();
+    List<CaseOutcome> outcomes =
+        List.of(
+            passed("GC-N03-1", N03, R_N03),
+            passed("GC-N13-1", D14, R_D14),
+            // the equity case matched the first table's catch-all and decided in the second table
+            new CaseOutcome("GC-N08-1", true, List.of(DEFAULT, N08), R_N08, false),
+            new CaseOutcome(
+                "GC-DEFAULT-1", true, List.of(DEFAULT, SECOND_CATCH_ALL), R_DEFAULT, false));
+
+    CoverageResult result = CoverageGates.evaluate(chain, outcomes);
+
+    assertThat(result.problems()).isEmpty();
+    assertThat(result.coverage().rowsTotal()).isEqualTo(5);
+    assertThat(result.coverage().rowsHit()).isEqualTo(5);
+  }
+
+  @Test
+  void aPassedThroughCatchAllNoCaseMatchedIsNotHit() {
+    List<CaseOutcome> outcomes =
+        List.of(
+            passed("GC-N03-1", N03, R_N03),
+            passed("GC-N13-1", D14, R_D14),
+            passed("GC-N08-1", N08, R_N08),
+            passed("GC-DEFAULT-1", SECOND_CATCH_ALL, R_DEFAULT));
+
+    CoverageResult result = CoverageGates.evaluate(chainPack(), outcomes);
+
+    assertThat(codes(result)).containsExactly("COVERAGE_ROW_NOT_HIT " + DEFAULT);
+    assertThat(result.coverage().rowsHit()).isEqualTo(4);
   }
 
   @Test

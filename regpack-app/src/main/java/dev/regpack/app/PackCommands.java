@@ -146,6 +146,15 @@ public final class PackCommands {
     } catch (UncheckedIOException e) {
       err.print("input or output failed: " + e.getCause().getClass().getSimpleName() + "\n");
       return 2;
+    } catch (RuntimeException e) {
+      // last resort: a pack command never dies with a stack trace, whatever the input files hold
+      err.print(
+          "pack command failed: "
+              + e.getClass().getSimpleName()
+              + " "
+              + printable(String.valueOf(e.getMessage()), 160)
+              + "\n");
+      return 1;
     }
   }
 
@@ -233,13 +242,18 @@ public final class PackCommands {
       err.print(printable(e.getMessage(), 2000) + "\n");
       return 1;
     }
-    out.print(
-        PackExplainer.explainEvent(
-                regime,
-                event.orElseThrow(),
-                new IngestKey(INGEST_SOURCE, INGEST_RECORD, 1),
-                EXPLAIN_AT)
-            + "\n");
+    String explanation;
+    try {
+      explanation =
+          PackExplainer.explainEvent(
+              regime,
+              event.orElseThrow(),
+              new IngestKey(INGEST_SOURCE, INGEST_RECORD, 1),
+              EXPLAIN_AT);
+    } catch (IllegalArgumentException e) {
+      throw input("no decision can be made for the event: " + printable(e.getMessage(), 160));
+    }
+    out.print(explanation + "\n");
     return 0;
   }
 
