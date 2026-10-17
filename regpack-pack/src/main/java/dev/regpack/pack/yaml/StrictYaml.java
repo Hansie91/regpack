@@ -1,6 +1,7 @@
 package dev.regpack.pack.yaml;
 
 import dev.regpack.pack.PackFormat;
+import dev.regpack.pack.PackText;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,16 +17,24 @@ import java.util.Optional;
  * descent by indentation then builds the tree. There is no backtracking and no regular expression.
  * Every scalar is a string. Nothing is typed here: the consumer types explicitly.
  *
- * <p>This is the accepting side (plan task T4). The refusal of every construct outside the subset,
- * the input limits and the character policy are task T5; until then only the syntax codes {@code
- * YAML_SYNTAX}, {@code YAML_BAD_INDENT}, {@code YAML_DUPLICATE_KEY}, {@code YAML_UNTERMINATED},
- * {@code YAML_EMPTY_VALUE} and {@code YAML_BAD_KEY} are raised, and the nesting depth is guarded
- * (by {@code YAML_SYNTAX}) only so that the recursion cannot overflow the stack.
+ * <p>Order of checks (plan tasks T4 and T5): the file size first; then the character policy of
+ * {@link PackText} over the whole text (a tab is {@code YAML_TAB}, any other offending character
+ * {@code YAML_BAD_CHARACTER}); then the line length; then the structure, where every construct
+ * outside the subset has its own code (anchor, alias, tag, merge key, directive, document marker,
+ * block scalar, complex key, a sequence directly in a sequence, a scalar over several lines, a bad
+ * escape) and the other limits are enforced while the tree is built: scalar and key length, nesting
+ * depth ({@code YAML_TOO_DEEP}, before the recursion can grow) and node count ({@code
+ * YAML_TOO_MANY_NODES}). Whatever the input, a parse returns a tree or raises a {@link
+ * PackSyntaxException}.
  */
 public final class StrictYaml {
   /**
-   * Limits of one parse. Defaults come from {@link PackFormat}. Depth counts nested collections:
-   * the outermost collection has depth 1.
+   * Limits of one parse. Defaults come from {@link PackFormat}. {@code maxChars} is the raw length
+   * of the text (a CRLF counts two); {@code maxLineChars} the length of one line without its line
+   * end, comments and indentation included; {@code maxScalarChars} and {@code maxKeyChars} the
+   * length of the parsed value (escapes resolved, quotes not counted); depth counts nested
+   * collections (the outermost collection has depth 1); {@code maxNodes} counts scalars, lists and
+   * maps. A value equal to the limit is accepted, one more is refused.
    */
   public record Limits(
       int maxChars,
@@ -45,8 +54,6 @@ public final class StrictYaml {
     }
   }
 
-  private static final int EXCERPT_CHARS = 24;
-
   private StrictYaml() {}
 
   public static YamlNode parse(String text) {
@@ -56,19 +63,44 @@ public final class StrictYaml {
   public static YamlNode parse(String text, Limits limits) {
     Objects.requireNonNull(text, "text");
     Objects.requireNonNull(limits, "limits");
-    return new BlockParser(prepare(text), limits).document();
+    if (text.length() > limits.maxChars()) {
+      throw error("YAML_TOO_LARGE", 1, "file over " + limits.maxChars() + " chars");
+    }
+    String normal = text.replace("\r\n", "\n");
+    checkCharacters(normal);
+    return new BlockParser(prepare(normal, limits), new Build(limits)).document();
   }
 
   // ---------------------------------------------------------------------------------------------
-  // Line preparation
+  // Character policy and line preparation
+
+  /** The whole text, first: the one {@link PackText} policy, with the tab told apart. */
+  private static void checkCharacters(String normal) {
+    PackText.Bad bad = PackText.firstBad(normal, true).orElse(null);
+    if (bad == null) {
+      return;
+    }
+    int line = 1;
+    for (int i = 0; i < bad.index(); i++) {
+      if (normal.charAt(i) == '\n') {
+        line++;
+      }
+    }
+    String code = bad.codePoint() == '\t' ? "YAML_TAB" : "YAML_BAD_CHARACTER";
+    throw error(
+        code, line, normal.substring(bad.index(), Math.min(normal.length(), bad.index() + 32)));
+  }
 
   private record Line(int no, int indent, String text) {}
 
-  private static List<Line> prepare(String text) {
-    String[] raw = text.replace("\r\n", "\n").split("\n", -1);
+  private static List<Line> prepare(String normal, Limits limits) {
+    String[] raw = normal.split("\n", -1);
     List<Line> lines = new ArrayList<>();
     for (int i = 0; i < raw.length; i++) {
       String s = raw[i];
+      if (s.length() > limits.maxLineChars()) {
+        throw error("YAML_TOO_LARGE", i + 1, "line over " + limits.maxLineChars() + " chars");
+      }
       int indent = 0;
       while (indent < s.length() && s.charAt(indent) == ' ') {
         indent++;
@@ -80,17 +112,93 @@ public final class StrictYaml {
       if (end == indent || s.charAt(indent) == '#') {
         continue;
       }
-      lines.add(new Line(i + 1, indent, s.substring(indent, end)));
+      String text = s.substring(indent, end);
+      if (indent == 0 && isDocumentMarker(text)) {
+        throw error("YAML_DOCUMENT_MARKER", i + 1, text);
+      }
+      lines.add(new Line(i + 1, indent, text));
     }
     return lines;
+  }
+
+  private static boolean isDocumentMarker(String text) {
+    return text.equals("---")
+        || text.startsWith("--- ")
+        || text.equals("...")
+        || text.startsWith("... ");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // The tree under construction: limits that are enforced while it is built
+
+  private static final class Build {
+    private final Limits limits;
+    private int nodes;
+
+    Build(Limits limits) {
+      this.limits = limits;
+    }
+
+    /** Counts one node; the {@code maxNodes}+1th is refused. */
+    void count(int line) {
+      nodes++;
+      if (nodes > limits.maxNodes()) {
+        throw error("YAML_TOO_MANY_NODES", line, "more than " + limits.maxNodes() + " nodes");
+      }
+    }
+
+    void checkDepth(int depth, int line) {
+      if (depth > limits.maxDepth()) {
+        throw error("YAML_TOO_DEEP", line, "deeper than " + limits.maxDepth());
+      }
+    }
+
+    YamlScalar scalar(String value, int line) {
+      if (value.length() > limits.maxScalarChars()) {
+        throw error("YAML_TOO_LARGE", line, "scalar over " + limits.maxScalarChars() + " chars");
+      }
+      count(line);
+      return new YamlScalar(value, line);
+    }
+
+    void checkKey(String key, int line) {
+      if (key.length() > limits.maxKeyChars()) {
+        throw error("YAML_TOO_LARGE", line, "key over " + limits.maxKeyChars() + " chars");
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
   // Small text helpers shared by the block and flow parsers
 
+  /** The excerpt is bounded and escaped by {@link PackSyntaxException} itself. */
   private static PackSyntaxException error(String code, int line, String text) {
-    String excerpt = text.length() <= EXCERPT_CHARS ? text : text.substring(0, EXCERPT_CHARS);
-    return new PackSyntaxException(code, line, excerpt);
+    return new PackSyntaxException(code, line, text);
+  }
+
+  /**
+   * Refuses a key or value that starts with a YAML indicator outside the subset: anchor, alias,
+   * tag, block scalar, directive and complex key. A quoted scalar is never checked here, so the
+   * same characters inside quotes are plain text. (A sequence dash is the caller's business.)
+   */
+  private static void rejectIndicator(String text, int pos, int line) {
+    if (pos >= text.length()) {
+      return;
+    }
+    String code =
+        switch (text.charAt(pos)) {
+          case '&' -> "YAML_ANCHOR";
+          case '*' -> "YAML_ALIAS";
+          case '!' -> "YAML_TAG";
+          case '|', '>' -> "YAML_BLOCK_SCALAR";
+          case '%' -> "YAML_DIRECTIVE";
+          case '?' ->
+              pos + 1 == text.length() || text.charAt(pos + 1) == ' ' ? "YAML_COMPLEX_KEY" : null;
+          default -> null;
+        };
+    if (code != null) {
+      throw error(code, line, text.substring(pos));
+    }
   }
 
   private static boolean isDash(String text) {
@@ -161,7 +269,7 @@ public final class StrictYaml {
           case '\\' -> out.append('\\');
           case '"' -> out.append('"');
           case 'n' -> out.append('\n');
-          default -> throw error("YAML_SYNTAX", line, text.substring(i));
+          default -> throw error("YAML_BAD_ESCAPE", line, text.substring(i));
         }
         i += 2;
       } else if (c == quote) {
@@ -199,16 +307,17 @@ public final class StrictYaml {
 
   private static final class BlockParser {
     private final List<Line> lines;
-    private final Limits limits;
+    private final Build build;
     private int pos;
 
-    BlockParser(List<Line> lines, Limits limits) {
+    BlockParser(List<Line> lines, Build build) {
       this.lines = new ArrayList<>(lines);
-      this.limits = limits;
+      this.build = build;
     }
 
     YamlNode document() {
       if (lines.isEmpty()) {
+        build.count(1);
         return new YamlMap(Map.of(), 1);
       }
       Line first = lines.get(0);
@@ -223,34 +332,53 @@ public final class StrictYaml {
       return root;
     }
 
-    private void checkDepth(int depth, int line) {
-      if (depth > limits.maxDepth()) {
-        throw error("YAML_SYNTAX", line, "nesting too deep");
-      }
-    }
-
     private YamlNode block(int indent, int depth) {
       return isDash(lines.get(pos).text()) ? sequence(indent, depth) : mapping(indent, depth);
     }
 
-    /** The block below a key or dash that has no inline value; it must be indented further. */
+    /**
+     * The block below a key or dash that has no inline value; it must be indented further. A line
+     * that is neither a sequence item nor a key line is a value on a line of its own, which the
+     * subset does not have ({@code YAML_MULTILINE_SCALAR}).
+     */
     private YamlNode nested(int parentIndent, int depth, Line owner) {
       if (pos < lines.size() && lines.get(pos).indent() > parentIndent) {
-        return block(lines.get(pos).indent(), depth + 1);
+        Line next = lines.get(pos);
+        rejectIndicator(next.text(), 0, next.no());
+        if (!isDash(next.text()) && !isKeyLine(next)) {
+          throw error("YAML_MULTILINE_SCALAR", next.no(), next.text());
+        }
+        return block(next.indent(), depth + 1);
       }
       throw error("YAML_EMPTY_VALUE", owner.no(), owner.text());
     }
 
-    private void noMoreIndented(int indent) {
+    private static boolean isKeyLine(Line line) {
+      try {
+        return splitKey(line.text(), line.no()).isPresent();
+      } catch (PackSyntaxException e) {
+        return true; // it has the shape of a key line; its own error is reported when it is parsed
+      }
+    }
+
+    /**
+     * After a value on the key's or dash's line no deeper line may follow. After a scalar, a deeper
+     * line that is not a key line or a sequence item continues the scalar over several lines.
+     */
+    private void noMoreIndented(int indent, boolean afterScalar) {
       if (pos < lines.size() && lines.get(pos).indent() > indent) {
         Line l = lines.get(pos);
+        if (afterScalar && !isDash(l.text()) && !isKeyLine(l)) {
+          throw error("YAML_MULTILINE_SCALAR", l.no(), l.text());
+        }
         throw error("YAML_BAD_INDENT", l.no(), l.text());
       }
     }
 
     private YamlMap mapping(int indent, int depth) {
-      checkDepth(depth, lines.get(pos).no());
       int firstLine = lines.get(pos).no();
+      build.checkDepth(depth, firstLine);
+      build.count(firstLine);
       Map<String, YamlNode> entries = new LinkedHashMap<>();
       while (pos < lines.size()) {
         Line l = lines.get(pos);
@@ -263,15 +391,17 @@ public final class StrictYaml {
         if (isDash(l.text())) {
           throw error("YAML_SYNTAX", l.no(), l.text());
         }
+        rejectIndicator(l.text(), 0, l.no());
         KeySplit split =
             splitKey(l.text(), l.no()).orElseThrow(() -> error("YAML_SYNTAX", l.no(), l.text()));
+        build.checkKey(split.key(), l.no());
         pos++;
         YamlNode value;
         if (isEmptyRest(split.rest())) {
           value = nested(indent, depth, l);
         } else {
           value = inline(split.rest(), l.no(), depth + 1);
-          noMoreIndented(indent);
+          noMoreIndented(indent, value instanceof YamlScalar);
         }
         if (entries.putIfAbsent(split.key(), value) != null) {
           throw error("YAML_DUPLICATE_KEY", l.no(), split.key());
@@ -281,8 +411,9 @@ public final class StrictYaml {
     }
 
     private YamlList sequence(int indent, int depth) {
-      checkDepth(depth, lines.get(pos).no());
       int firstLine = lines.get(pos).no();
+      build.checkDepth(depth, firstLine);
+      build.count(firstLine);
       List<YamlNode> items = new ArrayList<>();
       while (pos < lines.size()) {
         Line l = lines.get(pos);
@@ -299,17 +430,26 @@ public final class StrictYaml {
         String rest = l.text().substring(restStart);
         if (isEmptyRest(rest)) {
           pos++;
+          if (pos < lines.size()
+              && lines.get(pos).indent() > indent
+              && isDash(lines.get(pos).text())) {
+            throw error("YAML_NESTED_SEQUENCE", lines.get(pos).no(), lines.get(pos).text());
+          }
           items.add(nested(indent, depth, l));
         } else if (isDash(rest)) {
-          throw error("YAML_SYNTAX", l.no(), rest);
-        } else if (splitKey(rest, l.no()).isPresent()) {
-          // a block mapping that starts on the dash line: its indent is the column of its first key
-          lines.set(pos, new Line(l.no(), indent + restStart, rest));
-          items.add(mapping(indent + restStart, depth + 1));
+          throw error("YAML_NESTED_SEQUENCE", l.no(), rest);
         } else {
-          pos++;
-          items.add(inline(rest, l.no(), depth + 1));
-          noMoreIndented(indent);
+          rejectIndicator(rest, 0, l.no());
+          if (splitKey(rest, l.no()).isPresent()) {
+            // a block mapping that starts on the dash line: its indent is the column of its key
+            lines.set(pos, new Line(l.no(), indent + restStart, rest));
+            items.add(mapping(indent + restStart, depth + 1));
+          } else {
+            pos++;
+            YamlNode item = inline(rest, l.no(), depth + 1);
+            items.add(item);
+            noMoreIndented(indent, item instanceof YamlScalar);
+          }
         }
       }
       return new YamlList(items, firstLine);
@@ -321,7 +461,8 @@ public final class StrictYaml {
 
     /**
      * Splits {@code key: rest}. Empty when the text is not a key line (a scalar or flow value); a
-     * line that has the shape of a key but an invalid key is {@code YAML_BAD_KEY}.
+     * line that has the shape of a key but an invalid key is {@code YAML_BAD_KEY}, and the plain
+     * key {@code <<} is {@code YAML_MERGE_KEY}.
      */
     private static Optional<KeySplit> splitKey(String text, int line) {
       char first = text.charAt(0);
@@ -347,6 +488,9 @@ public final class StrictYaml {
       for (int i = 0; i < body.length(); i++) {
         if (body.charAt(i) == ':' && (i + 1 == body.length() || body.charAt(i + 1) == ' ')) {
           String key = body.substring(0, i);
+          if (key.equals("<<")) {
+            throw error("YAML_MERGE_KEY", line, text);
+          }
           if (!isPlainKey(key)) {
             throw error("YAML_BAD_KEY", line, key);
           }
@@ -358,19 +502,37 @@ public final class StrictYaml {
 
     /** A value on the same line as its key or dash: quoted, flow or plain. */
     private YamlNode inline(String rest, int line, int depth) {
+      rejectIndicator(rest, 0, line);
+      if (isDash(rest)) {
+        throw error("YAML_NESTED_SEQUENCE", line, rest);
+      }
       char c = rest.charAt(0);
       if (c == '"' || c == '\'') {
         Quoted q = readQuoted(rest, 0, line);
         expectEnd(rest, q.end(), line);
-        return new YamlScalar(q.value(), line);
+        return build.scalar(q.value(), line);
       }
       if (c == '[' || c == '{') {
-        FlowReader flow = new FlowReader(rest, line, limits);
+        FlowReader flow = new FlowReader(rest, line, build);
         YamlNode node = flow.readValue(depth);
         expectEnd(rest, flow.pos, line);
         return node;
       }
-      return new YamlScalar(trimRight(rest.substring(0, commentStart(rest))), line);
+      String value = trimRight(rest.substring(0, commentStart(rest)));
+      if (hasMappingIndicator(value)) {
+        throw error("YAML_SYNTAX", line, value);
+      }
+      return build.scalar(value, line);
+    }
+
+    /** A plain scalar may not contain a colon followed by a space or ending the scalar. */
+    private static boolean hasMappingIndicator(String value) {
+      for (int i = 0; i < value.length(); i++) {
+        if (value.charAt(i) == ':' && (i + 1 == value.length() || value.charAt(i + 1) == ' ')) {
+          return true;
+        }
+      }
+      return false;
     }
   }
 
@@ -380,13 +542,13 @@ public final class StrictYaml {
   private static final class FlowReader {
     private final String text;
     private final int line;
-    private final Limits limits;
+    private final Build build;
     private int pos;
 
-    FlowReader(String text, int line, Limits limits) {
+    FlowReader(String text, int line, Build build) {
       this.text = text;
       this.line = line;
-      this.limits = limits;
+      this.build = build;
     }
 
     private void skip() {
@@ -416,8 +578,9 @@ public final class StrictYaml {
       if (c == '"' || c == '\'') {
         Quoted q = readQuoted(text, pos, line);
         pos = q.end();
-        return new YamlScalar(q.value(), line);
+        return build.scalar(q.value(), line);
       }
+      rejectIndicator(text, pos, line);
       return readPlain();
     }
 
@@ -441,7 +604,7 @@ public final class StrictYaml {
       if (value.isEmpty()) {
         throw syntax();
       }
-      return new YamlScalar(value, line);
+      return build.scalar(value, line);
     }
 
     private static boolean isFlowEnd(char c) {
@@ -449,9 +612,8 @@ public final class StrictYaml {
     }
 
     private YamlList readList(int depth) {
-      if (depth > limits.maxDepth()) {
-        throw error("YAML_SYNTAX", line, "nesting too deep");
-      }
+      build.checkDepth(depth, line);
+      build.count(line);
       pos++;
       List<YamlNode> items = new ArrayList<>();
       skip();
@@ -478,9 +640,8 @@ public final class StrictYaml {
     }
 
     private YamlMap readMap(int depth) {
-      if (depth > limits.maxDepth()) {
-        throw error("YAML_SYNTAX", line, "nesting too deep");
-      }
+      build.checkDepth(depth, line);
+      build.count(line);
       pos++;
       Map<String, YamlNode> entries = new LinkedHashMap<>();
       skip();
@@ -534,6 +695,10 @@ public final class StrictYaml {
           throw error("YAML_BAD_KEY", line, text);
         }
       } else {
+        rejectIndicator(text, pos, line);
+        if (text.startsWith("<<:", pos) || text.startsWith("<< ", pos)) {
+          throw error("YAML_MERGE_KEY", line, text.substring(pos));
+        }
         int start = pos;
         while (pos < text.length() && isKeyPart(text.charAt(pos))) {
           pos++;
@@ -543,6 +708,7 @@ public final class StrictYaml {
           throw error("YAML_BAD_KEY", line, text.substring(start));
         }
       }
+      build.checkKey(key, line);
       if (pos >= text.length()) {
         throw unterminated();
       }
