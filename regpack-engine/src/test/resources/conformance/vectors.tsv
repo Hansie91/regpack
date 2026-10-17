@@ -1,0 +1,46 @@
+D01	MUST	dec('0.1') + dec('0.2') == dec('0.3')		T			spec 4 I3: decimal arithmetic is exact and deterministic
+D02	SHOULD	dec('1.10') == dec('1.1')		T			spec 7.4: scaled decimals compare by value, not by scale
+D03	SHOULD	round(dec('2.5'), 0, 'HALF_EVEN') == dec('2')		T			spec 7.4: scaled decimals with explicit rounding
+D04	SHOULD	round(dec('2.5'), 0, 'HALF_UP') == dec('3')		T			spec 7.4: scaled decimals with explicit rounding
+D05	SHOULD	round(dec('1.005'), 2, 'HALF_UP') == dec('1.01')		T			spec 7.4: decimal rounding is exact, not binary floating point
+D06	SHOULD	dec('1234.5') / dec('100') == dec('12.345')		T			spec 7.4: an exact decimal quotient keeps its digits
+D07	SPIKE-DESIGN	dec('1') / dec('3')		ERR:NON_TERMINATING			the error kind and the exact-or-error division are the production design
+D08	MUST	dec('1') / dec('0')		ERR			spec 6.2: evaluation errors yield UNDETERMINED
+D09	SPIKE-DESIGN	string(dec('12.50'))		s:12.5			the plain-text form without trailing zeros is the library spelling
+D10	SHOULD	dec('0.30') < dec('0.4')		T			spec 7.4: decimals are ordered by value
+D11	SPIKE-DESIGN	dec('1000000000000000000000000000000000000000')		ERR:SCALE			the 38 digit limit and its error kind are the production design
+D12	MUST	0.1 + 0.2 == 0.3		ONEOF:T|COMPILE_ERROR			spec 4 I3 and 7.4: no binary floating point; a decimal literal or a refusal
+D13	DECIDE	1 + dec('0.5') == dec('1.5')		@ruling			spec 6.2 is silent: may an int be mixed with a decimal in operator form
+T01	SHOULD	timestamp('2026-10-09T09:30:00.123456Z') < timestamp('2026-10-09T09:30:00.123457Z')		T			spec 7.4: UTC timestamps with microsecond resolution
+T02	SHOULD	isoMicros(timestamp('2026-10-09T09:30:00Z')) == '2026-10-09T09:30:00.000000Z'		T			spec 7.4: UTC timestamps in a fixed canonical form
+T03	SPIKE-DESIGN	isoMicros(timestamp('2026-10-09T09:30:00.123456789Z'))		ERR:RANGE			refusing finer than a microsecond is the production design
+T04	SHOULD	isoMicros(timestamp('2026-10-09T11:30:00+02:00')) == '2026-10-09T09:30:00.000000Z'		T			spec 7.4: an offset is normalised to UTC
+T05	SHOULD	date('2026-02-29')		ERR			spec 6.2: evaluation errors yield UNDETERMINED
+T06	SPIKE-DESIGN	dayOfWeek(date('2026-10-09')) == 'FRIDAY'		T			the function name and the upper-case English spelling are the production design
+T07	MUST	upper('title') == 'TITLE'		T			spec 4 I3: no locale; the result is the same under tr_TR
+T08	SHOULD	timestamp('2026-10-09T09:30:00')		ONEOF:COMPILE_ERROR|ERR			spec 7.4: timestamps are UTC, so a text with no zone is not a timestamp
+A01	MUST	has(event.venue)	event.venue=absent:STRING	F			spec 6.2: explicit absence has(x)
+A02	MUST	event.venue == 'XPAR'	event.venue=absent:STRING	ERR			spec 6.2 and 7.4: explicit absence, no three-valued NULL; reading an absent value is an error
+A03	MUST	has(event.venue) && event.venue == 'XPAR'	event.venue=absent:STRING	F			spec 6.2: has(x) guards a read of x
+A04	DECIDE	event.venue == 'XPAR' && has(event.venue)	event.venue=absent:STRING	@ruling			spec 6.2 is silent: is an error on the left of && absorbed when the right is false
+A05	MUST	event.venue == null	event.venue=s:XPAR	ONEOF:COMPILE_ERROR|ERR			spec 7.4: explicit absence, no three-valued NULL; a null literal is not a value
+A06	MUST	has(client.lei)	client.kind=s:NATURAL_PERSON;client.lei=absent:STRING	F			spec 6.2 and 7.5: a missing field is absent, tested with has(x)
+A07	DECIDE	has(client.parent.lei)	client.kind=s:NATURAL_PERSON;client.parent=absent:STRING;client.parent.lei=absent:STRING	@ruling			spec 6.2 is silent: has() below an absent declared parent
+A08	MUST	has(event.venue) ? event.venue : 'NONE'	event.venue=absent:STRING	s:NONE			spec 6.2 and 7.5: absence handled explicitly with has(x)
+E01	SPIKE-DESIGN	9223372036854775807 + 1		ERR:OVERFLOW			64 bit integers and the OVERFLOW kind are the production design
+E02	MUST	1 / 0		ERR			spec 6.2: evaluation errors yield UNDETERMINED
+E03	SPIKE-DESIGN	int('abc')		ERR:PARSE			the int conversion and its PARSE kind are the production design
+E04	SHOULD	1 < 'a'		ONEOF:COMPILE_ERROR|ERR			spec 6.2: a type clash is a compile error or an evaluation error, never a value
+E05	SHOULD	true || (1 / 0 == 1)		T			spec 6.2: an operand that is never evaluated cannot raise an error
+E06	DECIDE	(1 / 0 == 1) || true		@ruling			spec 6.2 is silent: is an error on the left of || absorbed when the right is true
+S01	SHOULD	size('é') == 1		T			spec 6.2: a string is a sequence of code points
+S02	SHOULD	size('😀') == 1		T			spec 6.2: a string is a sequence of code points, not UTF-16 units
+S03	MUST	'DEAL' in ['DEAL', 'MTCH', 'AOTC']		T			spec 6.1: the in form of the when example
+S04	SHOULD	'A' + 'B' == 'AB'		T			spec 6.2: string values
+S05	SHOULD	[1, 2] + [3] == [1, 2, 3]		T			spec 6.2: list values
+S06	SHOULD	size([1, 2, 3]) == 3		T			spec 6.2: list values
+S07	DECIDE	event.kind == 'NEW'	event.kind=e:LifecycleKind.NEW	@ruling			spec 6.2 is silent: an enum compared with a string
+S08	SHOULD	'LEI-FIRM-0001'.startsWith('LEI-')		T			spec 6.2: string values
+C01	SPIKE-DESIGN	contains(items, 'x')	items=l:@gen(10001)	ERR:BUDGET	10000		a list scan is charged its length before it runs
+C02	SPIKE-DESIGN	size(lower(big)) == 1	big=s:@gen(1048576)	ERR:BUDGET	1000		a string operation is charged its size before it runs
+C03	SPIKE-DESIGN	@chain(3000)		COMPILE_ERROR		1000	the node ceiling is enforced while parsing

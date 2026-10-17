@@ -49,7 +49,7 @@ public final class InHouseExpression implements Expression {
   }
 
   public InHouseExpression(Limits limits) {
-    this(limits, Rulings.provisional());
+    this(limits, Rulings.load());
   }
 
   /** A layer with explicit rulings; they are read once, here, and never change. */

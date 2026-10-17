@@ -1,0 +1,11 @@
+# rulings.tsv: the one file that holds the five DECIDE rulings (plan T14, assumption A2, open item OI-5).
+# Status PROVISIONAL means the in-house outcome stands until the owner rules; a ruling is the change of the value cell of one row (with status RULED, ruled_by and ruled_on).
+# value is the ruled value; alt_value is the alternative to the in-house value and never changes; expected is the outcome of the vector under the in-house value and expected_alt under alt_value.
+# A change to this file changes the semantics fingerprint: bump EngineInfo.SEMANTICS_MAJOR and re-pin SemanticsFingerprintTest in the same commit; a ruled vector changes class to MUST in vectors.tsv.
+# L01 NOT_A_VECTOR spec 6.2: no loops; bounded quantifiers would need a spec amendment (owner)
+id	status	switch	value	alt_value	expected	expected_alt	ruled_by	ruled_on	note
+D13	PROVISIONAL	intDecimalMix	ALLOW	DENY	T	ERR	-	-	1 + dec('0.5') == dec('1.5'): may an int be mixed with a decimal in operator form
+A04	PROVISIONAL	andLeftError	PROPAGATE	ABSORB	ERR	F	-	-	event.venue == 'XPAR' && has(event.venue) with the venue absent: is the error of the left operand absorbed when the right is false
+E06	PROVISIONAL	orLeftError	PROPAGATE	ABSORB	ERR	T	-	-	(1 / 0 == 1) || true: is the error of the left operand absorbed when the right is true
+A07	PROVISIONAL	hasBelowAbsent	FALSE	ERROR_IF_ANCESTOR_ABSENT	F	ERR	-	-	has(client.parent.lei) with client.parent declared and unbound: false or an ABSENT error
+S07	PROVISIONAL	enumStringEquality	BY_NAME	-	T	-	-	-	no alternative: needs an enum literal (enum with string equality is by name; a TYPE_ERROR ruling is a plan amendment)
