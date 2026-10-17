@@ -117,9 +117,7 @@ class PackThroughputGuardTest {
     assertThat(loaded.pack().orElseThrow().reasons().entries()).hasSize(RULES);
     assertThat(
             CompiledPack.compile(
-                    loaded.pack().orElseThrow(),
-                    GeneratedPackSource.REPORT_ID,
-                    Rulings.provisional())
+                    loaded.pack().orElseThrow(), GeneratedPackSource.REPORT_ID, Rulings.load())
                 .problems())
         .isEmpty();
   }

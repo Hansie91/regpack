@@ -83,7 +83,7 @@ class SecondRegimeFixtureTest {
   }
 
   private static CompiledPack compile(LoadedPack pack) {
-    return CompiledPack.compile(pack, REPORT, Rulings.provisional()).pack().orElseThrow();
+    return CompiledPack.compile(pack, REPORT, Rulings.load()).pack().orElseThrow();
   }
 
   private static ExecutionResult<PackProgram.Decision> run(Bindings input) {
@@ -173,7 +173,7 @@ class SecondRegimeFixtureTest {
     // stays reserved until P3 and P12 (BRK-04), so the provider refuses the pack instead of
     // guessing. The tables themselves run unchanged, as the tests above show.
     assertThatThrownBy(
-            () -> PackRegime.create(load(), REPORT, new MeteredExecutor(), Rulings.provisional()))
+            () -> PackRegime.create(load(), REPORT, new MeteredExecutor(), Rulings.load()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("INPUT_PATH_UNSUPPORTED");
   }

@@ -50,7 +50,7 @@ class PackProgramTest {
   }
 
   private static CompiledPack compile(LoadedPack pack) {
-    return CompiledPack.compile(pack, REPORT, Rulings.provisional()).pack().orElseThrow();
+    return CompiledPack.compile(pack, REPORT, Rulings.load()).pack().orElseThrow();
   }
 
   private static ExecutionResult<PackProgram.Decision> run(

@@ -81,7 +81,7 @@ final class GeneratedPackSource {
   static PackSource source(GeneratedPack generated) {
     Map<String, ValueType> types = types();
     InHouseExpression expression =
-        new InHouseExpression(InHouseExpression.Limits.defaults(), Rulings.provisional());
+        new InHouseExpression(InHouseExpression.Limits.defaults(), Rulings.load());
 
     Map<String, String> files = new TreeMap<>();
     List<String> tableFiles = new ArrayList<>();
@@ -122,7 +122,7 @@ final class GeneratedPackSource {
           "the generated pack has problems: " + show(loaded.problems()));
     }
     CompiledPack.CompileResult compiled =
-        CompiledPack.compile(loaded.pack().get(), REPORT_ID, Rulings.provisional());
+        CompiledPack.compile(loaded.pack().get(), REPORT_ID, Rulings.load());
     if (compiled.pack().isEmpty()) {
       throw new IllegalStateException(
           "the generated pack does not compile: " + show(compiled.problems()));

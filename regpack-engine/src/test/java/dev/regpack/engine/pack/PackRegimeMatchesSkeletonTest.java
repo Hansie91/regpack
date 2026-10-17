@@ -118,8 +118,7 @@ class PackRegimeMatchesSkeletonTest {
   }
 
   private static List<Pair> grid() {
-    PackRegime pack =
-        PackRegime.create(LOADED, "sample.s0", new MeteredExecutor(), Rulings.provisional());
+    PackRegime pack = PackRegime.create(LOADED, "sample.s0", new MeteredExecutor(), Rulings.load());
     WalkingSkeletonRegime skeleton = WalkingSkeletonRegime.standard();
     List<Pair> pairs = new ArrayList<>();
     for (LifecycleKind kind : LifecycleKind.values()) {

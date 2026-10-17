@@ -29,7 +29,7 @@ class PackRegimeTest {
   private static final MeteredExecutor EXECUTOR = new MeteredExecutor();
 
   private static PackRegime create(LoadedPack pack, String reportId) {
-    return PackRegime.create(pack, reportId, EXECUTOR, Rulings.provisional());
+    return PackRegime.create(pack, reportId, EXECUTOR, Rulings.load());
   }
 
   private static CanonicalExecution execution(AssetClass assetClass) {

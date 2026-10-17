@@ -53,8 +53,7 @@ class PackScopeEngineTest {
       new Citation("regpack-spec", "I5", CitationRole.GUIDANCE, Optional.empty());
 
   private final PackRegime regime =
-      PackRegime.create(
-          SamplePacks.load(), "sample.s0", new MeteredExecutor(), Rulings.provisional());
+      PackRegime.create(SamplePacks.load(), "sample.s0", new MeteredExecutor(), Rulings.load());
 
   private static CanonicalExecution execution(
       LifecycleKind kind, AssetClass assetClass, boolean tradedOnVenue, PartyKind clientKind) {
@@ -101,7 +100,7 @@ class PackScopeEngineTest {
   }
 
   private static PackRegime regimeOf(LoadedPack pack) {
-    return PackRegime.create(pack, "sample.s0", new MeteredExecutor(), Rulings.provisional());
+    return PackRegime.create(pack, "sample.s0", new MeteredExecutor(), Rulings.load());
   }
 
   @Test
@@ -411,7 +410,7 @@ class PackScopeEngineTest {
 
   private static PackRegime regimeOf(LoadedPack pack, RuleCircuit circuit) {
     return PackRegime.create(
-        pack, "sample.s0", new MeteredExecutor(), Rulings.provisional(), Optional.of(circuit));
+        pack, "sample.s0", new MeteredExecutor(), Rulings.load(), Optional.of(circuit));
   }
 
   private static LoadedPack overBudgetPack() {
@@ -600,7 +599,7 @@ class PackScopeEngineTest {
             PackBuilder.sample().scope(PackBuilder.Rule.of("R-FAIL", "1 / 0 == 1")).load(),
             "sample.s0",
             qualified,
-            Rulings.provisional(),
+            Rulings.load(),
             Optional.of(circuit));
 
     DecisionBody failing = decide(provider, equityOnVenue(), 100);

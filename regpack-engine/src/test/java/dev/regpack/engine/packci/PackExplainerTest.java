@@ -59,7 +59,7 @@ class PackExplainerTest {
   }
 
   private static PackRegime regimeOf(LoadedPack pack) {
-    return PackRegime.create(pack, "sample.s0", new MeteredExecutor(), Rulings.provisional());
+    return PackRegime.create(pack, "sample.s0", new MeteredExecutor(), Rulings.load());
   }
 
   private static PackRegime sampleRegime() {
@@ -208,7 +208,7 @@ class PackExplainerTest {
             PackBuilder.sample().scope(PackBuilder.Rule.of("R-FAIL", "1 / 0 == 1")).load(),
             "sample.s0",
             new MeteredExecutor(),
-            Rulings.provisional(),
+            Rulings.load(),
             Optional.of(circuit));
 
     String first = PackExplainer.explainEvent(regime, naturalPerson(), KEY, EVALUATED_AT);

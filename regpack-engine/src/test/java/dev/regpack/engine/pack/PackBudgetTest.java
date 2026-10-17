@@ -16,7 +16,7 @@ class PackBudgetTest {
 
   private static CompiledPack compile(Map<String, String> overrides) {
     LoadedPack pack = SamplePacks.loadSealed(overrides);
-    CompiledPack.CompileResult result = CompiledPack.compile(pack, REPORT, Rulings.provisional());
+    CompiledPack.CompileResult result = CompiledPack.compile(pack, REPORT, Rulings.load());
     assertThat(result.problems()).isEmpty();
     return result.pack().orElseThrow();
   }

@@ -19,11 +19,11 @@ class CompiledPackTest {
       "inputs: [client.kind, event.kind, instrument.assetClass, instrument.tradedOnVenue]";
 
   private static CompiledPack.CompileResult compile(Map<String, String> overrides) {
-    return CompiledPack.compile(SamplePacks.loadSealed(overrides), REPORT, Rulings.provisional());
+    return CompiledPack.compile(SamplePacks.loadSealed(overrides), REPORT, Rulings.load());
   }
 
   private static CompiledPack.CompileResult compile(LoadedPack pack, String reportId) {
-    return CompiledPack.compile(pack, reportId, Rulings.provisional());
+    return CompiledPack.compile(pack, reportId, Rulings.load());
   }
 
   private static Map<String, String> scope(String from, String to) {

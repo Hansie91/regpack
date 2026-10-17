@@ -61,8 +61,7 @@ class PackToyCrashIT {
 
   /** The provider is immutable and thread-safe; one instance serves every run of this class. */
   private static final PackRegime REGIME =
-      PackRegime.create(
-          SamplePacks.load(), "sample.s0", new MeteredExecutor(), Rulings.provisional());
+      PackRegime.create(SamplePacks.load(), "sample.s0", new MeteredExecutor(), Rulings.load());
 
   private record Run(
       Sha256 stateDigest,
