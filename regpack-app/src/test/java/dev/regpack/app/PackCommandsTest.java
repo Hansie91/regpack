@@ -811,13 +811,14 @@ class PackCommandsTest {
   }
 
   @Test
-  void tableImportRefusesATableThatCannotBeWrittenFaithfully() throws IOException {
+  void tableImportRefusesACellThatCouldNeverBeLoadedFromAFile() throws IOException {
     Path csv = temp.resolve("table.csv");
     assertThat(run("pack", "table", "export", pack.toString(), SCOPE, "--out", csv.toString()))
         .isZero();
     String exported = Files.readString(csv, UTF_8);
     assertThat(exported).contains("2018-01-03,,,\n");
-    // a set value so long that the canonical YAML line exceeds the line cap of the pack format
+    // a set value over the scalar cap of the pack format: the importer refuses it with a coded
+    // problem (before the writer is tried, which would refuse it too)
     Files.writeString(
         csv,
         exported.replaceFirst("2018-01-03,,,\n", "2018-01-03,,k=" + "v".repeat(9_000) + ",\n"),
@@ -829,7 +830,7 @@ class PackCommandsTest {
     assertThat(run("pack", "table", "import", pack.toString(), SCOPE, csv.toString(), "--write"))
         .isEqualTo(1);
 
-    assertThat(stderr()).contains("problem TABLE_NOT_WRITABLE " + SCOPE);
+    assertThat(stderr()).contains("problem CSV_CELL_TOO_LONG " + SCOPE);
     assertThat(stderr()).endsWith("nothing written\n");
     assertThat(snapshot(pack)).isEqualTo(before);
   }

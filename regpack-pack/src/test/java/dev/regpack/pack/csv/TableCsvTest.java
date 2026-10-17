@@ -3,6 +3,7 @@ package dev.regpack.pack.csv;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
 import dev.regpack.pack.check.TableChecks;
 import dev.regpack.pack.model.DecisionTable;
@@ -444,5 +445,94 @@ class TableCsvTest {
     }
     assertThat(differing).hasSize(1);
     assertThat(now[differing.get(0)]).startsWith("    when: ").contains("tradedOnVenue2");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // final review: duplicate set names, CRLF after a quoted cell, the scalar and line caps
+
+  @Test
+  void importRefusesADuplicateSetNameInsteadOfLosingTheSecondValue() {
+    String[] row = scopeRow().clone();
+    row[11] = "action=NEWT;action=CANC";
+    List<PackProblem> problems = new ArrayList<>();
+
+    assertThat(imported(csv(row, catchAllRow()), problems)).isEmpty();
+
+    assertThat(codes(problems)).containsExactly("SET_INVALID");
+    assertThat(problems.get(0).line()).isEqualTo(2);
+  }
+
+  @Test
+  void importAcceptsCrlfAfterAQuotedLastCellAndAQuotedCellBeforeAComma() {
+    // every cell quoted: the last cell of each record is a quoted cell followed by CR LF
+    String lf = csv(scopeRow(), catchAllRow());
+    List<PackProblem> expectedProblems = new ArrayList<>();
+    Optional<DecisionTable> expected = imported(lf, expectedProblems);
+    assertThat(expectedProblems).isEmpty();
+
+    List<PackProblem> problems = new ArrayList<>();
+    Optional<DecisionTable> result = imported(lf.replace("\n", "\r\n"), problems);
+
+    assertThat(problems).isEmpty();
+    assertThat(result).isEqualTo(expected);
+    assertThat(result).isPresent();
+  }
+
+  @Test
+  void aLoneCarriageReturnInOneCellIsOneProblemNotOnePerCell() {
+    String text = HEADER + "\n" + record(catchAllRow()).replace("true", "tr\ru\re");
+    // the unquoted spelling of the same CR: only the cell that holds it is wrong
+    String unquoted =
+        HEADER + "\nS-CA,DEF,900,tr\rue,UNDETERMINED,T.DEF.X,,s#p#BASIS,RAT-0002,,,,\n";
+    for (String csv : List.of(text, unquoted)) {
+      List<PackProblem> problems = new ArrayList<>();
+      assertThat(imported(csv, problems)).isEmpty();
+      assertThat(codes(problems)).containsExactly("CELL_BAD_CHARACTER");
+    }
+  }
+
+  @Test
+  void importRefusesACellOverTheScalarCapWithACodedProblem() {
+    String[] row = scopeRow().clone();
+    row[11] = "k=" + "v".repeat(100_000);
+    List<PackProblem> problems = new ArrayList<>();
+
+    assertThat(imported(csv(row, catchAllRow()), problems)).isEmpty();
+
+    assertThat(codes(problems)).containsExactly("CSV_CELL_TOO_LONG");
+    assertThat(problems.get(0).line()).isEqualTo(2);
+
+    String[] atCap = scopeRow().clone();
+    atCap[11] = "k=" + "v".repeat(PackFormat.MAX_SCALAR_CHARS - 2);
+    List<PackProblem> capProblems = new ArrayList<>();
+    imported(csv(atCap, catchAllRow()), capProblems);
+    // exactly at the scalar cap the cell passes; the written line is then too long (next test)
+    assertThat(codes(capProblems)).doesNotContain("CSV_CELL_TOO_LONG");
+
+    String[] over = scopeRow().clone();
+    over[11] = "k=" + "v".repeat(PackFormat.MAX_SCALAR_CHARS - 1);
+    List<PackProblem> overProblems = new ArrayList<>();
+    imported(csv(over, catchAllRow()), overProblems);
+    assertThat(codes(overProblems)).containsExactly("CSV_CELL_TOO_LONG");
+  }
+
+  @Test
+  void anImportedTableIsAlwaysWritableOrRefusedWithAProblem() {
+    // a when that fits the written line exactly (the key, quotes and indent take 11 characters)
+    int room = PackFormat.MAX_LINE_CHARS - "    when: \"\"".length();
+    String fits = "event.kind == '" + "v".repeat(room - "event.kind == ''".length()) + "'";
+    assertThat(fits).hasSize(room);
+    String[] atLimit = scopeRow().clone();
+    atLimit[3] = fits;
+    List<PackProblem> ok = new ArrayList<>();
+    Optional<DecisionTable> table = imported(csv(atLimit, catchAllRow()), ok);
+    assertThat(ok).isEmpty();
+    assertThat(StrictYaml.parse(TableYamlWriter.write(table.orElseThrow()))).isNotNull();
+
+    String[] oneMore = scopeRow().clone();
+    oneMore[3] = fits + "v";
+    List<PackProblem> problems = new ArrayList<>();
+    assertThat(imported(csv(oneMore, catchAllRow()), problems)).isEmpty();
+    assertThat(codes(problems)).containsExactly("TABLE_LINE_TOO_LONG");
   }
 }

@@ -444,6 +444,9 @@ class ManifestTest {
     assertOnly(
         parse(HEAD + REPORTS.replace("[scope/scope.yaml]", "[]")), "REPORT_SCOPE_TABLES_EMPTY");
     assertOnly(
+        parse(HEAD + REPORTS.replace("[scope/scope.yaml]", "[scope/scope.yaml, scope/scope.yaml]")),
+        "REPORT_SCOPE_TABLE_DUPLICATE");
+    assertOnly(
         parse(HEAD + REPORTS.replace("[scope/scope.yaml]", "scope/scope.yaml")), "MANIFEST_SHAPE");
     assertOnly(
         parse(HEAD + REPORTS.replace("[scope/scope.yaml]", "[../x.yaml]")), "REPORT_PATH_INVALID");

@@ -1,5 +1,6 @@
 package dev.regpack.pack.golden;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.regpack.model.canonical.CanonicalExecutionCodec;
@@ -10,6 +11,7 @@ import dev.regpack.pack.golden.GoldenCase.ProvenanceKind;
 import dev.regpack.pack.golden.PackGoldenLoader.Loaded;
 import dev.regpack.pack.source.PackSource;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -362,5 +364,26 @@ class PackGoldenStrictnessTest {
         .allSatisfy(p -> assertThat(p.message().length()).isLessThan(1_000));
     assertThat(loaded.problems().stream().map(PackProblem::message))
         .anySatisfy(m -> assertThat(m).contains("number too long"));
+  }
+
+  @Test
+  void aGoldenFileWithABomOrInvalidUtf8IsRefusedWithItsOwnCode() {
+    byte[] json = caseJson("GC-1", "agent:golden", "d", CONSISTENCY).getBytes(UTF_8);
+    byte[] bom = new byte[json.length + 3];
+    bom[0] = (byte) 0xEF;
+    bom[1] = (byte) 0xBB;
+    bom[2] = (byte) 0xBF;
+    System.arraycopy(json, 0, bom, 3, json.length);
+    byte[] invalid = Arrays.copyOf(json, json.length + 1);
+    invalid[json.length] = (byte) 0xFF;
+
+    Map<String, byte[]> files = PackFixtures.valid().remove(PackFixtures.GOLDEN).bytes();
+    files.put(PREFIX + "GC-1.json", bom);
+    files.put(PREFIX + "GC-2.json", invalid);
+    Loaded loaded = PackGoldenLoader.load(PackSource.of(files));
+
+    assertThat(has(loaded, "PACK_BOM", PREFIX + "GC-1.json")).isTrue();
+    assertThat(has(loaded, "PACK_BAD_UTF8", PREFIX + "GC-2.json")).isTrue();
+    assertThat(loaded.cases()).isEmpty();
   }
 }

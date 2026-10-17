@@ -374,4 +374,142 @@ class PackLoaderTest {
     assertThat(withAttestation.signed()).isFalse();
     assertThat(withAttestation.notes()).containsExactly("attestation present, not verified (P9b)");
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // final review: line ends, character policy, unreadable files, staging
+
+  /** The sealed source of the given files: CHECKSUMS recomputed over them. */
+  private static PackSource sealed(Map<String, byte[]> files) {
+    Map<String, byte[]> all = new java.util.LinkedHashMap<>(files);
+    all.remove(PackSource.CHECKSUMS);
+    all.put(PackSource.CHECKSUMS, Checksums.render(PackSource.of(all)).getBytes(UTF_8));
+    return PackSource.of(all);
+  }
+
+  private static byte[] concat(byte[] first, byte[] second) {
+    byte[] out = new byte[first.length + second.length];
+    System.arraycopy(first, 0, out, 0, first.length);
+    System.arraycopy(second, 0, out, first.length, second.length);
+    return out;
+  }
+
+  private static final byte[] BOM_BYTES = {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
+
+  @Test
+  void lineEndsAreNormalisedExactlyOnceSoACrCrLfPackIsRefused() {
+    String crlf = PackFixtures.valid().text(PACK).replace("\n", "\r\n");
+    String crCrLf = PackFixtures.valid().text(PACK).replace("\n", "\r\r\n");
+    String lone = PackFixtures.valid().text(PACK).replace("\n", "\r");
+
+    LoadResult plain = PackFixtures.valid().load();
+    LoadResult windows = PackFixtures.valid().put(PACK, crlf).load();
+    assertThat(windows.problems()).isEmpty();
+    assertThat(windows.pack().orElseThrow().digest())
+        .isEqualTo(plain.pack().orElseThrow().digest());
+
+    for (String bad : List.of(crCrLf, lone)) {
+      LoadResult result = PackFixtures.valid().put(PACK, bad).load();
+      assertThat(result.pack()).isEmpty();
+      assertThat(result.problems())
+          .anySatisfy(
+              p -> {
+                assertThat(p.code()).isEqualTo("YAML_BAD_CHARACTER");
+                assertThat(p.path()).isEqualTo(PACK);
+              });
+    }
+  }
+
+  @Test
+  void aScopeTableListedTwiceIsAProblemAndNeverReachesTheDigest() {
+    LoadResult twice =
+        load(
+            PackFixtures.valid()
+                .replace(
+                    PACK,
+                    "scope_tables: [scope/a.yaml, scope/b.yaml]",
+                    "scope_tables: [scope/a.yaml, scope/b.yaml, scope/a.yaml]"));
+    assertOnly(twice, "REPORT_SCOPE_TABLE_DUPLICATE");
+    assertThat(twice.problems().get(0).path()).isEqualTo(PACK);
+  }
+
+  @Test
+  void goldenStringsFollowTheCharacterPolicyInTheLoaderToo() {
+    // the JSON escapes (a backslash and u, built here) decode to U+202E and U+200B; the file itself
+    // holds no such character
+    String escapes = "a" + "\\" + "u202eb" + "\\" + "u200bc";
+    String json =
+        PackFixtures.valid()
+            .text(GOLDEN)
+            .replace("\"author\"", "\"description\":\"" + escapes + "\",\"author\"");
+    assertThat(json).doesNotContain(new String(Character.toChars(0x202E)));
+    LoadResult result = load(PackFixtures.valid().put(GOLDEN, json));
+    assertOnly(result, "TEXT_BAD_CHARACTER");
+    assertThat(result.problems().get(0).path()).isEqualTo(GOLDEN);
+
+    String inKey =
+        PackFixtures.valid().text(GOLDEN).replace("\"price\"", "\"pri" + "\\" + "u0007ce\"");
+    assertOnly(load(PackFixtures.valid().put(GOLDEN, inKey)), "TEXT_BAD_CHARACTER");
+  }
+
+  @Test
+  void aGoldenFileWithABomOrInvalidUtf8IsAProblemAndLeavesNoPack() {
+    byte[] golden = PackFixtures.valid().bytes().get(GOLDEN);
+    Map<String, byte[]> bom = PackFixtures.valid().bytes();
+    bom.put(GOLDEN, concat(BOM_BYTES, golden));
+    LoadResult withBom = PackLoader.load(sealed(bom));
+    assertOnly(withBom, "PACK_BOM");
+    assertThat(withBom.problems().get(0).path()).isEqualTo(GOLDEN);
+
+    Map<String, byte[]> invalid = PackFixtures.valid().bytes();
+    invalid.put(GOLDEN, concat(golden, new byte[] {(byte) 0xFF}));
+    LoadResult badUtf8 = PackLoader.load(sealed(invalid));
+    assertOnly(badUtf8, "PACK_BAD_UTF8");
+    assertThat(badUtf8.problems().get(0).path()).isEqualTo(GOLDEN);
+  }
+
+  @Test
+  void aChecksumsFileThatIsNotTextCannotMakeATamperedPackLoad() {
+    Map<String, byte[]> files = PackFixtures.valid().bytes();
+    byte[] checksums = Checksums.render(PackSource.of(files)).getBytes(UTF_8);
+    // changed after sealing: an intact CHECKSUMS would report CHECKSUM_MISMATCH
+    files.put(
+        "rationales.yaml",
+        (PackFixtures.valid().text("rationales.yaml") + "# x\n").getBytes(UTF_8));
+
+    files.put(PackSource.CHECKSUMS, concat(BOM_BYTES, checksums));
+    LoadResult bom = PackLoader.load(PackSource.of(files));
+    assertThat(bom.pack()).isEmpty();
+    assertThat(codes(bom)).contains("PACK_BOM");
+
+    files.put(PackSource.CHECKSUMS, concat(checksums, new byte[] {(byte) 0xFF}));
+    LoadResult invalid = PackLoader.load(PackSource.of(files));
+    assertThat(invalid.pack()).isEmpty();
+    assertThat(codes(invalid)).contains("PACK_BAD_UTF8");
+  }
+
+  @Test
+  void aBrokenManifestDoesNotHideTheProblemsOfTheScopeTables() {
+    LoadResult result =
+        load(
+            PackFixtures.valid()
+                .replace(PACK, "jurisdiction: EU", "jurisdiction: eu")
+                .replace(TABLE_A, "node: N03\n", "node: N03\n    bogus: x\n"));
+    assertThat(result.pack()).isEmpty();
+    assertThat(codes(result)).contains("JURISDICTION_INVALID", "TABLE_KEY_UNKNOWN");
+    assertThat(result.problems()).anySatisfy(p -> assertThat(p.path()).isEqualTo(TABLE_A));
+  }
+
+  @Test
+  void aRowWithoutLegsHasTheLegMarketAndTheMessageSaysSo() {
+    // the default of a REPORT row is MARKET whatever the report lists (OI-2); the author is told
+    PackFixtures fixture =
+        PackFixtures.valid()
+            .replace(PACK, "legs: [MARKET, CLIENT]", "legs: [CLIENT]")
+            .replace(TABLE_A, "    legs: [MARKET]\n", "");
+    LoadResult result = load(fixture);
+    assertOnly(result, "ROW_LEG_NOT_IN_REPORT");
+    assertThat(result.problems().get(0).message())
+        .contains("has the leg MARKET")
+        .contains("without a legs key");
+  }
 }

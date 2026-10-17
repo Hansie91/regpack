@@ -4,6 +4,7 @@ import dev.regpack.model.Leg;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.json.Json;
 import dev.regpack.model.json.JsonException;
+import dev.regpack.pack.PackText;
 import dev.regpack.pack.check.PackProblem;
 import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.check.RegistryChecks;
@@ -20,6 +21,7 @@ import dev.regpack.ports.expr.ValueType;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -33,7 +35,12 @@ import java.util.function.Function;
  * canonical digest (companion contracts section 5.4; plan task T9). It fails closed: a {@link
  * LoadedPack} is returned only when there is no problem at all, and every problem found is reported
  * (sorted, without duplicates), not only the first, up to {@code PackFormat.MAX_PROBLEMS_PER_LOAD}:
- * then one {@code PROBLEMS_TRUNCATED} ends the list and the remaining tables are not parsed.
+ * then one {@code PROBLEMS_TRUNCATED} ends the list and the remaining tables are not parsed. What
+ * is skipped, exactly: when {@code pack.yaml} is missing or has a problem the reports are unknown,
+ * so every file directly under {@code scope/} is parsed and checked as if listed, but the checks
+ * that need a report (the listed files exist, {@code FILE_UNREFERENCED}, row legs within the
+ * report's vocabulary) wait for a usable {@code pack.yaml}; every other step runs whatever the
+ * earlier steps found.
  *
  * <p>Order: CHECKSUMS; the allowed paths; {@code pack.yaml}; the input model and its digest against
  * {@code input_schema}; the {@code as_at_field}; the files each report lists and the scope tables
@@ -47,9 +54,10 @@ import java.util.function.Function;
  * INPUT_SCHEMA_DIGEST_MISMATCH} (the message carries {@code expected <64 hex>}), {@code
  * AS_AT_FIELD_INVALID}, {@code ROW_ID_DUPLICATE}, {@code RULE_REF_DUPLICATE}, {@code
  * ROW_LEG_NOT_IN_REPORT}, {@code LIFECYCLE_KEY_UNKNOWN}, {@code LIFECYCLE_SHAPE}, {@code
- * GOLDEN_JSON_INVALID} and {@code IR_NOT_CANONICAL}, plus every code of the parsers and checks it
- * calls and the code of a {@link PackSyntaxException} (for example {@code YAML_TAB}, {@code
- * PACK_BOM}) at the path and line it names.
+ * GOLDEN_JSON_INVALID}, {@code TEXT_BAD_CHARACTER} (a refused character in a decoded golden string)
+ * and {@code IR_NOT_CANONICAL}, plus every code of the parsers and checks it calls and the code of
+ * a {@link PackSyntaxException} (for example {@code YAML_TAB}, {@code PACK_BOM}) at the path and
+ * line it names.
  */
 public final class PackLoader {
   private PackLoader() {}
@@ -193,6 +201,9 @@ public final class PackLoader {
       manifest.ifPresent(m -> checkInputAgainstManifest(m, input));
       if (manifest.isPresent()) {
         reports(manifest.get());
+      } else {
+        // no report to bind them to: still parse and check what can be checked on its own
+        scopeTablesWithoutManifest();
       }
       YamlNode reasonsRoot = registryRoot(RegistryParser.REASONS_FILE);
       YamlNode sourcesRoot = registryRoot(RegistryParser.SOURCES_FILE);
@@ -377,23 +388,40 @@ public final class PackLoader {
         report.lifecycle().ifPresent(path -> exists(path, who));
         report.endpointProfiles().forEach(path -> exists(path, who));
       }
-      for (String path : referenced) {
-        if (problems.truncated()) {
-          break; // the load fails anyway; do not parse the remaining tables of a hostile pack
-        }
-        YamlNode root = yaml(path);
-        if (root == null) {
-          continue;
-        }
-        Optional<DecisionTable> table = collecting(list -> TableParser.parse(path, root, list));
-        if (table.isPresent()) {
-          problems.addAll(TableChecks.check(table.get()));
-          tables.put(path, table.get());
-        }
-      }
+      referenced.forEach(this::scopeTable);
       for (String path : source.paths()) {
         if (kind(path) == Kind.SCOPE && !referenced.contains(path)) {
           problem("FILE_UNREFERENCED", path, 0, "no report lists this scope table");
+        }
+      }
+    }
+
+    /** Parses and checks one scope table; the load fails anyway once the problem cap is hit. */
+    private void scopeTable(String path) {
+      if (problems.truncated()) {
+        return; // do not parse the remaining tables of a hostile pack
+      }
+      YamlNode root = yaml(path);
+      if (root == null) {
+        return;
+      }
+      Optional<DecisionTable> table = collecting(list -> TableParser.parse(path, root, list));
+      if (table.isPresent()) {
+        problems.addAll(TableChecks.check(table.get()));
+        tables.put(path, table.get());
+      }
+    }
+
+    /**
+     * A pack.yaml that cannot be used lists no scope table, so every file directly under {@code
+     * scope/} is parsed and checked as if listed. The checks that need a report (the listed files
+     * exist, {@code FILE_UNREFERENCED}, the row legs against the report's vocabulary) wait for a
+     * usable pack.yaml.
+     */
+    private void scopeTablesWithoutManifest() {
+      for (String path : source.paths()) {
+        if (kind(path) == Kind.SCOPE) {
+          scopeTable(path);
         }
       }
     }
@@ -480,7 +508,7 @@ public final class PackLoader {
                         + leg
                         + ", which report "
                         + PackProblem.excerpt(report.id())
-                        + " does not list");
+                        + " does not list (a REPORT row without a legs key has the leg MARKET)");
               }
             }
           }
@@ -568,7 +596,21 @@ public final class PackLoader {
 
     private void goldenFile(String path) {
       try {
-        golden.put(path, Json.parse(source.text(path)));
+        Object tree = Json.parse(source.text(path));
+        Optional<PackText.Bad> bad = PackText.firstBadInTree(tree);
+        if (bad.isPresent()) {
+          // the one PackText policy, as PackGoldenLoader applies it to the same strings
+          problem(
+              "TEXT_BAD_CHARACTER",
+              path,
+              0,
+              "a decoded string contains the refused character U+"
+                  + String.format(Locale.ROOT, "%04X", bad.get().codePoint())
+                  + " at index "
+                  + bad.get().index());
+          return;
+        }
+        golden.put(path, tree);
       } catch (PackSyntaxException e) {
         problem(e.code(), path, e.line(), "the file is not valid: " + e.excerpt());
       } catch (JsonException e) {

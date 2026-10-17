@@ -38,9 +38,10 @@ import java.util.regex.Pattern;
  * {@code VALIDITY_WINDOW_RESERVED}, {@code AS_AT_FIELD_INVALID}, {@code ENGINE_MIN_INVALID}, {@code
  * INPUT_SCHEMA_INVALID}, {@code SUPERSEDES_INVALID}, {@code LIMITS_OUT_OF_RANGE}, {@code
  * IMPORTS_RESERVED}, {@code REPORTS_EMPTY}, {@code REPORT_ID_DUPLICATE}, {@code
- * REPORT_KEY_RESERVED}, {@code REPORT_SCOPE_TABLES_EMPTY}, {@code REPORT_PATH_INVALID}, {@code
- * LEG_VOCABULARY_RESERVED}, {@code LEG_DUPLICATE}, {@code REPORT_LEGS_EMPTY}, and the code of a
- * {@link PackSyntaxException} (for example {@code YAML_TAB}, {@code PACK_BOM}).
+ * REPORT_KEY_RESERVED}, {@code REPORT_SCOPE_TABLES_EMPTY}, {@code REPORT_SCOPE_TABLE_DUPLICATE},
+ * {@code REPORT_PATH_INVALID}, {@code LEG_VOCABULARY_RESERVED}, {@code LEG_DUPLICATE}, {@code
+ * REPORT_LEGS_EMPTY}, and the code of a {@link PackSyntaxException} (for example {@code YAML_TAB},
+ * {@code PACK_BOM}).
  *
  * @param id the pack id, of the {@link Regime} shape
  * @param version the pack version
@@ -633,6 +634,14 @@ public record PackManifest(
               "REPORT_PATH_INVALID",
               item.line(),
               key + " names an invalid pack file path: '" + PackProblem.excerpt(s.value()) + "'");
+          continue;
+        }
+        if (key.equals("scope_tables") && out.contains(s.value())) {
+          // a table consulted twice would change the digest and double the record budget
+          problem(
+              "REPORT_SCOPE_TABLE_DUPLICATE",
+              item.line(),
+              "scope table '" + PackProblem.excerpt(s.value()) + "' is listed twice");
           continue;
         }
         out.add(s.value());

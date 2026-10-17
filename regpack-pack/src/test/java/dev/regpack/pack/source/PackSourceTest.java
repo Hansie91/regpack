@@ -8,10 +8,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
 import dev.regpack.pack.yaml.PackSyntaxException;
+import dev.regpack.pack.yaml.StrictYaml;
+import dev.regpack.pack.yaml.YamlMap;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -153,10 +154,48 @@ class PackSourceTest {
   }
 
   @Test
-  void textIsStrictUtf8WithCrlfNormalisedToLf() {
+  void textIsStrictUtf8AndLeavesLineEndsToTheParser() {
+    // line ends are normalised exactly once, by StrictYaml.parse (the owner of the lone-CR rule)
     PackSource src =
         PackSource.of(Map.of("a.yaml", "k: caf\u00e9\r\nj: \u00fc\r\n\rx".getBytes(UTF_8)));
-    assertThat(src.text("a.yaml")).isEqualTo("k: caf\u00e9\nj: \u00fc\n\rx"); // a lone CR stays
+    assertThat(src.text("a.yaml")).isEqualTo("k: caf\u00e9\r\nj: \u00fc\r\n\rx");
+  }
+
+  @Test
+  void aCarriageReturnThatIsNotPartOfACrLfIsRefusedByTheYamlParserWhateverTheReadingPath() {
+    assertThat(((YamlMap) StrictYaml.parse(textOf("a: b\r\nc: d\r\n"))).entries()).hasSize(2);
+    for (String raw : List.of("a: b\r\r\nc: d\r\n", "a: b\rc: d\n", "a: b\r\n\rc: d\n", "a: b\r")) {
+      assertThatThrownBy(() -> StrictYaml.parse(textOf(raw)))
+          .as(PackProblem.excerpt(raw))
+          .isInstanceOfSatisfying(
+              PackSyntaxException.class, e -> assertThat(e.code()).isEqualTo("YAML_BAD_CHARACTER"));
+    }
+  }
+
+  private static String textOf(String raw) {
+    return PackSource.of(Map.of("a.yaml", raw.getBytes(UTF_8))).text("a.yaml");
+  }
+
+  @Test
+  void aBomPrefixNeedsAllThreeBytesAndAnythingShorterIsBadUtf8() {
+    PackSource exact =
+        PackSource.of(Map.of("a.yaml", new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF}));
+    assertThatThrownBy(() -> exact.text("a.yaml"))
+        .isInstanceOfSatisfying(
+            PackSyntaxException.class, e -> assertThat(e.code()).isEqualTo("PACK_BOM"));
+    // valid UTF-8 that shares two of the three bytes of the byte order mark is just text
+    for (byte[] near :
+        List.of(
+            new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBE},
+            new byte[] {(byte) 0xEF, (byte) 0xBA, (byte) 0xBF},
+            new byte[] {(byte) 0xEE, (byte) 0xBB, (byte) 0xBF})) {
+      PackSource src = PackSource.of(Map.of("a.yaml", near));
+      assertThat(src.text("a.yaml")).hasSize(1);
+    }
+    PackSource truncated = PackSource.of(Map.of("a.yaml", new byte[] {(byte) 0xEF, (byte) 0xBB}));
+    assertThatThrownBy(() -> truncated.text("a.yaml"))
+        .isInstanceOfSatisfying(
+            PackSyntaxException.class, e -> assertThat(e.code()).isEqualTo("PACK_BAD_UTF8"));
   }
 
   @Test
@@ -314,24 +353,160 @@ class PackSourceTest {
             PackSyntaxException.class, e -> assertThat(e.code()).isEqualTo("PACK_NOT_REGULAR"));
   }
 
+  private static void assertDirectoryCode(Path dir, String code) {
+    assertThatThrownBy(() -> PackSource.fromDirectory(dir))
+        .isInstanceOfSatisfying(
+            PackSyntaxException.class, e -> assertThat(e.code()).isEqualTo(code));
+  }
+
+  private static void writeBytes(Path dir, String name, int size) throws IOException {
+    Path file = dir.resolve(name);
+    Files.createDirectories(file.getParent());
+    Files.write(file, new byte[size]);
+  }
+
   @Test
-  void fromDirectoryChecksSizeBeforeReading(@TempDir Path dir) throws IOException {
-    // 2 GiB + 1 byte: a read of the whole file would fail with an OutOfMemoryError or take
-    // very long; the size in the file attributes is checked first
-    Path big = dir.resolve("big.yaml");
-    try (RandomAccessFile raf = new RandomAccessFile(big.toFile(), "rw")) {
-      raf.setLength(Integer.MAX_VALUE + 1L);
-    } catch (IOException e) {
-      assumeTrue(false, "cannot make a large sparse file here: " + e);
+  void fromDirectoryAcceptsAFileOfTheLimitAndRefusesOneByteMore(@TempDir Path dir)
+      throws IOException {
+    // a 2 GiB sparse file is not needed: the limit is one byte, wherever the check sits
+    writeBytes(dir, "a.yaml", PackFormat.MAX_FILE_BYTES);
+    assertThat(PackSource.fromDirectory(dir).bytes("a.yaml")).hasSize(PackFormat.MAX_FILE_BYTES);
+    writeBytes(dir, "a.yaml", PackFormat.MAX_FILE_BYTES + 1);
+    assertDirectoryCode(dir, "PACK_FILE_TOO_LARGE");
+  }
+
+  @Test
+  void fromDirectoryAcceptsTheTotalLimitAndRefusesOneByteMore(@TempDir Path dir)
+      throws IOException {
+    for (int i = 0; i < PackFormat.MAX_TOTAL_BYTES / PackFormat.MAX_FILE_BYTES; i++) {
+      writeBytes(dir, "f" + i + ".yaml", PackFormat.MAX_FILE_BYTES);
     }
+    assertThat(PackSource.fromDirectory(dir).paths()).hasSize(16);
+    writeBytes(dir, "over.yaml", 1);
+    assertDirectoryCode(dir, "PACK_TOO_LARGE");
+  }
+
+  @Test
+  void fromDirectoryAcceptsTheFileCountLimitAndRefusesOneMore(@TempDir Path dir)
+      throws IOException {
+    for (int i = 0; i < PackFormat.MAX_FILES; i++) {
+      write(dir, "f" + i + ".yaml", "k: v\n");
+    }
+    assertThat(PackSource.fromDirectory(dir).paths()).hasSize(PackFormat.MAX_FILES);
+    write(dir, "one-too-many.yaml", "k: v\n");
+    assertDirectoryCode(dir, "PACK_TOO_MANY_FILES");
+  }
+
+  @Test
+  void fromDirectoryAcceptsTheDirectoryCountLimitAndRefusesOneMore(@TempDir Path dir)
+      throws IOException {
+    for (int i = 0; i < PackFormat.MAX_FILES; i++) {
+      Files.createDirectory(dir.resolve("d" + i));
+    }
+    assertThat(PackSource.fromDirectory(dir).paths()).isEmpty();
+    Files.createDirectory(dir.resolve("one-too-many"));
+    assertDirectoryCode(dir, "PACK_TOO_MANY_FILES");
+  }
+
+  private static final String LEVEL = "d/";
+
+  @Test
+  void everyEntryPointAcceptsSixteenDirectoryLevelsAndRefusesSeventeen(@TempDir Path dir)
+      throws IOException {
+    String sixteen = LEVEL.repeat(16) + "x.yaml";
+    String seventeen = LEVEL.repeat(17) + "x.yaml";
+
+    assertThat(PackSource.of(one(sixteen)).paths()).containsExactly(sixteen);
+    assertCode(one(seventeen), "PATH_INVALID");
+    assertThat(PackSource.isValidPath(sixteen)).isTrue();
+    assertThat(PackSource.isValidPath(seventeen)).isFalse();
+
+    write(dir, sixteen, "k: v\n");
+    assertThat(PackSource.fromDirectory(dir).paths()).containsExactly(sixteen);
+    write(dir, seventeen, "k: v\n");
+    assertDirectoryCode(dir, "PATH_INVALID");
+
+    assertThat(
+            PackSource.fromClasspath(PackSourceTest.class, "dev/regpack/pack/source/deep16")
+                .paths())
+        .containsExactly("CHECKSUMS");
+    assertThatThrownBy(
+            () -> PackSource.fromClasspath(PackSourceTest.class, "dev/regpack/pack/source/deep17"))
+        .isInstanceOfSatisfying(
+            PackSyntaxException.class, e -> assertThat(e.code()).isEqualTo("PATH_INVALID"));
+  }
+
+  @Test
+  void fromDirectoryRefusesSeventeenEmptyDirectoryLevels(@TempDir Path dir) throws IOException {
+    Files.createDirectories(dir.resolve(LEVEL.repeat(16)));
+    assertThat(PackSource.fromDirectory(dir).paths()).isEmpty();
+    Files.createDirectories(dir.resolve(LEVEL.repeat(17)));
+    assertDirectoryCode(dir, "PATH_INVALID");
+  }
+
+  @Test
+  void everyEntryPointAcceptsAPathOfTheLengthLimitAndRefusesOneMore(@TempDir Path dir)
+      throws IOException {
+    String atLimit = "a".repeat(100) + "/" + "b".repeat(100) + "/" + "c".repeat(49) + ".yaml";
+    assertThat(atLimit).hasSize(256);
+    String oneOver = "a".repeat(100) + "/" + "b".repeat(100) + "/" + "c".repeat(50) + ".yaml";
+    assertThat(oneOver).hasSize(257);
+
+    assertThat(PackSource.of(one(atLimit)).paths()).containsExactly(atLimit);
+    assertCode(one(oneOver), "PATH_INVALID");
+
+    write(dir, atLimit, "k: v\n");
+    assertThat(PackSource.fromDirectory(dir).paths()).containsExactly(atLimit);
+    write(dir, oneOver, "k: v\n");
+    assertDirectoryCode(dir, "PATH_INVALID");
+  }
+
+  @Test
+  void fromClasspathAcceptsAListOfTheFileCountLimitAndRefusesOneMore() {
+    // the listed files are absent, so only the count of the listing is under test
+    assertThat(
+            PackSource.fromClasspath(PackSourceTest.class, "dev/regpack/pack/source/listed256")
+                .paths())
+        .containsExactly("CHECKSUMS");
+    assertThatThrownBy(
+            () ->
+                PackSource.fromClasspath(PackSourceTest.class, "dev/regpack/pack/source/listed257"))
+        .isInstanceOfSatisfying(
+            PackSyntaxException.class, e -> assertThat(e.code()).isEqualTo("PACK_TOO_MANY_FILES"));
+  }
+
+  @Test
+  void fromDirectoryReportsTheSmallestPathWhateverTheWalkOrder(@TempDir Path dir)
+      throws IOException {
+    // a directory sorts before "a.yaml" in a file-system listing but after it as a path, so a
+    // walk that throws at the first violation would name PATH_EXTENSION here
+    write(dir, "a/z.txt", "k: v\n");
+    writeBytes(dir, "a.yaml", PackFormat.MAX_FILE_BYTES + 1);
+    write(dir, "notes.txt", "k: v\n");
+    assertDirectoryCode(dir, "PACK_FILE_TOO_LARGE");
+    Files.delete(dir.resolve("a.yaml"));
+    assertDirectoryCode(dir, "PATH_EXTENSION");
+  }
+
+  @Test
+  void fromDirectoryRefusesAJunctionAsTheRoot(@TempDir Path dir, @TempDir Path elsewhere)
+      throws IOException, InterruptedException {
+    assumeTrue(
+        System.getProperty("os.name").startsWith("Windows"), "junctions exist on Windows only");
+    write(elsewhere, "pack.yaml", "id: x\n");
+    Path link = dir.resolve("root");
+    Process mklink =
+        new ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(), elsewhere.toString())
+            .redirectErrorStream(true)
+            .start();
+    mklink.getInputStream().readAllBytes();
+    assumeTrue(mklink.waitFor() == 0, "mklink /J failed");
     try {
-      assertThatThrownBy(() -> PackSource.fromDirectory(dir))
-          .isInstanceOfSatisfying(
-              PackSyntaxException.class,
-              e -> assertThat(e.code()).isEqualTo("PACK_FILE_TOO_LARGE"));
+      assertDirectoryCode(link, "PACK_NOT_REGULAR");
     } finally {
-      Files.deleteIfExists(big);
+      Files.delete(link); // removes the junction, not the target
     }
+    assertThat(elsewhere.resolve("pack.yaml")).exists();
   }
 
   @Test

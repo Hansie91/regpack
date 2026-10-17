@@ -26,8 +26,11 @@ import java.util.regex.Pattern;
  *
  * <p>The writer refuses ({@link IllegalArgumentException}) a table it cannot write faithfully: a
  * cell with a character the {@link PackText} policy refuses (LF, CR and TAB included), or a line
- * longer than {@link PackFormat#MAX_LINE_CHARS}. A table that came from {@code TableParser} or from
- * {@code TableCsv.importRows} never trips either.
+ * longer than {@link PackFormat#MAX_LINE_CHARS}. A table that came from {@code TableParser} on a
+ * YAML file never trips either (the YAML parser has the same caps). {@code TableCsv.importRows}
+ * applies the scalar cap to every cell and tries this writer before it returns a table, so it
+ * reports {@code CSV_CELL_TOO_LONG} or {@code TABLE_LINE_TOO_LONG} instead of returning a table
+ * that cannot be written.
  */
 public final class TableYamlWriter {
   /** A value that the parser reads back unchanged without quotes, in block and in flow context. */

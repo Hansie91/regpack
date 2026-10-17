@@ -341,6 +341,9 @@ class PackDigestTest {
             "limits.record_budget", edit(PACK, "record_budget: 100000", "record_budget: 100001")),
         change("limits.rule_nodes", edit(PACK, "rule_nodes: 600", "rule_nodes: 601")),
         change(
+            "limits.string_code_points",
+            edit(PACK, "rule_nodes: 600", "rule_nodes: 600, string_code_points: 4097")),
+        change(
             "limits.list_items", edit(PACK, "rule_nodes: 600", "rule_nodes: 600, list_items: 257")),
         change("engine_min", edit(PACK, "engine_min: 1.0.0+lib1", "engine_min: 1.0.1+lib1")),
         change(
@@ -481,5 +484,78 @@ class PackDigestTest {
   @Test
   void digestOfTheFixtureIsPinned() {
     assertThat(digest(PackFixtures.valid()).hex()).isEqualTo(FIXTURE_DIGEST);
+  }
+
+  // -- fields that the table above cannot reach -------------------------------------------------
+
+  private static PackFixtures withPointerFiles() {
+    return PackFixtures.valid()
+        .put("derive/d.yaml", "a: b\n")
+        .put("validate/v.yaml", "a: b\n")
+        .put("endpoints/e.yaml", "a: b\n")
+        .put("lifecycle.yaml", "business_key: [a]\n");
+  }
+
+  @Test
+  void everyReportPointerChangesTheDigest() {
+    // the files are in the pack in every case, so only the pointer of the report differs
+    Sha256 base = digest(withPointerFiles());
+    Set<String> seen = new HashSet<>();
+    seen.add(base.hex());
+    for (String pointer :
+        List.of(
+            "derive_tables: [derive/d.yaml]",
+            "validate: [validate/v.yaml]",
+            "endpoint_profiles: [endpoints/e.yaml]",
+            "lifecycle: lifecycle.yaml")) {
+      Sha256 digest =
+          digest(
+              withPointerFiles()
+                  .replace(
+                      PACK, "legs: [MARKET, CLIENT]", "legs: [MARKET, CLIENT]\n    " + pointer));
+      assertThat(digest).as(pointer).isNotEqualTo(base);
+      assertThat(seen.add(digest.hex())).as(pointer + " is distinct from the others").isTrue();
+    }
+  }
+
+  private static final String TWO_CITES_IN_ORDER =
+      "cite: [{source_id: fix-law, provision_path: fix/1, role: BASIS},"
+          + " {source_id: fix-law, provision_path: fix/2, role: BASIS}]";
+  private static final String TWO_CITES_SWAPPED =
+      "cite: [{source_id: fix-law, provision_path: fix/2, role: BASIS},"
+          + " {source_id: fix-law, provision_path: fix/1, role: BASIS}]";
+
+  @Test
+  void theOrderOfARowsCitationsIsContent() {
+    Sha256 inOrder =
+        digest(
+            PackFixtures.valid()
+                .replace(
+                    TABLE_A,
+                    "cite: [{source_id: fix-law, provision_path: fix/1, role: BASIS}]",
+                    TWO_CITES_IN_ORDER));
+    Sha256 swapped =
+        digest(
+            PackFixtures.valid()
+                .replace(
+                    TABLE_A,
+                    "cite: [{source_id: fix-law, provision_path: fix/1, role: BASIS}]",
+                    TWO_CITES_SWAPPED));
+    assertThat(swapped).isNotEqualTo(inOrder);
+  }
+
+  @Test
+  void theOrderOfATablesInputsIsNotContentButTheSetIs() {
+    Sha256 base = digest(PackFixtures.valid());
+    Sha256 two =
+        digest(
+            PackFixtures.valid()
+                .replace(TABLE_A, "inputs: [event.kind]", "inputs: [event.kind, event.tradedAt]"));
+    Sha256 reordered =
+        digest(
+            PackFixtures.valid()
+                .replace(TABLE_A, "inputs: [event.kind]", "inputs: [event.tradedAt, event.kind]"));
+    assertThat(two).isNotEqualTo(base);
+    assertThat(reordered).isEqualTo(two);
   }
 }

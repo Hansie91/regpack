@@ -1,5 +1,7 @@
 package dev.regpack.pack;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -19,11 +21,12 @@ import java.util.Optional;
  *       remains is a lone CR);
  *   <li>the noncharacters U+FDD0 to U+FDEF and U+xFFFE, U+xFFFF of every plane;
  *   <li>the default-ignorable code points that are not Cf: U+034F, U+115F to U+1160, U+17B4 to
- *       U+17B5, U+180B to U+180F, U+3164, U+FE00 to U+FE0F, U+FFA0 and U+E0000 to U+E0FFF.
+ *       U+17B5, U+180B to U+180F, U+3164, U+FE00 to U+FE0F, U+FFA0 and U+E0000 to U+E0FFF, and the
+ *       unassigned (Cn) default-ignorable U+2065 and U+FFF0 to U+FFF8.
  * </ul>
  *
- * Unassigned code points (Cn) and everything else, including the letters, digits, punctuation and
- * symbols of every script, are allowed.
+ * Other unassigned code points (Cn) and everything else, including the letters, digits, punctuation
+ * and symbols of every script, are allowed.
  */
 public final class PackText {
   /** The first offending code point of a text and its index (in UTF-16 units). */
@@ -46,6 +49,39 @@ public final class PackText {
       i += Character.charCount(cp);
     }
     return Optional.empty();
+  }
+
+  /**
+   * The first refused code point of a decoded JSON tree (strings, map keys and map values, lists,
+   * in iteration order; numbers, booleans and null are not text). The index is within the string
+   * that holds the code point.
+   */
+  public static Optional<Bad> firstBadInTree(Object tree) {
+    return switch (tree) {
+      case String text -> firstBad(text, false);
+      case Map<?, ?> map -> {
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+          Optional<Bad> bad = firstBadInTree(entry.getKey());
+          if (bad.isEmpty()) {
+            bad = firstBadInTree(entry.getValue());
+          }
+          if (bad.isPresent()) {
+            yield bad;
+          }
+        }
+        yield Optional.empty();
+      }
+      case List<?> list -> {
+        for (Object element : list) {
+          Optional<Bad> bad = firstBadInTree(element);
+          if (bad.isPresent()) {
+            yield bad;
+          }
+        }
+        yield Optional.empty();
+      }
+      default -> Optional.empty();
+    };
   }
 
   /** Whether the policy refuses one code point. */
@@ -76,6 +112,8 @@ public final class PackText {
         || cp == 0x3164
         || (cp >= 0xFE00 && cp <= 0xFE0F)
         || cp == 0xFFA0
+        || cp == 0x2065
+        || (cp >= 0xFFF0 && cp <= 0xFFF8)
         || (cp >= 0xE0000 && cp <= 0xE0FFF);
   }
 }

@@ -159,7 +159,7 @@ public final class PackGoldenLoader {
                   + PackProblem.excerpt(String.valueOf(e.getMessage()))));
       return;
     }
-    firstBadText(tree)
+    PackText.firstBadInTree(tree)
         .ifPresent(
             bad ->
                 problems.add(
@@ -259,34 +259,6 @@ public final class PackGoldenLoader {
 
   private static boolean blank(Object value) {
     return value == null || (value instanceof String text && text.isBlank());
-  }
-
-  private static Optional<PackText.Bad> firstBadText(Object tree) {
-    return switch (tree) {
-      case String text -> PackText.firstBad(text, false);
-      case Map<?, ?> map -> {
-        for (Map.Entry<?, ?> entry : map.entrySet()) {
-          Optional<PackText.Bad> bad = firstBadText(entry.getKey());
-          if (bad.isEmpty()) {
-            bad = firstBadText(entry.getValue());
-          }
-          if (bad.isPresent()) {
-            yield bad;
-          }
-        }
-        yield Optional.empty();
-      }
-      case List<?> list -> {
-        for (Object element : list) {
-          Optional<PackText.Bad> bad = firstBadText(element);
-          if (bad.isPresent()) {
-            yield bad;
-          }
-        }
-        yield Optional.empty();
-      }
-      default -> Optional.empty();
-    };
   }
 
   private static String hex(int codePoint) {

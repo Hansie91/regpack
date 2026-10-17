@@ -50,7 +50,8 @@ public final class Checksums {
     }
     String text;
     try {
-      text = source.text(PackSource.CHECKSUMS);
+      // the one place where CRLF becomes LF for this file (a lone CR stays and makes a bad line)
+      text = source.text(PackSource.CHECKSUMS).replace("\r\n", "\n");
     } catch (PackSyntaxException e) {
       problems.add(new PackProblem(e.code(), PackSource.CHECKSUMS, 0, "CHECKSUMS is not text"));
       return problems.sorted(PackSource.CHECKSUMS);

@@ -71,6 +71,10 @@ class PackTextTest {
         0x3164,
         0xFE00,
         0xFE0F,
+        0x2065, // unassigned, default-ignorable
+        0xFFF0,
+        0xFFF4,
+        0xFFF8, // unassigned, default-ignorable
         0xFFA0,
         0xE0000,
         0xE0100,
@@ -116,7 +120,10 @@ class PackTextTest {
         0xFDF0,
         0xFE10,
         0xFFA1,
-        0xFFFD, // neighbours of the refused ones
+        0xFFEF,
+        0xFFFC,
+        0xFFFD,
+        0x2800, // braille blank: assigned and not default-ignorable, so accepted
         0x4E2D,
         0xAC00,
         0x1F600,

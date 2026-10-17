@@ -175,4 +175,28 @@ class ChecksumsTest {
     assertThat(codes(problems))
         .containsExactly("CHECKSUM_MISMATCH", "CHECKSUM_FILE_MISSING", "CHECKSUM_UNLISTED_FILE");
   }
+
+  @Test
+  void aChecksumsFileThatIsNotTextIsAProblemNotAPass() {
+    byte[] bom = {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
+    byte[] invalid = {'a', (byte) 0xFF, '\n'};
+    for (Map.Entry<byte[], String> bad :
+        Map.of(bom, "PACK_BOM", invalid, "PACK_BAD_UTF8").entrySet()) {
+      Map<String, byte[]> files = new LinkedHashMap<>();
+      files.put("a.yaml", "alpha\n".getBytes(UTF_8));
+      files.put("CHECKSUMS", bad.getKey());
+      List<PackProblem> problems = Checksums.verify(PackSource.of(files));
+      assertThat(codes(problems)).containsExactly(bad.getValue());
+      assertThat(problems.get(0).path()).isEqualTo("CHECKSUMS");
+    }
+  }
+
+  @Test
+  void aCrCrLfChecksumsLineIsMalformedAndACrLfOneIsRead() {
+    Map<String, String> f = files("a.yaml", "alpha\n");
+    String checksums = Checksums.render(source(f));
+    assertThat(Checksums.verify(withChecksums(f, checksums.replace("\n", "\r\n")))).isEmpty();
+    assertThat(codes(Checksums.verify(withChecksums(f, checksums.replace("\n", "\r\r\n")))))
+        .contains("CHECKSUMS_MALFORMED");
+  }
 }

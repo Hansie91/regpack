@@ -44,20 +44,26 @@ import java.util.Set;
  *
  * <p>A blank line is a record of one empty cell, so it is refused with {@code CSV_CELL_COUNT} (also
  * a second newline at the end of the text); only a missing final newline is tolerated. A stage-one
- * problem ({@code CSV_COLUMNS}, {@code CSV_QUOTE}, {@code CSV_CELL_COUNT}, {@code SET_INVALID})
- * stops the later stages: the parser and the table checks do not run until the CSV itself is well
- * formed. The size of the text is not limited here; the caller reads the file with the size cap of
- * the pack format. At most {@code PackFormat.MAX_PROBLEMS_PER_FILE} problems are reported, then one
- * {@code PROBLEMS_TRUNCATED}, and reading stops once more records than that have a wrong number of
- * cells.
+ * problem ({@code CSV_COLUMNS}, {@code CSV_QUOTE}, {@code CSV_CELL_COUNT}, {@code
+ * CSV_CELL_TOO_LONG}, {@code SET_INVALID}) stops the later stages: the parser and the table checks
+ * do not run until the CSV itself is well formed. The size of the text is not limited here; the
+ * caller reads the file with the size cap of the pack format. At most {@code
+ * PackFormat.MAX_PROBLEMS_PER_FILE} problems are reported, then one {@code PROBLEMS_TRUNCATED}, and
+ * reading stops once more records than that have a wrong number of cells.
  *
  * <p>{@link #export} does not escape spreadsheet formula characters: the guarantee that no cell
  * begins with {@code = + - @} (PF16) rests on the table having passed {@link TableChecks} ({@code
  * WHEN_FORMULA_CHARACTER}); every other column is shape-limited to start with a letter or a digit.
  *
- * <p>Extra problem codes: {@code CSV_COLUMNS}, {@code CSV_QUOTE} and {@code CSV_CELL_COUNT}. A
- * problem of the parser carries the line of the CSV row it concerns (the header is line 1); the
- * table checks have no source lines, so their problems carry line 0.
+ * <p>A cell over {@link PackFormat#MAX_SCALAR_CHARS} characters is {@code CSV_CELL_TOO_LONG}, and a
+ * table whose canonical YAML would need a line over {@link PackFormat#MAX_LINE_CHARS} characters is
+ * {@code TABLE_LINE_TOO_LONG}, so an imported table can always be written by {@link
+ * TableYamlWriter} and read back by the pack loader.
+ *
+ * <p>Extra problem codes: {@code CSV_COLUMNS}, {@code CSV_QUOTE}, {@code CSV_CELL_COUNT}, {@code
+ * CSV_CELL_TOO_LONG} and {@code TABLE_LINE_TOO_LONG}. A problem of the parser carries the line of
+ * the CSV row it concerns (the header is line 1); the table checks have no source lines, so their
+ * problems carry line 0.
  */
 public final class TableCsv {
   /** The columns, in the order of the export. */
@@ -236,6 +242,21 @@ public final class TableCsv {
       return Optional.empty();
     }
     later.addAll(TableChecks.check(parsed.get()));
+    if (later.isEmpty()) {
+      try {
+        TableYamlWriter.write(parsed.get());
+      } catch (IllegalArgumentException e) {
+        // the cells are within the scalar cap but a written line (key, quotes, collection) is not
+        later.add(
+            new PackProblem(
+                "TABLE_LINE_TOO_LONG",
+                path,
+                0,
+                "a row cannot be written in lines of at most "
+                    + PackFormat.MAX_LINE_CHARS
+                    + " characters"));
+      }
+    }
     return parsed;
   }
 
@@ -282,6 +303,19 @@ public final class TableCsv {
     String[] cell = new String[COLUMNS.size()];
     for (int c = 0; c < cell.length; c++) {
       cell[c] = rec.cells().get(index[c]);
+      if (cell[c].length() > PackFormat.MAX_SCALAR_CHARS) {
+        // the YAML parser refuses such a scalar, so the table could never be loaded from a file
+        found.add(
+            new PackProblem(
+                "CSV_CELL_TOO_LONG",
+                path,
+                line,
+                "the cell of column '"
+                    + COLUMNS.get(c)
+                    + "' has more than "
+                    + PackFormat.MAX_SCALAR_CHARS
+                    + " characters"));
+      }
     }
     Map<String, YamlNode> row = new LinkedHashMap<>();
     for (int c = 0; c <= 6; c++) {

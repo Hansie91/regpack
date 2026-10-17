@@ -19,6 +19,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -42,9 +43,10 @@ import java.util.regex.Pattern;
  * #text(String)} adds {@code PACK_BOM} and {@code PACK_BAD_UTF8}.
  *
  * <p>File rules: segments {@code [A-Za-z0-9_.-]+} that neither start nor end with a dot, no empty
- * segment, no backslash, at most 256 characters; extension {@code .yaml} or {@code .json}, or
- * exactly {@code CHECKSUMS} or {@code ATTESTATION} at the root; at most {@link
- * PackFormat#MAX_FILES} files, {@link PackFormat#MAX_FILE_BYTES} each and {@link
+ * segment, no backslash, at most 256 characters and {@value #MAX_DIRECTORY_DEPTH} directory levels
+ * (on every entry point: {@link #of}, {@link #fromDirectory} and {@link #fromClasspath}); extension
+ * {@code .yaml} or {@code .json}, or exactly {@code CHECKSUMS} or {@code ATTESTATION} at the root;
+ * at most {@link PackFormat#MAX_FILES} files, {@link PackFormat#MAX_FILE_BYTES} each and {@link
  * PackFormat#MAX_TOTAL_BYTES} together; no two paths equal ignoring case; no segment whose base
  * name (before the first dot) is a Windows device name.
  */
@@ -56,7 +58,7 @@ public final class PackSource {
   public static final String ATTESTATION = "ATTESTATION";
 
   private static final int MAX_PATH_CHARS = 256;
-  private static final int MAX_DIRECTORY_DEPTH = 16;
+  static final int MAX_DIRECTORY_DEPTH = 16;
   private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
   private static final Set<String> DEVICE_NAMES = deviceNames();
 
@@ -131,17 +133,31 @@ public final class PackSource {
     return new PackSource(Collections.unmodifiableSortedMap(copy));
   }
 
+  /** One reason to refuse a directory entry; the smallest by path, then code, is reported. */
+  private record Violation(String path, String code) implements Comparable<Violation> {
+    @Override
+    public int compareTo(Violation other) {
+      int byPath = path.compareTo(other.path);
+      return byPath != 0 ? byPath : code.compareTo(other.code);
+    }
+  }
+
   /**
-   * Reads a directory: regular files only (a symbolic link or any other reparse point is {@code
-   * PACK_NOT_REGULAR}), counts and sizes checked from the file attributes before any file is read,
-   * at most {@link PackFormat#MAX_FILE_BYTES}+1 bytes read per file.
+   * Reads a directory: regular files only (a symbolic link or any other reparse point, the root
+   * included, is {@code PACK_NOT_REGULAR}), counts and sizes checked from the file attributes
+   * before any file is read, at most {@link PackFormat#MAX_FILE_BYTES}+1 bytes read per file. The
+   * walk collects every violation of an entry before it throws, so the error reported is the one of
+   * the smallest path (then code) whatever order the file system lists the entries in; the count
+   * limits come first, then the entries, then the total size in path order.
    */
   public static PackSource fromDirectory(Path dir) {
     Objects.requireNonNull(dir, "dir");
-    Map<String, byte[]> files = new TreeMap<>();
+    Map<String, Path> found = new TreeMap<>();
+    Map<String, Long> sizes = new HashMap<>();
+    List<Violation> violations = new ArrayList<>();
     int[] fileCount = {0};
     int[] directoryCount = {0};
-    long[] total = {0};
+    boolean[] tooMany = {false};
     try {
       Files.walkFileTree(
           dir,
@@ -151,19 +167,32 @@ public final class PackSource {
             @Override
             public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) {
               if (d.equals(dir)) {
+                if (attrs.isSymbolicLink() || attrs.isOther()) {
+                  // a Windows junction is a directory that is also "other"
+                  throw refuse("PACK_NOT_REGULAR", String.valueOf(dir.getFileName()));
+                }
                 return FileVisitResult.CONTINUE;
               }
+              String rel = relative(dir, d);
               if (attrs.isSymbolicLink() || attrs.isOther()) {
-                // a Windows junction is a directory that is also "other": do not descend into it
-                throw refuse("PACK_NOT_REGULAR", relative(dir, d));
+                // do not descend into it
+                violations.add(new Violation(rel, "PACK_NOT_REGULAR"));
+                return FileVisitResult.SKIP_SUBTREE;
               }
               if (++directoryCount[0] > PackFormat.MAX_FILES) {
-                throw refuse("PACK_TOO_MANY_FILES", relative(dir, d));
+                tooMany[0] = true;
+                return FileVisitResult.TERMINATE;
               }
               if (dir.relativize(d).getNameCount() > MAX_DIRECTORY_DEPTH) {
-                throw refuse("PATH_INVALID", relative(dir, d));
+                violations.add(new Violation(rel, "PATH_INVALID"));
+                return FileVisitResult.SKIP_SUBTREE;
               }
-              checkDirectoryName(relative(dir, d));
+              try {
+                checkDirectoryName(rel);
+              } catch (PackSyntaxException e) {
+                violations.add(new Violation(rel, e.code()));
+                return FileVisitResult.SKIP_SUBTREE;
+              }
               return FileVisitResult.CONTINUE;
             }
 
@@ -175,25 +204,27 @@ public final class PackSource {
               }
               String rel = relative(dir, file);
               if (++fileCount[0] > PackFormat.MAX_FILES) {
-                throw refuse("PACK_TOO_MANY_FILES", rel);
+                tooMany[0] = true;
+                return FileVisitResult.TERMINATE;
               }
               BasicFileAttributes attrs =
                   Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
               if (!attrs.isRegularFile()) {
-                throw refuse("PACK_NOT_REGULAR", rel);
+                violations.add(new Violation(rel, "PACK_NOT_REGULAR"));
+                return FileVisitResult.CONTINUE;
               }
-              checkPath(rel);
-              long size = attrs.size();
-              if (size > PackFormat.MAX_FILE_BYTES) {
-                throw refuse("PACK_FILE_TOO_LARGE", rel);
+              try {
+                checkPath(rel);
+              } catch (PackSyntaxException e) {
+                violations.add(new Violation(rel, e.code()));
+                return FileVisitResult.CONTINUE;
               }
-              total[0] += size;
-              if (total[0] > PackFormat.MAX_TOTAL_BYTES) {
-                throw refuse("PACK_TOO_LARGE", rel);
+              if (attrs.size() > PackFormat.MAX_FILE_BYTES) {
+                violations.add(new Violation(rel, "PACK_FILE_TOO_LARGE"));
+                return FileVisitResult.CONTINUE;
               }
-              try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-                files.put(rel, readBounded(in, rel));
-              }
+              found.put(rel, file);
+              sizes.put(rel, attrs.size());
               return FileVisitResult.CONTINUE;
             }
 
@@ -202,10 +233,30 @@ public final class PackSource {
               throw exc;
             }
           });
+      if (tooMany[0]) {
+        throw refuse("PACK_TOO_MANY_FILES", "over " + PackFormat.MAX_FILES);
+      }
+      if (!violations.isEmpty()) {
+        Violation first = Collections.min(violations);
+        throw refuse(first.code(), first.path());
+      }
+      long total = 0;
+      for (String rel : found.keySet()) {
+        total += sizes.get(rel);
+        if (total > PackFormat.MAX_TOTAL_BYTES) {
+          throw refuse("PACK_TOO_LARGE", rel);
+        }
+      }
+      Map<String, byte[]> files = new TreeMap<>();
+      for (Map.Entry<String, Path> entry : found.entrySet()) {
+        try (InputStream in = Files.newInputStream(entry.getValue(), LinkOption.NOFOLLOW_LINKS)) {
+          files.put(entry.getKey(), readBounded(in, entry.getKey()));
+        }
+      }
+      return of(files);
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
-    return of(files);
   }
 
   /**
@@ -290,6 +341,9 @@ public final class PackSource {
   /** Validates a whole file path: segments, length, extension, reserved names. */
   static void checkPath(String path) {
     checkSegments(path);
+    if (path.chars().filter(c -> c == '/').count() > MAX_DIRECTORY_DEPTH) {
+      throw refuse("PATH_INVALID", path); // more directory levels than a pack may have
+    }
     int slash = path.lastIndexOf('/');
     String name = path.substring(slash + 1);
     boolean root = slash < 0;
@@ -352,7 +406,11 @@ public final class PackSource {
     return data.clone();
   }
 
-  /** The text of a file: strict UTF-8, no byte order mark, CRLF read as LF (a lone CR stays). */
+  /**
+   * The text of a file: strict UTF-8, no byte order mark, the line ends untouched. CRLF is read as
+   * LF exactly once, by the consumer: {@link dev.regpack.pack.yaml.StrictYaml#parse} (which also
+   * refuses any other CR), {@link Checksums#verify} for CHECKSUMS; JSON reads CR as white space.
+   */
   public String text(String path) {
     byte[] data = files.get(path);
     if (data == null) {
@@ -376,6 +434,6 @@ public final class PackSource {
     } catch (CharacterCodingException e) {
       throw refuse("PACK_BAD_UTF8", path);
     }
-    return text.replace("\r\n", "\n");
+    return text;
   }
 }
