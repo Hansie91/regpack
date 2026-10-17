@@ -20,6 +20,11 @@ import org.junit.jupiter.api.Test;
  * with a code; it is never labelled consistency-only silently.
  */
 class PackGoldenStrictnessTest {
+  /**
+   * U+202E RIGHT-TO-LEFT OVERRIDE, built from its code point so no bidi control sits in the source.
+   */
+  private static final String RLO = new String(Character.toChars(0x202E));
+
   private static final String PREFIX = "tests/golden/";
   private static final String CONSISTENCY = ",\"provenance\":{\"kind\":\"CONSISTENCY_ONLY\"}";
   private static final ReviewerRegistry REGISTRY =
@@ -102,7 +107,7 @@ class PackGoldenStrictnessTest {
     assertThat(has(loaded, "TEXT_BAD_CHARACTER", PREFIX + "GC-3.json")).isTrue();
     assertThat(loaded.cases()).isEmpty();
     assertThat(loaded.problems())
-        .allSatisfy(p -> assertThat(p.message()).doesNotContain("\u001b").doesNotContain("‮"));
+        .allSatisfy(p -> assertThat(p.message()).doesNotContain("\u001b").doesNotContain(RLO));
   }
 
   @Test

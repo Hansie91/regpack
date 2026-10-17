@@ -26,6 +26,11 @@ import org.junit.jupiter.api.Test;
  * {@code explain} on the sample pack: the static view of a rule and the Tier-2 view of an event.
  */
 class PackExplainerTest {
+  /**
+   * U+202E RIGHT-TO-LEFT OVERRIDE, built from its code point so no bidi control sits in the source.
+   */
+  private static final String RLO = new String(Character.toChars(0x202E));
+
   private static final Instant TRADED_AT = Instant.parse("2026-10-09T09:30:00.123456Z");
   private static final Instant EVALUATED_AT = Instant.parse("2026-10-09T10:00:00Z");
   private static final IngestKey KEY = new IngestKey("toy-source", "rec-1", 1);
@@ -235,9 +240,9 @@ class PackExplainerTest {
             "Tier 2: not re-evaluated, the archived build 2.0.0+lib1 is required"
                 + " (current engine 1.0.0+lib1)");
     // an unparsable stored build text is echoed bounded and escaped
-    String hostile = PackExplainer.tier2Line("x\n‮" + "y".repeat(500), current);
+    String hostile = PackExplainer.tier2Line("x\n" + RLO + "y".repeat(500), current);
     assertThat(hostile).startsWith("Tier 2: not re-evaluated, the archived build ");
-    assertThat(hostile).doesNotContain("\n").doesNotContain("‮").hasSizeLessThan(200);
+    assertThat(hostile).doesNotContain("\n").doesNotContain(RLO).hasSizeLessThan(200);
   }
 
   @Test
@@ -321,11 +326,11 @@ class PackExplainerTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("S-NOPE");
     // the id is untrusted text: bounded and escaped in the message
-    assertThatThrownBy(() -> PackExplainer.explainRule(pack, "x\n‮" + "y".repeat(500)))
+    assertThatThrownBy(() -> PackExplainer.explainRule(pack, "x\n" + RLO + "y".repeat(500)))
         .isInstanceOf(IllegalArgumentException.class)
         .satisfies(
             e -> {
-              assertThat(e.getMessage()).doesNotContain("\n").doesNotContain("‮");
+              assertThat(e.getMessage()).doesNotContain("\n").doesNotContain(RLO);
               assertThat(e.getMessage()).hasSizeLessThan(200);
             });
     assertThatThrownBy(() -> PackExplainer.explainRule(pack, "s-n03-novation"))

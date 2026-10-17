@@ -10,13 +10,21 @@ import org.junit.jupiter.api.Test;
 
 /** Plan Convention 6: problems are tokens with bounded, escaped text. */
 class PackProblemTest {
+  /**
+   * U+202E RIGHT-TO-LEFT OVERRIDE, built from its code point so no bidi control sits in the source.
+   */
+  private static final String RLO = new String(Character.toChars(0x202E));
+
+  /** U+200B ZERO WIDTH SPACE, built from its code point. */
+  private static final String ZWSP = new String(Character.toChars(0x200B));
+
   private static boolean printableAscii(String text) {
     return text.chars().allMatch(c -> c >= 0x20 && c <= 0x7E);
   }
 
   @Test
   void messageAndPathAreBoundedAndEscapedWhateverTheCaller() {
-    String hostile = "a‮b\n\t\u0000​" + "x".repeat(5_000) + "😀";
+    String hostile = "a" + RLO + "b\n\t\u0000" + ZWSP + "x".repeat(5_000) + "😀";
     PackProblem p = new PackProblem("CHECKSUM_MISMATCH", hostile, 7, hostile);
 
     assertThat(p.path().length()).isLessThanOrEqualTo(128);
@@ -41,7 +49,7 @@ class PackProblemTest {
   void excerptIsEscapedAndCutToTwentyFourCharacters() {
     assertThat(PackProblem.excerpt("short")).isEqualTo("short");
     assertThat(PackProblem.excerpt("y".repeat(100))).isEqualTo("y".repeat(24));
-    String hostile = "‮\u0007" + "z".repeat(50);
+    String hostile = RLO + "\u0007" + "z".repeat(50);
     String shown = PackProblem.excerpt(hostile);
     assertThat(shown).hasSizeLessThanOrEqualTo(24);
     assertThat(printableAscii(shown)).isTrue();

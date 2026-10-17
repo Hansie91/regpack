@@ -26,6 +26,9 @@ import org.junit.jupiter.api.Test;
 
 /** The loader: cross-file checks, fail closed (companion section 5.4; plan task T9). */
 class PackLoaderTest {
+  /** U+FEFF BYTE ORDER MARK, built from its code point. */
+  private static final String BOM = new String(Character.toChars(0xFEFF));
+
   private static LoadResult load(PackFixtures fixture) {
     return fixture.load();
   }
@@ -292,7 +295,7 @@ class PackLoaderTest {
     assertThat(tab.problems().get(0).line()).isEqualTo(2);
 
     LoadResult bom =
-        load(PackFixtures.valid().put(TABLE_B, "﻿" + PackFixtures.valid().text(TABLE_B)));
+        load(PackFixtures.valid().put(TABLE_B, BOM + PackFixtures.valid().text(TABLE_B)));
     assertThat(codes(bom)).contains("PACK_BOM");
     assertThat(bom.pack()).isEmpty();
   }
