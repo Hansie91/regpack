@@ -23,6 +23,7 @@ import dev.regpack.ports.exec.CostBudget;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -298,5 +299,179 @@ class PackScopeEngineTest {
     assertThat(body.path()).extracting(PathStep::ruleId).noneMatch(id -> id.contains("SECRET"));
     assertThat(List.copyOf(body.citations()).toString()).doesNotContain("SECRET");
     // the PackExplainer.explainEvent assertion is added in T18, which creates the class
+  }
+
+  // ---- T17: the poison circuit (spec 7.3, 14.1); every number here is a count, never a time ----
+
+  private static final String BIG_LIST_WHEN =
+      "instrument.isin in ['a','b','c','d','e','f','g','h']";
+
+  private static PackRegime regimeOf(LoadedPack pack, RuleCircuit circuit) {
+    return PackRegime.create(
+        pack, "sample.s0", new MeteredExecutor(), Rulings.provisional(), Optional.of(circuit));
+  }
+
+  private static LoadedPack overBudgetPack() {
+    return PackBuilder.sample()
+        .limits("record_budget: 6")
+        .scope(PackBuilder.Rule.of("R-BIG", BIG_LIST_WHEN))
+        .load();
+  }
+
+  /** Reason and flags of five records of the seeded over-budget rule, with a fresh circuit. */
+  private static List<String> fiveOverBudgetRecords() {
+    PackRegime provider = regimeOf(overBudgetPack(), new RuleCircuit(4, 50));
+    List<String> seen = new ArrayList<>();
+    for (int i = 0; i < 5; i++) {
+      DecisionBody body = decide(provider, equityOnVenue(), provider.recordBudget().maxUnits());
+      seen.add(body.reasonCode().value() + " " + body.flags());
+    }
+    return seen;
+  }
+
+  @Test
+  void seededOverBudgetRuleOpensItsCircuitDeterministically() {
+    List<String> first = fiveOverBudgetRecords();
+
+    assertThat(first.subList(0, 4))
+        .allSatisfy(line -> assertThat(line).startsWith("EXEC_BUDGET [rule_id=R-BIG, cost_units="));
+    assertThat(first.get(4)).isEqualTo("EXEC_CIRCUIT_OPEN [rule_id=R-BIG, circuit=open]");
+    // a second run with a fresh regime and circuit gives the identical sequence
+    assertThat(fiveOverBudgetRecords()).isEqualTo(first);
+  }
+
+  @Test
+  void aClosedCircuitEvaluatesTheRuleAgain() {
+    RuleCircuit circuit = new RuleCircuit(4, 50);
+    PackRegime provider = regimeOf(overBudgetPack(), circuit);
+    long budget = provider.recordBudget().maxUnits();
+    for (int i = 0; i < 4; i++) {
+      assertThat(decide(provider, equityOnVenue(), budget).reasonCode())
+          .isEqualTo(new ReasonCode("EXEC_BUDGET"));
+    }
+    assertThat(decide(provider, equityOnVenue(), budget).reasonCode())
+        .isEqualTo(new ReasonCode("EXEC_CIRCUIT_OPEN"));
+
+    circuit.close("R-BIG");
+
+    DecisionBody again = decide(provider, equityOnVenue(), budget);
+    assertThat(again.reasonCode()).isEqualTo(new ReasonCode("EXEC_BUDGET"));
+    assertThat(again.flags()).hasSize(3).first().isEqualTo("rule_id=R-BIG");
+    assertThat(again.flags()).last().isEqualTo("limit=6");
+    assertThat(circuit.isOpen("R-BIG")).isFalse();
+  }
+
+  @Test
+  void anOpenCircuitIsReportedAsExecCircuitOpenNotExecError() {
+    RuleCircuit circuit = new RuleCircuit(1, 1);
+    PackRegime provider =
+        regimeOf(
+            PackBuilder.sample().scope(PackBuilder.Rule.of("R-FAIL", "1 / 0 == 1")).load(),
+            circuit);
+
+    DecisionBody failing = decide(provider, equityOnVenue(), 100);
+    DecisionBody open = decide(provider, equityOnVenue(), 100);
+
+    assertThat(failing.reasonCode()).isEqualTo(new ReasonCode("EXEC_ERROR"));
+    assertThat(circuit.isOpen("R-FAIL")).isTrue();
+    assertThat(open.reasonCode()).isEqualTo(new ReasonCode("EXEC_CIRCUIT_OPEN"));
+    assertThat(open.outcome()).isEqualTo(Outcome.UNDETERMINED);
+    assertThat(open.node()).isEqualTo("EXEC");
+    assertThat(open.ruleIdsHit()).isEmpty();
+    assertThat(open.legs()).isEmpty();
+    assertThat(open.attributes()).isEmpty();
+    assertThat(open.citations()).containsExactly(CATCH_ALL_CITATION);
+    assertThat(open.flags()).containsExactly("rule_id=R-FAIL", "circuit=open");
+    assertThat(open.path()).as("no charge and no path step for the open rule").isEmpty();
+  }
+
+  @Test
+  void theFlagNamesTheOpenRuleNotThePreviousRow() {
+    RuleCircuit circuit = new RuleCircuit(1, 1);
+    PackRegime provider =
+        regimeOf(
+            PackBuilder.sample()
+                .scope(
+                    PackBuilder.Rule.of("R-FIRST", "event.kind == 'NOVATION'"),
+                    PackBuilder.Rule.of("R-SECOND", "1 / 0 == 1"))
+                .load(),
+            circuit);
+    decide(provider, equityOnVenue(), 100);
+    assertThat(circuit.openRules()).containsExactly("R-SECOND");
+
+    DecisionBody open = decide(provider, equityOnVenue(), 100);
+
+    assertThat(open.reasonCode()).isEqualTo(new ReasonCode("EXEC_CIRCUIT_OPEN"));
+    assertThat(open.flags()).containsExactly("rule_id=R-SECOND", "circuit=open");
+    // the first row ran and missed; the open row left no step
+    assertThat(open.path()).hasSize(1);
+    assertThat(open.path().get(0).ruleId()).isEqualTo("R-FIRST");
+  }
+
+  @Test
+  void aRecordThatDoesNotReachTheOpenRuleIsDecidedNormally() {
+    RuleCircuit circuit = new RuleCircuit(1, 1);
+    PackRegime provider =
+        regimeOf(
+            PackBuilder.sample()
+                .scope(
+                    PackBuilder.Rule.of("R-NOVATION", "event.kind == 'NOVATION'")
+                        .outcome("N03", "DO_NOT_REPORT", "SAMPLE.N03.EXCLUDED"),
+                    PackBuilder.Rule.of("R-FAIL", "1 / 0 == 1"))
+                .load(),
+            circuit);
+    decide(provider, equityOnVenue(), 100);
+    assertThat(circuit.isOpen("R-FAIL")).isTrue();
+
+    DecisionBody body =
+        decide(
+            provider,
+            execution(LifecycleKind.NOVATION, AssetClass.EQUITY, true, PartyKind.LEGAL_ENTITY),
+            100);
+
+    assertThat(body.reasonCode()).isEqualTo(new ReasonCode("SAMPLE.N03.EXCLUDED"));
+    assertThat(body.ruleIdsHit()).containsExactly("R-NOVATION");
+  }
+
+  @Test
+  void successfulEvaluationsAreRecordedAndSkippedRowsAreNot() {
+    // n = 2 in m = 3: a failure every third record never puts two failures in one window
+    RuleCircuit circuit = new RuleCircuit(2, 3);
+    PackRegime provider =
+        regimeOf(
+            PackBuilder.sample()
+                .scope(
+                    PackBuilder.Rule.of("R-FUTURE", "1 / 0 == 1").validFrom("2030-01-01"),
+                    PackBuilder.Rule.of("R-MIXED", "event.kind == 'NEW' ? 1 / 0 == 1 : true"))
+                .load(),
+            circuit);
+    CanonicalExecution failing = equityOnVenue();
+    CanonicalExecution passing =
+        execution(LifecycleKind.NOVATION, AssetClass.EQUITY, true, PartyKind.LEGAL_ENTITY);
+    for (int i = 0; i < 4; i++) {
+      assertThat(decide(provider, failing, 100).reasonCode())
+          .isEqualTo(new ReasonCode("EXEC_ERROR"));
+      decide(provider, passing, 100);
+      decide(provider, passing, 100);
+    }
+
+    assertThat(circuit.openEvents()).isZero();
+    assertThat(circuit.isOpen("R-FUTURE")).isFalse();
+
+    // two failures in a row put two failures in one window
+    decide(provider, failing, 100);
+    decide(provider, failing, 100);
+    assertThat(circuit.openRules()).containsExactly("R-MIXED");
+  }
+
+  @Test
+  void aProviderWithoutACircuitNeverOpensOne() {
+    PackRegime provider =
+        regimeOf(PackBuilder.sample().scope(PackBuilder.Rule.of("R-FAIL", "1 / 0 == 1")).load());
+
+    for (int i = 0; i < 100; i++) {
+      assertThat(decide(provider, equityOnVenue(), 100).reasonCode())
+          .isEqualTo(new ReasonCode("EXEC_ERROR"));
+    }
   }
 }

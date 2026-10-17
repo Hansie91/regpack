@@ -18,7 +18,7 @@ import org.junit.jupiter.api.io.TempDir;
  * focus RF7, PF9). The budget tests are the toy-program {@code MeteredExecutorTest}, the seeded
  * over-budget cases of {@code ScopeEngineTest} and {@code PackScopeEngineTest}, the interpreter
  * test {@code PackProgramTest} and the expression layer's {@code CostTest} and {@code
- * AmplificationTest}. The poison circuit's {@code RuleCircuitTest} joins the list in task T17.
+ * AmplificationTest}, and the poison circuit's {@code RuleCircuitTest}.
  */
 class ExecutorBudgetTestsAreWallClockFreeTest {
   private static final List<String> SCANNED =
@@ -28,7 +28,8 @@ class ExecutorBudgetTestsAreWallClockFreeTest {
           "PackScopeEngineTest",
           "PackProgramTest",
           "CostTest",
-          "AmplificationTest");
+          "AmplificationTest",
+          "RuleCircuitTest");
 
   @Test
   void budgetTestsUseNoWallClock(@TempDir Path tmp) throws IOException {

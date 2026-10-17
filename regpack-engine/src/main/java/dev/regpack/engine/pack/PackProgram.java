@@ -4,6 +4,7 @@ import dev.regpack.engine.expr.ErrorKind;
 import dev.regpack.engine.expr.ExprException;
 import dev.regpack.pack.model.TableRow;
 import dev.regpack.pack.model.Validity;
+import dev.regpack.ports.exec.BudgetExceededException;
 import dev.regpack.ports.exec.CostMeter;
 import dev.regpack.ports.exec.RuleEvaluationException;
 import dev.regpack.ports.exec.RuleProgram;
@@ -70,19 +71,54 @@ public final class PackProgram implements RuleProgram<Bindings, PackProgram.Deci
     }
   }
 
+  /**
+   * Thrown, wrapped in a {@link RuleEvaluationException}, when a record reaches a row whose poison
+   * circuit is open (spec 7.3). The executor reports it as a failed evaluation of the row with the
+   * error class {@code CircuitOpenException}, which {@link PackRegime} maps to {@code
+   * EXEC_CIRCUIT_OPEN}. It carries no stack trace: a poisoned rule meets every record.
+   */
+  public static final class CircuitOpenException extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
+    private final String ruleId;
+
+    public CircuitOpenException(String ruleId) {
+      super(
+          "the circuit of rule " + Objects.requireNonNull(ruleId, "ruleId") + " is open",
+          null,
+          false,
+          false);
+      this.ruleId = ruleId;
+    }
+
+    /** The row whose circuit is open. */
+    public String ruleId() {
+      return ruleId;
+    }
+  }
+
   private final CompiledPack pack;
   private final boolean fullTrace;
+  private final Optional<RuleCircuit> circuit;
   private final List<RowTrace> rowTraces = new ArrayList<>();
   private Optional<ErrorKind> lastErrorKind = Optional.empty();
+
+  /** A program without a poison circuit. */
+  public PackProgram(CompiledPack pack, boolean fullTrace) {
+    this(pack, fullTrace, Optional.empty());
+  }
 
   /**
    * @param pack the compiled report
    * @param fullTrace whether to keep a {@link RowTrace} for every evaluated row (for {@code
    *     explain}); the executor's own path is recorded either way
+   * @param circuit the poison circuit shared by the evaluations of this report: every row that is
+   *     evaluated is recorded in it, and a row whose circuit is open is not evaluated
    */
-  public PackProgram(CompiledPack pack, boolean fullTrace) {
+  public PackProgram(CompiledPack pack, boolean fullTrace, Optional<RuleCircuit> circuit) {
     this.pack = Objects.requireNonNull(pack, "pack");
     this.fullTrace = fullTrace;
+    this.circuit = Objects.requireNonNull(circuit, "circuit");
   }
 
   @Override
@@ -157,16 +193,25 @@ public final class PackProgram implements RuleProgram<Bindings, PackProgram.Deci
 
   private boolean matches(CompiledPack.Row row, Bindings input, CostMeter meter, Trace trace) {
     meter.enter(row.id());
+    if (circuit.isPresent() && circuit.get().isOpen(row.id())) {
+      // no charge and no path step: the executor names this row, not the previous one
+      throw new RuleEvaluationException(row.id(), new CircuitOpenException(row.id()));
+    }
     long before = meter.used();
-    meter.charge(1);
     boolean matched;
     try {
+      meter.charge(1);
       // Fail closed (I5): a non-bool result is an error, never a silent skip to the next row.
       if (!(row.when().evaluate(input, meter) instanceof BoolValue result)) {
         throw new ExprException(ErrorKind.TYPE, "when must be bool");
       }
       matched = result.value();
+    } catch (BudgetExceededException e) {
+      // blamed on the row that was running when the budget ran out
+      circuit.ifPresent(c -> c.record(row.id(), true));
+      throw e;
     } catch (ExprException e) {
+      circuit.ifPresent(c -> c.record(row.id(), true));
       if (fullTrace) {
         rowTraces.add(
             new RowTrace(
@@ -178,6 +223,7 @@ public final class PackProgram implements RuleProgram<Bindings, PackProgram.Deci
       }
       throw failed(row.id(), e);
     }
+    circuit.ifPresent(c -> c.record(row.id(), false));
     long units = meter.used() - before;
     trace.step(row.id(), matched, units);
     if (fullTrace) {

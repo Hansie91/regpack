@@ -53,20 +53,29 @@ public final class PackRegime implements RegimeProvider {
   private static final String NODE_EXEC = "EXEC";
   private static final ReasonCode EXEC_BUDGET = new ReasonCode("EXEC_BUDGET");
   private static final ReasonCode EXEC_ERROR = new ReasonCode("EXEC_ERROR");
+  private static final ReasonCode EXEC_CIRCUIT_OPEN = new ReasonCode("EXEC_CIRCUIT_OPEN");
+  private static final String CIRCUIT_OPEN_CLASS =
+      PackProgram.CircuitOpenException.class.getSimpleName();
   private static final int MAX_PROBLEMS_SHOWN = 8;
 
   private final CompiledPack compiled;
   private final PackManifest manifest;
   private final Executor executor;
+  private final Optional<RuleCircuit> circuit;
   private final DecisionContext decisionContext;
   private final Map<String, List<Citation>> citations;
   private final List<Citation> catchAllCitations;
 
   private PackRegime(
-      CompiledPack compiled, LoadedPack pack, Executor executor, DecisionContext context) {
+      CompiledPack compiled,
+      LoadedPack pack,
+      Executor executor,
+      Optional<RuleCircuit> circuit,
+      DecisionContext context) {
     this.compiled = compiled;
     this.manifest = pack.manifest();
     this.executor = executor;
+    this.circuit = circuit;
     this.decisionContext = context;
     Map<String, List<Citation>> resolved = new HashMap<>();
     for (CompiledPack.Table table : compiled.tables()) {
@@ -87,6 +96,23 @@ public final class PackRegime implements RegimeProvider {
    */
   public static PackRegime create(
       LoadedPack pack, String reportId, Executor executor, Rulings rulings) {
+    return create(pack, reportId, executor, rulings, Optional.empty());
+  }
+
+  /**
+   * Creates the provider of one report with a poison circuit (spec 7.3). The circuit belongs to
+   * this provider and so to one pack digest: a new pack is a new provider with a new circuit, and
+   * an open circuit otherwise closes only by {@link RuleCircuit#close} (open item OI-4).
+   *
+   * @param circuit the circuit shared by all evaluations of this provider, or empty for none
+   */
+  public static PackRegime create(
+      LoadedPack pack,
+      String reportId,
+      Executor executor,
+      Rulings rulings,
+      Optional<RuleCircuit> circuit) {
+    Objects.requireNonNull(circuit, "circuit");
     Objects.requireNonNull(pack, "pack");
     Objects.requireNonNull(reportId, "reportId");
     Objects.requireNonNull(executor, "executor");
@@ -120,7 +146,7 @@ public final class PackRegime implements RegimeProvider {
             "none",
             EngineInfo.BUILD.toString(),
             executor.id());
-    return new PackRegime(compiled.pack().orElseThrow(), pack, executor, context);
+    return new PackRegime(compiled.pack().orElseThrow(), pack, executor, circuit, context);
   }
 
   private static String refusal(List<PackProblem> problems) {
@@ -173,7 +199,7 @@ public final class PackRegime implements RegimeProvider {
           case CanonicalExecution e -> e;
         };
     Bindings bindings = new CanonicalBindings(execution);
-    PackProgram program = new PackProgram(compiled, false);
+    PackProgram program = new PackProgram(compiled, false, circuit);
     ExecutionResult<PackProgram.Decision> result =
         executor.execute(program, bindings, context.budget());
     Instant asAt =
@@ -223,8 +249,10 @@ public final class PackRegime implements RegimeProvider {
                   context,
                   asAt,
                   Outcome.UNDETERMINED,
-                  failureFlags(failed, program),
-                  EXEC_ERROR,
+                  isCircuitOpen(failed)
+                      ? List.of("rule_id=" + failed.ruleId(), "circuit=open")
+                      : failureFlags(failed, program),
+                  isCircuitOpen(failed) ? EXEC_CIRCUIT_OPEN : EXEC_ERROR,
                   NODE_EXEC,
                   List.of(),
                   failed.path(),
@@ -233,6 +261,15 @@ public final class PackRegime implements RegimeProvider {
                   Map.of());
         };
     return new Result(body, List.of(), Optional.empty());
+  }
+
+  /**
+   * Whether the evaluation stopped at a rule whose circuit is open. Only {@link PackProgram} throws
+   * that class, so the error class is a sufficient mark; any other failure stays {@code
+   * EXEC_ERROR}.
+   */
+  private static boolean isCircuitOpen(Failed<PackProgram.Decision> failed) {
+    return failed.errorClass().equals(CIRCUIT_OPEN_CLASS);
   }
 
   /** Rule, error class, the kind when known, cost units: never a value of the record (7.3). */
