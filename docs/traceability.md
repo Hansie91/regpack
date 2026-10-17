@@ -21,8 +21,8 @@ exited_plans: P0
 | R4 | P3,P4 | NONE | - | NA | NA | no evidence yet |
 | R5 | P8 | NONE | - | NA | NA | no evidence yet |
 | R6 | P4,P8 | NONE | - | NA | NA | no evidence yet |
-| R7 | P2a,P12 | TEST | dev.regpack.engine.pack.SecondRegimeFixtureTest#theEmirActionTypeTableRunsOnTheSameEngine | INMEMORY | BUILD | in-memory evidence |
-| R8 | P9b | TEST | dev.regpack.pack.csv.TableCsvRoundTripPropertyTest#randomTablesSurviveExportAndImportUnchanged | INMEMORY | BUILD | in-memory evidence |
+| R7 | P2a,P12 | TEST | dev.regpack.engine.pack.SecondRegimeFixtureTest#theEmirActionTypeTableRunsOnTheSameEngine | INMEMORY | BUILD | partial evidence: CompiledPack and PackProgram only, not the PackRegime provider |
+| R8 | P9b | TEST | dev.regpack.pack.csv.TableCsvRoundTripPropertyTest#randomTablesSurviveExportAndImportUnchanged | INMEMORY | BUILD | partial evidence toward AT-8: unit-level round trip on random tables |
 | R9 | P6a | NONE | - | NA | NA | no evidence yet |
 | R10 | P5 | NONE | - | NA | NA | no evidence yet |
 | R11 | P5 | NONE | - | NA | NA | no evidence yet |

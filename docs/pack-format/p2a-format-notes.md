@@ -307,7 +307,7 @@ Checks return `PackProblem(code, path, line, message)`; tests assert the upper-c
 | `ROW_LEGS_EMPTY` | an empty `legs` list |
 | `TABLE_EMPTY` | a table with no rows |
 | `CATCH_ALL_MISSING` | no row has the declared catch-all id |
-| `CATCH_ALL_DUPLICATE` | more than one row has the catch-all id |
+| `CATCH_ALL_DUPLICATE` | a row other than the catch-all whose `when` is always true (it would shadow every later row); duplicate ids are `ROW_ID_DUPLICATE` |
 | `CATCH_ALL_NOT_LAST` | the catch-all is not the last row |
 | `CATCH_ALL_NOT_TRUE` | the catch-all's `when` is not `true` |
 | `CATCH_ALL_NOT_UNDETERMINED` | the catch-all's outcome is not UNDETERMINED (I5) |
