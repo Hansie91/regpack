@@ -117,7 +117,8 @@ public final class PackIr {
 
   // -- scope tables -----------------------------------------------------------------------------
 
-  private static Map<String, Object> table(DecisionTable t) {
+  /** The IR map of one decision table (public so that the CSV round-trip test can compare it). */
+  public static Map<String, Object> table(DecisionTable t) {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("id", t.id());
     out.put("catch_all", t.catchAllRowId());
