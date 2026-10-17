@@ -211,6 +211,13 @@ class PackagingFilesTest {
         .contains("pattern: toy-digest-*")
         .contains("digests/toy-digest-ubuntu-24.04/toy-digest.txt")
         .contains("digests/toy-digest-windows-2025/toy-digest.txt");
+    // The pack-driven pipeline writes a second digest (T24): uploaded in the same artefact as the
+    // skeleton digest and compared between the two operating systems like it.
+    assertThat(ci)
+        .contains("regpack-engine/target/toy-digest.txt")
+        .contains("regpack-engine/target/pack-toy-digest.txt")
+        .contains("digests/toy-digest-ubuntu-24.04/pack-toy-digest.txt")
+        .contains("digests/toy-digest-windows-2025/pack-toy-digest.txt");
   }
 
   @Test
