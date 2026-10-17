@@ -473,6 +473,6 @@ final class Evaluator {
     for (int i = 0; i < args.length; i++) {
       args[i] = eval(argNodes.get(i));
     }
-    return c.fn().apply(args, meter);
+    return c.fn().apply(args, meter, limits);
   }
 }
