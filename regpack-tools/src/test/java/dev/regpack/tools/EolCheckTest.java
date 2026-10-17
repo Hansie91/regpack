@@ -97,6 +97,130 @@ class EolCheckTest {
         .containsExactly("ci.yml: CR_IN_LF_FILE");
   }
 
+  /** A text with one code point in the middle; the code point is built, never written raw. */
+  private static byte[] withCodePoint(int codePoint) {
+    String text = "line one\nline " + new String(Character.toChars(codePoint)) + " two\n";
+    return text.getBytes(StandardCharsets.UTF_8);
+  }
+
+  @Test
+  void bidiControlsAreRefusedInEveryCheckedTextType() {
+    int[] bidi = {0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069};
+    for (int codePoint : bidi) {
+      assertThat(EolCheck.checkBytes("A.java", withCodePoint(codePoint)))
+          .as("U+%04X", codePoint)
+          .containsExactly("A.java: BIDI_CONTROL (line 2)");
+    }
+    for (String name :
+        List.of(
+            "a.java",
+            "a.yaml",
+            "a.yml",
+            "a.md",
+            "a.tsv",
+            "a.csv",
+            "a.sh",
+            "a.ps1",
+            "a.json",
+            "a.xml",
+            "a.properties")) {
+      byte[] content = ascii("#!/bin/sh\n");
+      byte[] bad = withCodePoint(0x202E);
+      byte[] both = new byte[content.length + bad.length];
+      System.arraycopy(content, 0, both, 0, content.length);
+      System.arraycopy(bad, 0, both, content.length, bad.length);
+      assertThat(EolCheck.checkBytes(name, both))
+          .as(name)
+          .anyMatch(problem -> problem.startsWith(name + ": BIDI_CONTROL"));
+    }
+  }
+
+  @Test
+  void zeroWidthCharactersAreRefused() {
+    int[] zeroWidth = {0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060};
+    for (int codePoint : zeroWidth) {
+      assertThat(EolCheck.checkBytes("A.java", withCodePoint(codePoint)))
+          .as("U+%04X", codePoint)
+          .containsExactly("A.java: ZERO_WIDTH (line 2)");
+    }
+  }
+
+  @Test
+  void aByteOrderMarkInsideATextIsRefusedAndALeadingOneIsReportedOnce() {
+    assertThat(EolCheck.checkBytes("A.java", withCodePoint(0xFEFF)))
+        .containsExactly("A.java: ZERO_WIDTH (line 2)");
+    byte[] leading =
+        (new String(Character.toChars(0xFEFF)) + "class A {}\n").getBytes(StandardCharsets.UTF_8);
+    assertThat(EolCheck.checkBytes("A.java", leading)).containsExactly("A.java: BOM");
+    assertThat(EolCheck.checkBytes("data.csv", leading))
+        .containsExactly("data.csv: ZERO_WIDTH (line 1)");
+  }
+
+  @Test
+  void unicodeLineSeparatorsAreRefused() {
+    for (int codePoint : new int[] {0x2028, 0x2029, 0x0085}) {
+      assertThat(EolCheck.checkBytes("A.java", withCodePoint(codePoint)))
+          .as("U+%04X", codePoint)
+          .containsExactly("A.java: UNICODE_LINE_SEPARATOR (line 2)");
+    }
+  }
+
+  @Test
+  void eachProblemIsReportedOncePerFileAtItsFirstLine() {
+    String text =
+        "a\n"
+            + new String(Character.toChars(0x200B))
+            + "\nb "
+            + new String(Character.toChars(0x200B))
+            + new String(Character.toChars(0x202E))
+            + "\n";
+    assertThat(EolCheck.checkBytes("x.md", text.getBytes(StandardCharsets.UTF_8)))
+        .containsExactly("x.md: BIDI_CONTROL (line 3)", "x.md: ZERO_WIDTH (line 2)");
+  }
+
+  @Test
+  void ordinaryNonAsciiTextAndLookAlikeCharactersPass() {
+    String text = "café 中文 €   – — … " + new String(Character.toChars(0x1F600)) + " Â\u0084\n";
+    assertThat(EolCheck.checkBytes("A.java", text.getBytes(StandardCharsets.UTF_8))).isEmpty();
+  }
+
+  @Test
+  void otherFileTypesAreNotScannedForInvisibleCharacters() {
+    assertThat(EolCheck.checkBytes("a.bin", withCodePoint(0x202E))).isEmpty();
+    assertThat(EolCheck.checkBytes("a.jar", withCodePoint(0x200B))).isEmpty();
+    assertThat(EolCheck.checkBytes("a.cmd", withCodePoint(0x2028)))
+        .containsExactly("a.cmd: LF_IN_CMD");
+  }
+
+  @Test
+  void malformedUtf8NeverThrowsAndLooksLikeNothing() {
+    byte[] soup = {
+      'a', (byte) 0xE2, (byte) 0x80, '\n', (byte) 0xC2, (byte) 0xFF, (byte) 0xEF, (byte) 0xBB, 'b'
+    };
+    assertThat(EolCheck.checkBytes("A.java", soup)).isEmpty();
+  }
+
+  @Test
+  void aCleanTreePassesAndATreeWithHitsNamesEachFile(@TempDir Path root) throws IOException {
+    Files.createDirectories(root.resolve("src"));
+    Files.write(root.resolve("src/Clean.java"), ascii("class Clean {} // café\n"));
+    Files.write(root.resolve("README.md"), ascii("# Title\n\nPlain text.\n"));
+    Files.write(root.resolve("data.csv"), ascii("a,b\n1,2\n"));
+    List<String> clean = List.of("src/Clean.java", "README.md", "data.csv");
+    assertThat(EolCheck.check(root, clean)).isEmpty();
+
+    Files.write(root.resolve("src/Bidi.java"), withCodePoint(0x202E));
+    Files.write(root.resolve("notes.md"), withCodePoint(0x200B));
+    Files.write(root.resolve("table.tsv"), withCodePoint(0x2028));
+    List<String> all = new java.util.ArrayList<>(clean);
+    all.addAll(List.of("src/Bidi.java", "notes.md", "table.tsv"));
+    assertThat(EolCheck.check(root, all))
+        .containsExactly(
+            "src/Bidi.java: BIDI_CONTROL (line 2)",
+            "notes.md: ZERO_WIDTH (line 2)",
+            "table.tsv: UNICODE_LINE_SEPARATOR (line 2)");
+  }
+
   @Test
   void checkReadsWorkingTreeFilesAndSkipsMissingOnes(@TempDir Path root) throws IOException {
     Files.createDirectories(root.resolve("scripts"));

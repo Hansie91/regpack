@@ -43,4 +43,18 @@ for pair in results:results.md budget:latency-budget.md; do
   fi
   echo "$doc: OK"
 done
+
+# P2a: every committed pack passes `pack test` (checks, coverage gates, golden cases with provenance)
+for classes in regpack-pack/target/classes regpack-engine/target/classes regpack-app/target/classes; do
+  [ -d "$classes" ] || { echo "check-gates: build first: $classes missing"; exit 1; }
+done
+for dir in packs/*/; do
+  dir="${dir%/}"
+  if ! PACK_OUT="$(bash scripts/pack.sh test "$dir" 2>&1)"; then
+    echo "$PACK_OUT"
+    echo "check-gates: FAILED: pack test of $dir"
+    exit 1
+  fi
+  echo "pack test $dir: OK"
+done
 echo "check-gates: all gates passed"

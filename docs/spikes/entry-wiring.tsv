@@ -4,6 +4,8 @@ P2a	SP-R	REPORT_EXISTS	spec 16 entry: SP-R and SP-G reports before the grammar f
 P2a	SP-G	REPORT_EXISTS	spec 16 entry: SP-R and SP-G reports before the grammar freezes
 P3-schema-sizing	SP-L	REPORT_EXISTS	spec 16 entry: SP-L before schema sizing
 P5-xsd-or-derived-content	G3	GATE_CLEARED	spec 17.1 G3: before any XSD is fetched or XSD- or workbook-derived content enters the repository
+P6a	G1	GATE_CLEARED	spec 17.1 G1: before P6a and increment S3 start
+P6a-workbook-text	G3	GATE_CLEARED	spec 17.1 G3: a golden case that quotes workbook text
 P7a-microbatch	SP-L	REPORT_EXISTS	spec 16 entry: SP-L, SP-M and SP-X for the micro-batch N and T
 P7a-microbatch	SP-M	REPORT_EXISTS	SP-M is a P1b spike: stays MISSING until it reports
 P7a-microbatch	SP-X	REPORT_EXISTS	spec 16 entry: SP-L, SP-M and SP-X for the micro-batch N and T
