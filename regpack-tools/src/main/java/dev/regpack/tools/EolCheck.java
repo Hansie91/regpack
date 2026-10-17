@@ -1,18 +1,26 @@
 package dev.regpack.tools;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
  * Line-ending, byte-order-mark and ASCII rules per file type, plus the hidden-character rule for
- * tracked text sources (bidirectional controls, zero-width characters, a byte order mark anywhere,
- * Unicode line separators). Unknown file types are ignored. {@link #check} reads working-tree
- * files, never index blobs.
+ * every tracked file except a binary deny-list: the file must be valid UTF-8 and hold none of the
+ * code points that {@link HiddenCharacters} refuses (the character policy of the Regime Pack:
+ * controls, format characters, bidirectional controls, zero-width characters, a byte order mark
+ * anywhere, Unicode line separators, private use, noncharacters, default-ignorables, tag
+ * characters). {@link #check} reads working-tree files, never index blobs.
  */
 public final class EolCheck {
   private static final Set<String> CRLF_EXTENSIONS = Set.of(".cmd", ".bat");
@@ -37,23 +45,14 @@ public final class EolCheck {
   private static final Set<String> ASCII_EXTENSIONS = Set.of(".sh", ".ps1", ".service");
 
   /**
-   * Tracked text sources that must hold no invisible, direction-changing or line-separating
-   * character (the Trojan-Source family): such a character can make code read differently from how
-   * it runs.
+   * Binary file types: not text, so neither decoded nor scanned. Every other tracked file is
+   * decoded as strict UTF-8 and scanned for hidden characters; a file that is not valid UTF-8 and
+   * not of one of these types is a problem, never a silent skip.
    */
-  private static final Set<String> HIDDEN_CHARACTER_EXTENSIONS =
+  private static final Set<String> BINARY_EXTENSIONS =
       Set.of(
-          ".java",
-          ".yaml",
-          ".yml",
-          ".md",
-          ".tsv",
-          ".csv",
-          ".sh",
-          ".ps1",
-          ".json",
-          ".xml",
-          ".properties");
+          ".jar", ".zip", ".gz", ".tgz", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".class",
+          ".bin");
 
   private EolCheck() {}
 
@@ -67,11 +66,14 @@ public final class EolCheck {
     String name = path.substring(path.lastIndexOf('/') + 1);
     name = name.substring(name.lastIndexOf('\\') + 1);
     String extension = extensionOf(name.toLowerCase(Locale.ROOT));
+    if (BINARY_EXTENSIONS.contains(extension)) {
+      return List.of();
+    }
     boolean crlf = CRLF_EXTENSIONS.contains(extension);
     boolean lf = LF_EXTENSIONS.contains(extension) || LF_NAMES.contains(name);
     List<String> problems = new ArrayList<>();
     if (!crlf && !lf) {
-      addHiddenCharacterProblems(path, extension, content, false, problems);
+      addHiddenCharacterProblems(path, content, false, problems);
       return List.copyOf(problems);
     }
     boolean bom =
@@ -95,75 +97,68 @@ public final class EolCheck {
         && !(content.length >= 2 && content[0] == '#' && content[1] == '!')) {
       problems.add(path + ": NO_SHEBANG");
     }
-    addHiddenCharacterProblems(path, extension, content, bom, problems);
+    addHiddenCharacterProblems(path, content, bom, problems);
     return List.copyOf(problems);
   }
 
   /**
-   * The hidden-character rule: one problem per kind and file, at the first line of its first hit. A
-   * leading byte order mark of a file type with the BOM rule is already reported as {@code BOM}.
+   * The hidden-character rule: the file is decoded as strict UTF-8 (anything else is {@code
+   * NOT_UTF8}) and every code point of the {@link HiddenCharacters} policy is a problem. One
+   * problem per kind and file, at the first line of its first hit. A leading byte order mark of a
+   * file type with the BOM rule is already reported as {@code BOM}.
    */
   private static void addHiddenCharacterProblems(
-      String path, String extension, byte[] content, boolean bomReported, List<String> problems) {
-    if (!HIDDEN_CHARACTER_EXTENSIONS.contains(extension)) {
+      String path, byte[] content, boolean bomReported, List<String> problems) {
+    String text;
+    try {
+      text =
+          StandardCharsets.UTF_8
+              .newDecoder()
+              .onMalformedInput(CodingErrorAction.REPORT)
+              .onUnmappableCharacter(CodingErrorAction.REPORT)
+              .decode(ByteBuffer.wrap(content))
+              .toString();
+    } catch (CharacterCodingException e) {
+      problems.add(path + ": NOT_UTF8");
       return;
     }
-    int bidi = 0;
-    int zeroWidth = 0;
-    int separator = 0;
+    Map<HiddenCharacters.Kind, String> first = new EnumMap<>(HiddenCharacters.Kind.class);
     int line = 1;
-    for (int i = 0; i < content.length; i++) {
-      int b = content[i] & 0xFF;
-      if (b == 0x0A) {
+    int i = 0;
+    while (i < text.length()) {
+      int cp = text.codePointAt(i);
+      i += Character.charCount(cp);
+      if (cp == '\n') {
         line++;
-      } else if (b == 0xE2 && i + 2 < content.length) {
-        int b1 = content[i + 1] & 0xFF;
-        int b2 = content[i + 2] & 0xFF;
-        if (b1 == 0x80 && b2 >= 0xAA && b2 <= 0xAE) {
-          bidi = bidi == 0 ? line : bidi; // U+202A to U+202E
-        } else if (b1 == 0x81 && b2 >= 0xA6 && b2 <= 0xA9) {
-          bidi = bidi == 0 ? line : bidi; // U+2066 to U+2069
-        } else if (b1 == 0x80 && b2 >= 0x8B && b2 <= 0x8F) {
-          zeroWidth = zeroWidth == 0 ? line : zeroWidth; // U+200B to U+200F
-        } else if (b1 == 0x81 && b2 == 0xA0) {
-          zeroWidth = zeroWidth == 0 ? line : zeroWidth; // U+2060
-        } else if (b1 == 0x80 && (b2 == 0xA8 || b2 == 0xA9)) {
-          separator = separator == 0 ? line : separator; // U+2028, U+2029
-        }
-      } else if (b == 0xEF
-          && i + 2 < content.length
-          && (content[i + 1] & 0xFF) == 0xBB
-          && (content[i + 2] & 0xFF) == 0xBF) {
-        if (!(i == 0 && bomReported)) {
-          zeroWidth = zeroWidth == 0 ? line : zeroWidth; // U+FEFF
-        }
-      } else if (b == 0xC2 && i + 1 < content.length && (content[i + 1] & 0xFF) == 0x85) {
-        separator = separator == 0 ? line : separator; // U+0085
+      } else if (HiddenCharacters.isHidden(cp) && !(cp == 0xFEFF && i == 1 && bomReported)) {
+        HiddenCharacters.Kind kind = HiddenCharacters.kindOf(cp);
+        String where =
+            kind == HiddenCharacters.Kind.HIDDEN_CHARACTER
+                ? "(line " + line + ", " + String.format(Locale.ROOT, "U+%04X", cp) + ")"
+                : "(line " + line + ")";
+        first.putIfAbsent(kind, where);
       }
     }
-    if (bidi != 0) {
-      problems.add(path + ": BIDI_CONTROL (line " + bidi + ")");
-    }
-    if (zeroWidth != 0) {
-      problems.add(path + ": ZERO_WIDTH (line " + zeroWidth + ")");
-    }
-    if (separator != 0) {
-      problems.add(path + ": UNICODE_LINE_SEPARATOR (line " + separator + ")");
-    }
+    first.forEach((kind, where) -> problems.add(path + ": " + kind.name() + " " + where));
   }
 
   /**
    * Checks files of the working tree.
    *
    * @param root the repository root
-   * @param relativePaths the files to check; a path that no longer exists is skipped
+   * @param relativePaths the files to check; a directory (a submodule) is skipped, a path that does
+   *     not exist or is not a regular file is reported as {@code NOT_FOUND}
    * @return the problems, empty when clean
    */
   public static List<String> check(Path root, List<String> relativePaths) {
     List<String> problems = new ArrayList<>();
     for (String relative : relativePaths) {
       Path file = root.resolve(relative);
+      if (Files.isDirectory(file)) {
+        continue;
+      }
       if (!Files.isRegularFile(file)) {
+        problems.add(relative + ": NOT_FOUND");
         continue;
       }
       try {

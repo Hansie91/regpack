@@ -108,6 +108,18 @@ class ForbiddenCallScanTest {
   }
 
   @Test
+  void platformDefaultRulesBelongToTheirOwnRuleSet() throws IOException {
+    String source =
+        "class A { Object f() { return java.time.ZoneId.systemDefault() + System.lineSeparator(); } }";
+    assertThat(scanOf("A", source, Set.of(RuleSet.WALL_CLOCK, RuleSet.RANDOMNESS, RuleSet.LOCALE)))
+        .isEmpty();
+    assertThat(scanOf("A", source, Set.of(RuleSet.PLATFORM_DEFAULT)))
+        .containsExactly(
+            new Violation("A", "java/lang/System.lineSeparator", RuleSet.PLATFORM_DEFAULT),
+            new Violation("A", "java/time/ZoneId.systemDefault", RuleSet.PLATFORM_DEFAULT));
+  }
+
+  @Test
   void ruleSetsAreIndependent() throws IOException {
     var v =
         scanOf(
@@ -301,7 +313,64 @@ class ForbiddenCallScanTest {
             "java.text.DateFormat.getDateTimeInstance("
                 + "java.text.DateFormat.SHORT, java.text.DateFormat.SHORT);",
             "java/text/DateFormat.getDateTimeInstance",
-            RuleSet.LOCALE));
+            RuleSet.LOCALE),
+        Arguments.of(
+            "new java.text.MessageFormat(\"a\");",
+            "java/text/MessageFormat.<init>",
+            RuleSet.LOCALE),
+        Arguments.of(
+            "java.text.MessageFormat.format(\"a\", 1);",
+            "java/text/MessageFormat.format",
+            RuleSet.LOCALE),
+        Arguments.of("new java.util.Scanner(\"a\");", "java/util/Scanner.<init>", RuleSet.LOCALE),
+        Arguments.of(
+            "java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.SHORT);",
+            "java/time/format/DateTimeFormatter.ofLocalizedDate",
+            RuleSet.LOCALE),
+        Arguments.of(
+            "java.time.format.DateTimeFormatter.ofLocalizedTime(java.time.format.FormatStyle.SHORT);",
+            "java/time/format/DateTimeFormatter.ofLocalizedTime",
+            RuleSet.LOCALE),
+        Arguments.of(
+            "java.time.format.DateTimeFormatter.ofLocalizedDateTime("
+                + "java.time.format.FormatStyle.SHORT);",
+            "java/time/format/DateTimeFormatter.ofLocalizedDateTime",
+            RuleSet.LOCALE),
+        Arguments.of(
+            "java.time.ZoneId.systemDefault();",
+            "java/time/ZoneId.systemDefault",
+            RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "java.util.TimeZone.getDefault();",
+            "java/util/TimeZone.getDefault",
+            RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "java.util.TimeZone.setDefault(null);",
+            "java/util/TimeZone.setDefault",
+            RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "System.lineSeparator();", "java/lang/System.lineSeparator", RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "java.nio.charset.Charset.defaultCharset();",
+            "java/nio/charset/Charset.defaultCharset",
+            RuleSet.PLATFORM_DEFAULT),
+        Arguments.of("\"a\".getBytes();", "java/lang/String.getBytes", RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "new String(new byte[0]);", "java/lang/String.<init>", RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "new String(new byte[0], 0, 0);", "java/lang/String.<init>", RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "new java.io.ByteArrayOutputStream().toString();",
+            "java/io/ByteArrayOutputStream.toString",
+            RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "new java.io.InputStreamReader(System.in);",
+            "java/io/InputStreamReader.<init>",
+            RuleSet.PLATFORM_DEFAULT),
+        Arguments.of(
+            "new java.io.OutputStreamWriter(System.out);",
+            "java/io/OutputStreamWriter.<init>",
+            RuleSet.PLATFORM_DEFAULT));
   }
 
   @ParameterizedTest
@@ -333,7 +402,20 @@ class ForbiddenCallScanTest {
         "java.text.DateFormat.getDateInstance(java.text.DateFormat.SHORT, java.util.Locale.ROOT);",
         "java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT, java.util.Locale.ROOT);",
         "java.text.DateFormat.getDateTimeInstance("
-            + "java.text.DateFormat.SHORT, java.text.DateFormat.SHORT, java.util.Locale.ROOT);");
+            + "java.text.DateFormat.SHORT, java.text.DateFormat.SHORT, java.util.Locale.ROOT);",
+        "new java.text.MessageFormat(\"a\", java.util.Locale.ROOT);",
+        "java.time.ZoneId.of(\"UTC\");",
+        "java.util.TimeZone.getTimeZone(\"UTC\");",
+        "java.nio.charset.StandardCharsets.UTF_8.name();",
+        "\"a\".getBytes(java.nio.charset.StandardCharsets.UTF_8);",
+        "new String(new byte[0], java.nio.charset.StandardCharsets.UTF_8);",
+        "new String(new byte[0], 0, 0, java.nio.charset.StandardCharsets.UTF_8);",
+        "new java.io.ByteArrayOutputStream().toString(java.nio.charset.StandardCharsets.UTF_8);",
+        "new java.io.InputStreamReader(System.in, java.nio.charset.StandardCharsets.UTF_8);",
+        "new java.io.OutputStreamWriter(System.out, java.nio.charset.StandardCharsets.UTF_8);",
+        // UTF-8 by specification, not the platform default
+        "java.nio.file.Files.readString(java.nio.file.Path.of(\"x\"));",
+        "java.nio.file.Files.writeString(java.nio.file.Path.of(\"x\"), \"a\");");
   }
 
   @ParameterizedTest

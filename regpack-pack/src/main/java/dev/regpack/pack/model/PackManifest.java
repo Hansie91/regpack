@@ -277,7 +277,7 @@ public record PackManifest(
             "REGIME_ID_INVALID",
             lineOf(m, key),
             key
-                + " must be lower-case dotted like 'mifir.eu.rts22', got '"
+                + " must be lower-case dotted like 'x.y.z', got '"
                 + PackProblem.excerpt(value)
                 + "'");
         return null;

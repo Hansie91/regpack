@@ -2,12 +2,16 @@ package dev.regpack.engine.expr;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import dev.regpack.engine.expr.Lexer.Kind;
 import dev.regpack.engine.expr.Lexer.Token;
 import dev.regpack.ports.expr.Value.DecimalValue;
-import java.time.Duration;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.classfile.ClassFile;
+import java.lang.classfile.ClassModel;
+import java.lang.classfile.constantpool.ClassEntry;
+import java.lang.classfile.constantpool.PoolEntry;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,27 +52,59 @@ class LexerTest {
     assertParseError("1" + "0".repeat(38) + ".5");
   }
 
+  /**
+   * The rejection of a hostile decimal literal must come from the linear pre-check on the source
+   * indices, never from a {@code BigDecimal} built first (quadratic time: about 12 s for a million
+   * digits). That is a property of the code, so it is asserted on the code, not on a clock: the
+   * lexer class refers to no {@code BigDecimal} at all, the error is the digit-limit error at the
+   * start of the literal, and the answer to a literal that would take minutes to build is a plain
+   * return.
+   */
   @Test
-  void aHostileDecimalLiteralIsRejectedPromptly() {
+  void aHostileDecimalLiteralIsRejectedByTheLinearPreCheck() throws IOException {
+    assertThat(classReferences("Lexer.class", "java/math/BigDecimal"))
+        .as("the lexer builds no BigDecimal, so a hostile literal cannot cost more than its length")
+        .isFalse();
+    assertThat(classReferences("Parser.class", "java/math/BigDecimal"))
+        .as("the probe finds a BigDecimal where one is built (the parser, after the lexer's check)")
+        .isTrue();
+
     String digits = "1".repeat(1_000_000);
-    // 1,000,000 digits took about 12 s to reach the rejection when the BigDecimal came first
-    assertTimeoutPreemptively(
-        Duration.ofSeconds(3),
-        () -> {
-          assertParseError(digits + ".5");
-          assertParseError("1." + digits);
-          assertParseError("0".repeat(1_000_000) + "." + digits);
-        });
+    for (String source :
+        List.of(digits + ".5", "1." + digits, "0".repeat(1_000_000) + "." + digits)) {
+      assertThatThrownBy(() -> Lexer.tokenize(source))
+          .isInstanceOfSatisfying(
+              ExprException.class,
+              e -> {
+                assertThat(e.kind()).isEqualTo(ErrorKind.PARSE);
+                assertThat(e.getMessage()).contains("decimal literal exceeds 38 digits");
+                assertThat(e.getMessage().length())
+                    .as("the message holds no literal")
+                    .isLessThan(200);
+              });
+    }
     // leading zeros are not significant digits: the limit counts precision, as the scale is exact
     assertThat(Lexer.tokenize("0".repeat(100_000) + "1.5").get(0).kind()).isEqualTo(Kind.DECIMAL);
-    // and the parser, which builds the BigDecimal, is just as prompt on the same text
-    assertTimeoutPreemptively(
-        Duration.ofSeconds(3),
-        () -> new InHouseExpression().compile("0".repeat(100_000) + "1.5", Map.of()));
+    // and the parser, which builds the BigDecimal, accepts the same text
+    assertThat(new InHouseExpression().compile("0".repeat(100_000) + "1.5", Map.of())).isNotNull();
     assertThat(Lexer.tokenize("0." + "0".repeat(37) + "1").get(0).kind()).isEqualTo(Kind.DECIMAL);
     assertParseError("0." + "0".repeat(38) + "1");
     assertThat(Lexer.tokenize("1".repeat(37) + ".0").get(0).kind()).isEqualTo(Kind.DECIMAL);
     assertParseError("1".repeat(38) + ".0");
+  }
+
+  /** Whether the constant pool of a class of this package refers to the named class. */
+  private static boolean classReferences(String classFile, String internalName) throws IOException {
+    try (InputStream in = Lexer.class.getResourceAsStream(classFile)) {
+      assertThat(in).as(classFile).isNotNull();
+      ClassModel model = ClassFile.of().parse(in.readAllBytes());
+      for (PoolEntry entry : model.constantPool()) {
+        if (entry instanceof ClassEntry c && c.asInternalName().equals(internalName)) {
+          return true;
+        }
+      }
+      return false;
+    }
   }
 
   @Test

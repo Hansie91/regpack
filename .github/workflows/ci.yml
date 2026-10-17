@@ -93,11 +93,13 @@ jobs:
           b=$(cat digests/toy-digest-windows-2025/toy-digest.txt)
           echo "linux:   $a"
           echo "windows: $b"
+          [ -n "$a" ] && [ -n "$b" ] || { echo "a toy crash digest is empty"; exit 1; }
           [ "$a" = "$b" ] || { echo "toy crash digests differ between operating systems"; exit 1; }
           pa=$(cat digests/toy-digest-ubuntu-24.04/pack-toy-digest.txt)
           pb=$(cat digests/toy-digest-windows-2025/pack-toy-digest.txt)
           echo "pack pipeline linux:   $pa"
           echo "pack pipeline windows: $pb"
+          [ -n "$pa" ] && [ -n "$pb" ] || { echo "a pack-pipeline toy crash digest is empty"; exit 1; }
           [ "$pa" = "$pb" ] || { echo "pack-pipeline toy crash digests differ between operating systems"; exit 1; }
 
   spikes:

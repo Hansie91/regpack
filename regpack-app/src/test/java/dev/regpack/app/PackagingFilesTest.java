@@ -218,6 +218,10 @@ class PackagingFilesTest {
         .contains("regpack-engine/target/pack-toy-digest.txt")
         .contains("digests/toy-digest-ubuntu-24.04/pack-toy-digest.txt")
         .contains("digests/toy-digest-windows-2025/pack-toy-digest.txt");
+    // The names above are only a smoke check; what the steps do is checked by their meaning (the
+    // compare step reads both files of both systems and fails on a difference, an empty or a
+    // missing file), with broken copies and an execution, in CiDeterminismCompareTest.
+    assertThat(CiCompareStep.problems(ci)).isEmpty();
   }
 
   @Test

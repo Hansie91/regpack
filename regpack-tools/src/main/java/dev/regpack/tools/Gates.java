@@ -1,9 +1,7 @@
 package dev.regpack.tools;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -160,8 +158,8 @@ public final class Gates {
   }
 
   /**
-   * The {@code eol} gate: {@code [--root <dir>]}, with relative paths, one per line, on standard
-   * input.
+   * The {@code eol} gate: {@code [--root <dir>]}, with relative paths, one per line or NUL
+   * terminated, on standard input.
    */
   private static int eol(List<String> args, InputStream in, PrintStream out, PrintStream err) {
     String root = rootOption(args);
@@ -177,8 +175,8 @@ public final class Gates {
   }
 
   /**
-   * The {@code g3} gate: {@code [--root <dir>]}, with relative paths, one per line, on standard
-   * input.
+   * The {@code g3} gate: {@code [--root <dir>]}, with relative paths, one per line or NUL
+   * terminated, on standard input.
    */
   private static int g3(List<String> args, InputStream in, PrintStream out, PrintStream err) {
     String root = rootOption(args);
@@ -259,15 +257,26 @@ public final class Gates {
     return root;
   }
 
-  /** Relative paths, one per line, from standard input; null (after a message) when unreadable. */
+  /**
+   * Relative paths from standard input: NUL-terminated entries when the input holds a NUL (the
+   * {@code git ls-files -z} form, which never quotes or escapes a name), otherwise one per line.
+   * Null (after a message) when unreadable.
+   */
   private static List<String> readPaths(String gate, InputStream in, PrintStream err) {
     List<String> paths = new ArrayList<>();
     try {
-      BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-      String line;
-      while ((line = reader.readLine()) != null) {
-        if (!line.isBlank()) {
-          paths.add(line.strip());
+      String all = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+      if (all.indexOf((char) 0) >= 0) {
+        for (String entry : all.split("\\x00")) {
+          if (!entry.isEmpty()) {
+            paths.add(entry);
+          }
+        }
+      } else {
+        for (String line : all.split("\n")) {
+          if (!line.isBlank()) {
+            paths.add(line.strip());
+          }
         }
       }
     } catch (IOException e) {

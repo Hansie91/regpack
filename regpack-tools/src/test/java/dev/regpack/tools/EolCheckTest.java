@@ -180,24 +180,108 @@ class EolCheckTest {
 
   @Test
   void ordinaryNonAsciiTextAndLookAlikeCharactersPass() {
-    String text = "café 中文 €   – — … " + new String(Character.toChars(0x1F600)) + " Â\u0084\n";
+    String text = "café 中文 €   – — … " + new String(Character.toChars(0x1F600)) + " Â\n";
     assertThat(EolCheck.checkBytes("A.java", text.getBytes(StandardCharsets.UTF_8))).isEmpty();
   }
 
   @Test
-  void otherFileTypesAreNotScannedForInvisibleCharacters() {
-    assertThat(EolCheck.checkBytes("a.bin", withCodePoint(0x202E))).isEmpty();
-    assertThat(EolCheck.checkBytes("a.jar", withCodePoint(0x200B))).isEmpty();
+  void onlyTheBinaryDenyListIsNotScannedForInvisibleCharacters() {
+    for (String name : List.of("a.bin", "a.jar", "a.zip", "a.gz", "a.png", "a.class")) {
+      assertThat(EolCheck.checkBytes(name, withCodePoint(0x202E))).as(name).isEmpty();
+      assertThat(EolCheck.checkBytes(name, new byte[] {(byte) 0xFF, 0, '\r'})).as(name).isEmpty();
+    }
     assertThat(EolCheck.checkBytes("a.cmd", withCodePoint(0x2028)))
-        .containsExactly("a.cmd: LF_IN_CMD");
+        .containsExactly("a.cmd: LF_IN_CMD", "a.cmd: UNICODE_LINE_SEPARATOR (line 2)");
   }
 
   @Test
-  void malformedUtf8NeverThrowsAndLooksLikeNothing() {
+  void aFileThatIsNotValidUtf8AndNotOnTheDenyListIsAProblemNotASilentSkip() {
     byte[] soup = {
       'a', (byte) 0xE2, (byte) 0x80, '\n', (byte) 0xC2, (byte) 0xFF, (byte) 0xEF, (byte) 0xBB, 'b'
     };
-    assertThat(EolCheck.checkBytes("A.java", soup)).isEmpty();
+    for (String name : List.of("A.java", "notes.md", "CHECKSUMS", "run", "x.unknown")) {
+      assertThat(EolCheck.checkBytes(name, soup)).as(name).containsExactly(name + ": NOT_UTF8");
+    }
+    // an overlong encoding and an encoded surrogate are not UTF-8 either
+    assertThat(EolCheck.checkBytes("A.java", new byte[] {(byte) 0xC0, (byte) 0x80}))
+        .containsExactly("A.java: NOT_UTF8");
+    assertThat(EolCheck.checkBytes("A.java", new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80}))
+        .containsExactly("A.java: NOT_UTF8");
+  }
+
+  /** Code points of the PackText policy that no byte-pattern list of the old gate covered. */
+  private static final int[] POLICY_CODE_POINTS = {
+    0x061C, 0xE0041, 0xE0001, 0xE007F, 0x2061, 0x2062, 0x2063, 0x2064, 0x00AD, 0x202E, 0x200B,
+    0x180E, 0x115F, 0x3164, 0x206A, 0x206F, 0xFE0F, 0xFE00, 0xFFF9, 0xFFFB, 0x2065, 0xFFF0, 0xFFF8,
+    0x034F, 0xFFA0, 0xE000, 0xFDD0, 0xFFFE, 0x1FFFF, 0x0000, 0x001B, 0x000C, 0x007F, 0x0084
+  };
+
+  @Test
+  void everyTrackedFileTypeIsScannedForEveryCodePointOfThePackTextPolicy() {
+    List<String> names =
+        List.of(
+            "src/A.java",
+            "x.md",
+            "x.yaml",
+            "x.txt",
+            "bin/regpack",
+            "packaging/container/Dockerfile",
+            "CHECKSUMS",
+            "mvnw",
+            "x.cmd",
+            "x.bat",
+            "x.tpl",
+            ".gitattributes",
+            "governance/golden-reviewers.txt");
+    for (String name : names) {
+      boolean crlf = name.endsWith(".cmd") || name.endsWith(".bat");
+      for (int codePoint : POLICY_CODE_POINTS) {
+        String shebang = name.endsWith("mvnw") ? "#!/bin/sh\n" : "";
+        String text =
+            shebang + "line one\nline " + new String(Character.toChars(codePoint)) + " two\n";
+        byte[] content =
+            (crlf ? text.replace("\n", "\r\n") : text).getBytes(StandardCharsets.UTF_8);
+        assertThat(EolCheck.checkBytes(name, content))
+            .as("%s U+%04X", name, codePoint)
+            .anyMatch(problem -> problem.startsWith(name + ": ") && problem.contains("(line "));
+      }
+    }
+  }
+
+  @Test
+  void theKindOfAHiddenCodePointIsNamed() {
+    assertThat(EolCheck.checkBytes("x.md", withCodePoint(0x061C)))
+        .containsExactly("x.md: BIDI_CONTROL (line 2)");
+    assertThat(EolCheck.checkBytes("x.md", withCodePoint(0xE0041)))
+        .containsExactly("x.md: HIDDEN_CHARACTER (line 2, U+E0041)");
+    assertThat(EolCheck.checkBytes("x.yaml", withCodePoint(0x2061)))
+        .containsExactly("x.yaml: HIDDEN_CHARACTER (line 2, U+2061)");
+    assertThat(EolCheck.checkBytes("A.java", withCodePoint(0x00AD)))
+        .containsExactly("A.java: HIDDEN_CHARACTER (line 2, U+00AD)");
+    assertThat(EolCheck.checkBytes("x.txt", withCodePoint(0x202E)))
+        .containsExactly("x.txt: BIDI_CONTROL (line 2)");
+    assertThat(EolCheck.checkBytes("Dockerfile", withCodePoint(0x200B)))
+        .containsExactly("Dockerfile: ZERO_WIDTH (line 2)");
+    assertThat(EolCheck.checkBytes("CHECKSUMS", withCodePoint(0x200B)))
+        .containsExactly("CHECKSUMS: ZERO_WIDTH (line 2)");
+  }
+
+  @Test
+  void aControlCharacterOtherThanLfCrAndTabIsRefusedAndThoseThreeAreNot() {
+    assertThat(EolCheck.checkBytes("x.txt", ascii("a\tb\nc\n"))).isEmpty();
+    assertThat(EolCheck.checkBytes("CHECKSUMS", ascii("a\tb\r\nc\r\n"))).isEmpty();
+    assertThat(EolCheck.checkBytes("x.txt", withCodePoint(0x1B)))
+        .containsExactly("x.txt: HIDDEN_CHARACTER (line 2, U+001B)");
+  }
+
+  @Test
+  void aCleanFileOfEveryTypePasses() {
+    String clean = "plain text with café and 中文 and a tab\t\n";
+    for (String name :
+        List.of("A.java", "x.md", "x.yaml", "x.txt", "run", "Dockerfile", "CHECKSUMS", "x.cmd")) {
+      String text = name.equals("x.cmd") ? clean.replace("\n", "\r\n") : clean;
+      assertThat(EolCheck.checkBytes(name, ascii(text))).as(name).isEmpty();
+    }
   }
 
   @Test
@@ -222,7 +306,8 @@ class EolCheckTest {
   }
 
   @Test
-  void checkReadsWorkingTreeFilesAndSkipsMissingOnes(@TempDir Path root) throws IOException {
+  void checkReadsWorkingTreeFilesSkipsDirectoriesAndReportsMissingOnes(@TempDir Path root)
+      throws IOException {
     Files.createDirectories(root.resolve("scripts"));
     Files.write(root.resolve("scripts/bad.sh"), ascii("#!/bin/sh\r\n"));
     Files.write(root.resolve("scripts/good.sh"), ascii("#!/bin/sh\n"));
@@ -242,6 +327,17 @@ class EolCheckTest {
                 "data.bin"));
     assertThat(problems)
         .containsExactly(
-            "scripts/bad.sh: CR_IN_LF_FILE", "app.properties: CR_IN_LF_FILE", "win.cmd: LF_IN_CMD");
+            "scripts/bad.sh: CR_IN_LF_FILE",
+            "gone.sh: NOT_FOUND",
+            "app.properties: CR_IN_LF_FILE",
+            "win.cmd: LF_IN_CMD");
+  }
+
+  @Test
+  void aFileWithANonAsciiNameIsScannedNotSkipped(@TempDir Path root) throws IOException {
+    String name = "café.md";
+    Files.write(root.resolve(name), withCodePoint(0xE0041));
+    assertThat(EolCheck.check(root, List.of(name)))
+        .containsExactly(name + ": HIDDEN_CHARACTER (line 2, U+E0041)");
   }
 }

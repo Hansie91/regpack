@@ -8,9 +8,21 @@ import dev.regpack.model.Sha256;
 import org.junit.jupiter.api.Test;
 
 /**
- * Open item OI-5: a ruling, a vector or a cost fixture cannot change without a version bump. The
- * fingerprint covers the three data files; the pair beside it is the version that was current when
- * the fingerprint was pinned.
+ * Open item OI-5: a review tripwire for the replay rule. The fingerprint covers the three data
+ * files {@code rulings.tsv}, {@code vectors.tsv} and {@code cost-fixtures.tsv}; the pair beside it
+ * is the version that was current when the fingerprint was pinned.
+ *
+ * <p>What it guards: a change to one of the three files makes the test fail until a developer edits
+ * this file, and the failure message says to bump {@code EngineInfo.SEMANTICS_MAJOR} or {@code
+ * Library.VERSION}.
+ *
+ * <p>What it cannot guard: (1) that a bump happened, because the pinned hash and the pinned pair
+ * are constants in this same file and one commit can re-pin the hash alone; (2) any change to the
+ * evaluator, the library or the cost model that no vector and no cost fixture exercises, because
+ * those classes are not hashed and an unexercised path changes no pinned file. The rule that covers
+ * (2) is a discipline, not a test: a change to {@code Library}, {@code Evaluator} or the cost model
+ * needs a conformance vector or a cost fixture that exercises it, in the same commit (format notes,
+ * section 5.1).
  */
 class SemanticsFingerprintTest {
   /** SHA-256 of the three files (see {@link #fingerprint}); re-pinned only with a version bump. */

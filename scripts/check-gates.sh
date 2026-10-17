@@ -12,9 +12,21 @@ scan=(--scan .)
 if [ -n "$BUILD_ROOT" ]; then scan+=(--scan "$BUILD_ROOT"); fi
 gates traceability --file docs/traceability.md --root . "${scan[@]}"
 gates pins --dockerfile packaging/container/Dockerfile --workflows .github/workflows
-git ls-files | gates eol --root .
+# NUL-terminated names with quoting off: a tracked file whose name holds non-ASCII characters is listed
+# as itself (git would quote it and the gate would then skip or choke on the quoted name). A file that
+# is tracked but deleted from the working tree is left out; any other listed path that is missing is
+# reported by the gate.
+tracked_files() {
+  local f
+  local -A gone=()
+  while IFS= read -r -d '' f; do gone["$f"]=1; done < <(git -c core.quotepath=false ls-files -z --deleted)
+  while IFS= read -r -d '' f; do
+    if [ -z "${gone[$f]:-}" ]; then printf '%s\0' "$f"; fi
+  done < <(git -c core.quotepath=false ls-files -z)
+}
+tracked_files | gates eol --root .
 # G3 and isolation (P1a): tracked and untracked-not-ignored files, so a leak is caught before it is added
-{ git ls-files; git ls-files -o --exclude-standard; } | gates g3 --root .
+{ git -c core.quotepath=false ls-files -z; git -c core.quotepath=false ls-files -z -o --exclude-standard; } | gates g3 --root .
 gates isolation --root .
 
 # P1a: the committed spike reports verify, and the generated documents equal a fresh regeneration

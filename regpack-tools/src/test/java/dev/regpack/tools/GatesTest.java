@@ -161,7 +161,7 @@ class GatesTest {
   }
 
   @Test
-  void eolReadsPathsFromStandardInputAndSkipsMissingFiles() throws IOException {
+  void eolReadsPathsFromStandardInputAndReportsMissingFiles() throws IOException {
     Files.writeString(repo.resolve("a.sh"), "#!/bin/sh\r\n", StandardCharsets.UTF_8);
     var outBytes = new ByteArrayOutputStream();
     int rc =
@@ -171,7 +171,24 @@ class GatesTest {
             new PrintStream(outBytes, true, StandardCharsets.UTF_8),
             new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
     assertThat(rc).isEqualTo(1);
+    assertThat(outBytes.toString(StandardCharsets.UTF_8).strip().lines())
+        .containsExactly("eol: PROBLEM a.sh: CR_IN_LF_FILE", "eol: PROBLEM gone.sh: NOT_FOUND");
+  }
+
+  @Test
+  void eolReadsNulTerminatedPathsWithNonAsciiAndSpacedNames() throws IOException {
+    String name = "café two.md";
+    String tag = new String(Character.toChars(0xE0041));
+    Files.writeString(repo.resolve(name), "a " + tag + " b\n", StandardCharsets.UTF_8);
+    var outBytes = new ByteArrayOutputStream();
+    int rc =
+        Gates.run(
+            new String[] {"eol", "--root", repo.toString()},
+            new ByteArrayInputStream((name + "\u0000").getBytes(StandardCharsets.UTF_8)),
+            new PrintStream(outBytes, true, StandardCharsets.UTF_8),
+            new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+    assertThat(rc).isEqualTo(1);
     assertThat(outBytes.toString(StandardCharsets.UTF_8).strip())
-        .isEqualTo("eol: PROBLEM a.sh: CR_IN_LF_FILE");
+        .isEqualTo("eol: PROBLEM " + name + ": HIDDEN_CHARACTER (line 1, U+E0041)");
   }
 }
