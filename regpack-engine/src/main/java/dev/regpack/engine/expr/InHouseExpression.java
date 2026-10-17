@@ -6,9 +6,12 @@ import dev.regpack.ports.expr.CompiledExpression;
 import dev.regpack.ports.expr.Expression;
 import dev.regpack.ports.expr.Value;
 import dev.regpack.ports.expr.ValueType;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.SortedSet;
+import java.util.TreeSet;
 
 /**
  * The production expression layer: a CEL-shaped, non-Turing-complete subset over {@code BigDecimal}
@@ -39,13 +42,20 @@ public final class InHouseExpression implements Expression {
   }
 
   private final Limits limits;
+  private final Rulings rulings;
 
   public InHouseExpression() {
     this(Limits.defaults());
   }
 
   public InHouseExpression(Limits limits) {
+    this(limits, Rulings.provisional());
+  }
+
+  /** A layer with explicit rulings; they are read once, here, and never change. */
+  public InHouseExpression(Limits limits, Rulings rulings) {
     this.limits = Objects.requireNonNull(limits, "limits");
+    this.rulings = Objects.requireNonNull(rulings, "rulings");
   }
 
   @Override
@@ -55,7 +65,31 @@ public final class InHouseExpression implements Expression {
     Parser.Parsed parsed = Parser.parse(source, limits, variables.keySet());
     long worstCase =
         StaticCost.of(parsed.root(), limits.maxListItems(), limits.maxStringCodePoints());
-    return new Compiled(source, parsed, worstCase);
+    return new Compiled(
+        source,
+        parsed,
+        worstCase,
+        declaredAncestors(parsed.paths(), variables.keySet()),
+        limits,
+        rulings);
+  }
+
+  /**
+   * The declared strict ancestors of the paths an expression reads: all that ruling A07 can ask
+   * about. Keeping only these, not a copy of the whole variable map, keeps a compiled expression
+   * small when a pack compiles hundreds of rules against one map.
+   */
+  private static Set<String> declaredAncestors(SortedSet<String> paths, Set<String> declared) {
+    Set<String> ancestors = new TreeSet<>();
+    for (String path : paths) {
+      for (int dot = path.indexOf('.'); dot >= 0; dot = path.indexOf('.', dot + 1)) {
+        String ancestor = path.substring(0, dot);
+        if (declared.contains(ancestor)) {
+          ancestors.add(ancestor);
+        }
+      }
+    }
+    return Collections.unmodifiableSet(ancestors);
   }
 
   /** A compiled expression with its static facts. */
@@ -65,13 +99,25 @@ public final class InHouseExpression implements Expression {
     private final int nodeCount;
     private final SortedSet<String> paths;
     private final long staticWorstCaseUnits;
+    private final Set<String> declaredAncestors;
+    private final Limits limits;
+    private final Rulings rulings;
 
-    private Compiled(String source, Parser.Parsed parsed, long staticWorstCaseUnits) {
+    private Compiled(
+        String source,
+        Parser.Parsed parsed,
+        long staticWorstCaseUnits,
+        Set<String> declaredAncestors,
+        Limits limits,
+        Rulings rulings) {
       this.source = source;
       this.root = parsed.root();
       this.nodeCount = parsed.nodeCount();
       this.paths = parsed.paths();
       this.staticWorstCaseUnits = staticWorstCaseUnits;
+      this.declaredAncestors = declaredAncestors;
+      this.limits = limits;
+      this.rulings = rulings;
     }
 
     @Override
@@ -79,10 +125,18 @@ public final class InHouseExpression implements Expression {
       return source;
     }
 
-    /** Evaluation arrives with the evaluator (task T12). */
+    /**
+     * Evaluates the expression. Every unit is charged through the meter before the work it pays
+     * for.
+     *
+     * @throws ExprException on an evaluation error (ABSENT, TYPE, OVERFLOW and the other kinds)
+     * @throws dev.regpack.ports.exec.BudgetExceededException when the meter's budget is exhausted
+     */
     @Override
     public Value evaluate(Bindings bindings, CostMeter meter) {
-      throw new UnsupportedOperationException("evaluation is not implemented yet");
+      Objects.requireNonNull(bindings, "bindings");
+      Objects.requireNonNull(meter, "meter");
+      return new Evaluator(bindings, meter, limits, rulings, declaredAncestors).eval(root);
     }
 
     /** The syntax tree, for the evaluator. */

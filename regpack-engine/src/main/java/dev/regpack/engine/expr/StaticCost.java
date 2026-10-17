@@ -7,8 +7,9 @@ import java.util.List;
  * An upper bound of the cost units one evaluation of a tree can charge (cost model v1, companion
  * contract section 3): one unit per node plus the size surcharge of every node, summed over every
  * node whether or not a branch is taken. Every list is bounded by the list limit (a list literal by
- * its own length) and every string by the string limit. The bound adds every surcharge an operator
- * can possibly charge, whatever the types of its operands turn out to be.
+ * its own length, also when it is a branch of a ternary) and every string by the string limit. The
+ * bound adds every surcharge an operator can possibly charge, whatever the types of its operands
+ * turn out to be.
  */
 final class StaticCost {
   private final long listItems;
@@ -50,9 +51,18 @@ final class StaticCost {
     return strings * stringCodePoints / 256;
   }
 
-  /** The most items a value of this node can hold. */
+  /**
+   * The most items a value of this node can hold. A list literal holds its own length, which may
+   * exceed the list limit (only a string literal is refused at compile); a ternary yields one of
+   * its branches, so it holds the larger bound of the two; every other node yields an input or a
+   * capped result, so it holds at most the list limit.
+   */
   private long itemBound(Node node) {
-    return node instanceof Ast.ListLit l ? l.items().size() : listItems;
+    return switch (node) {
+      case Ast.ListLit l -> l.items().size();
+      case Ast.Ternary t -> Math.max(itemBound(t.whenTrue()), itemBound(t.whenFalse()));
+      default -> listItems;
+    };
   }
 
   /** The units of {@code contains} on two strings of the longest length. */
@@ -81,11 +91,14 @@ final class StaticCost {
     };
   }
 
-  /** A list literal receiver is a list scan; any other receiver may be a list or a string. */
+  /**
+   * A list literal receiver is a list scan; any other receiver may be a list (bounded as by {@link
+   * #itemBound}) or a string.
+   */
   private long containsSurcharge(Node receiver) {
     if (receiver instanceof Ast.ListLit l) {
       return l.items().size();
     }
-    return Math.max(listItems, stringContainsUnits());
+    return Math.max(itemBound(receiver), stringContainsUnits());
   }
 }
