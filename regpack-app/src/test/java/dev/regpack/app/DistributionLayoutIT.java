@@ -36,6 +36,7 @@ class DistributionLayoutIT {
           "lib/regpack-app.jar",
           "lib/regpack-model.jar",
           "lib/regpack-ports.jar",
+          "lib/regpack-pack.jar",
           "lib/regpack-inmemory.jar",
           "lib/regpack-engine.jar");
   private static final List<String> FORBIDDEN_COMPONENT_PREFIXES =
@@ -181,6 +182,7 @@ class DistributionLayoutIT {
               Set.of(
                   "regpack-model.jar",
                   "regpack-ports.jar",
+                  "regpack-pack.jar",
                   "regpack-inmemory.jar",
                   "regpack-engine.jar"));
     }

@@ -14,8 +14,10 @@
   <dependencies>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-model</artifactId></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-ports</artifactId></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-pack</artifactId></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-inmemory</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-bench</artifactId><scope>test</scope></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-tools</artifactId><scope>test</scope></dependency>
   </dependencies>
 </project>
