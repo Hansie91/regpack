@@ -11,8 +11,8 @@ Branch `p2a/rule-pack-core` from `p1a/spikes`; plan committed as `110db05`. `./m
 | Id | What | Date | Name | State |
 |---|---|---|---|---|
 | AP-1 | The plan, its companion contracts file, the departures table, the beyond-6.1 format elements, the split decision, "Contract and layout changes", "Existing tests that change", D-P6 and A1 to A6 | 2026-10-16 | hans | given in chat as "ok approved lets continue", in answer to the controller's message that started P2a on the working assumptions A1 to A5 (it followed "ok let's continue development. make your own decision how to continue"). The plan text was written and reviewed after that message; the controller summarised it to the owner before executing and proceeds on this approval. **The owner has not read the plan text as far as this record knows**; the owner can stop or amend at any time. |
-| AP-2 | Every push of `p2a/rule-pack-core` and every CI run waited on | | | asked at each push |
-| AP-3 | The two edits of the pinned workflow `ci.yml` (T2 branch filter, T24 second digest) | | | asked at the first push that contains them. The T2 branch filter `p2a/**` is committed locally only (b6bb562); nothing has been pushed. |
+| AP-2 | Every push of `p2a/rule-pack-core` and every CI run waited on | 2026-10-17 | hans | asked at each push. Given for the push of the CI checkpoint after T16 (OI-10), answer "Yes, push now (Recommended)" in chat; covers that push and the read-only wait for its run, nothing later. |
+| AP-3 | The two edits of the pinned workflow `ci.yml` (T2 branch filter, T24 second digest) | 2026-10-17 | hans | the T2 branch filter `p2a/**` (b6bb562) approved with the CI-checkpoint push; the T24 second digest is still to be asked at the push that contains it |
 | AP-4 | Merge, tag and the sign-offs in `docs/exit/P2a.md` | | | owner only (T27) |
 
 ## Owner inputs
@@ -25,7 +25,7 @@ All answered as "default accepted" on 2026-10-16 by the owner's delegation ("mak
 | OI-2 | Source of `legs[]` of a REPORT decision | optional `legs:` list on REPORT rows, default `[MARKET]`, vocabulary MARKET, CLIENT, ALLOCATION | default accepted |
 | OI-3 | How several scope tables per report combine | the SP-R benchmark rule | default accepted |
 | OI-4 | When an open poison circuit closes | only by explicit `close(ruleId)` or a new pack digest | default accepted |
-| OI-5 | Rulings on D13, A04, A07, E06 (S07: see A2) | in-house outcomes, provisional, one line each of `rulings.tsv` | default accepted for now; asked again at T14 |
+| OI-5 | Rulings on D13, A04, A07, E06 (S07: see A2) | in-house outcomes, provisional, one line each of `rulings.tsv` | asked again at T14 (2026-10-17, hans): "Keep provisional". The five rows of `rulings.tsv` stay PROVISIONAL (D13 ALLOW, A04 PROPAGATE, E06 PROPAGATE, A07 FALSE, S07 BY_NAME); the owner rules at the spec freeze |
 | OI-6 | Keep the P0 `skeleton` package | yes, until the frozen spike code is removed (Q7, D-8) | default accepted |
 | OI-7 | Where the reason-code prefix and node list are declared | `reasons.yaml` header | default accepted |
 | OI-8 | Calibration read-out before P3 is planned | stop at T27 | default accepted |
