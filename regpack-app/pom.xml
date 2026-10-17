@@ -20,6 +20,17 @@
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
   </dependencies>
   <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <!-- the bundled sample pack: copied byte for byte (no filtering), because its bytes must equal CHECKSUMS -->
+      <resource>
+        <directory>${maven.multiModuleProjectDirectory}/packs/sample.s0</directory>
+        <targetPath>packs/sample.s0</targetPath>
+        <filtering>false</filtering>
+      </resource>
+    </resources>
     <plugins>
       <plugin>
         <artifactId>maven-jar-plugin</artifactId>

@@ -1,8 +1,10 @@
 package dev.regpack.app;
 
+import dev.regpack.engine.exec.MeteredExecutor;
 import dev.regpack.engine.explain.Tier1Explainer;
+import dev.regpack.engine.expr.Rulings;
+import dev.regpack.engine.pack.PackRegime;
 import dev.regpack.engine.pipeline.MicroBatchPipeline;
-import dev.regpack.engine.skeleton.WalkingSkeletonRegime;
 import dev.regpack.inmemory.InMemoryEvidenceStore;
 import dev.regpack.inmemory.InMemoryLedgerStore;
 import dev.regpack.inmemory.InMemorySourceConnector;
@@ -13,13 +15,16 @@ import dev.regpack.model.canonical.CanonicalExecutionCodec;
 import dev.regpack.model.decision.DecisionCodec;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.model.json.Json;
+import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.model.LoadResult;
+import dev.regpack.pack.model.PackLoader;
+import dev.regpack.pack.source.PackSource;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.connector.SourceConnector.BatchStream;
 import dev.regpack.ports.connector.SourceConnector.ReadLimits;
 import dev.regpack.ports.connector.SourceConnector.ReadRequest;
 import dev.regpack.ports.evidence.EvidenceStore.Retention;
 import dev.regpack.ports.evidence.EvidenceStore.RetentionClass;
-import dev.regpack.ports.exec.CostBudget;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
@@ -39,11 +44,14 @@ import java.util.Optional;
 
 /**
  * The {@code smoke} command: optional health probes of a running service, then the walking skeleton
- * end to end over the bundled toy executions with in-memory adapters.
+ * end to end over the bundled toy executions with in-memory adapters. The rules come from the
+ * sample pack that the distribution bundles ({@value #PACK_ROOT}), loaded and run by the same code
+ * as any other pack.
  */
 public final class SmokeCommand {
   private static final String USAGE = "usage: regpack smoke [--health-url <base>]";
   private static final String RESOURCE = "/smoke/toy-executions.ndjson";
+  private static final String PACK_ROOT = "packs/sample.s0";
   private static final String SOURCE_ID = "toy";
   private static final String STREAM = "trades";
   private static final String MEDIA_TYPE = "application/x-ndjson";
@@ -120,16 +128,17 @@ public final class SmokeCommand {
     InMemorySourceConnector source =
         new InMemorySourceConnector(
             SOURCE_ID, STREAM, MEDIA_TYPE, List.of(ndjson.getBytes(StandardCharsets.UTF_8)));
+    PackRegime regime = bundledRegime();
     MicroBatchPipeline pipeline =
         new MicroBatchPipeline(
             clock,
             evidence,
             ledger,
-            WalkingSkeletonRegime.standard(),
-            WalkingSkeletonRegime.skeletonContext(),
+            regime,
+            regime.decisionContext(),
             new Retention(
                 new RetentionClass("landing"), clock.now().plus(Duration.ofDays(365 * 10L))),
-            new CostBudget(100));
+            regime.recordBudget());
     try (BatchStream stream =
         source.read(new ReadRequest(Optional.empty(), new ReadLimits(100, 1_000_000L)))) {
       pipeline.pump(stream, SOURCE_ID, 10);
@@ -139,7 +148,7 @@ public final class SmokeCommand {
     for (EventIdentity identity : eventIdentities(ndjson)) {
       DecisionRecord decision =
           ledger
-              .currentDecision(WalkingSkeletonRegime.REGIME, identity)
+              .currentDecision(regime.regime(), identity)
               .orElseThrow(() -> new IllegalStateException("no decision for " + identity.value()));
       out.println("decision " + Json.canonical(DecisionCodec.recordToMap(decision)));
       for (String line : Tier1Explainer.explain(decision).split("\n", -1)) {
@@ -153,6 +162,21 @@ public final class SmokeCommand {
     }
     out.println("regpack smoke: OK decisions=" + outcomes.size());
     return 0;
+  }
+
+  /** The regime of the bundled sample pack: strict load (checksums, checks), then compile. */
+  private static PackRegime bundledRegime() {
+    LoadResult loaded = PackLoader.load(PackSource.fromClasspath(SmokeCommand.class, PACK_ROOT));
+    if (loaded.pack().isEmpty()) {
+      PackProblem first = loaded.problems().get(0);
+      throw new IllegalStateException(
+          "the bundled pack does not load: " + first.code() + " " + first.path());
+    }
+    return PackRegime.create(
+        loaded.pack().get(),
+        loaded.pack().get().manifest().reports().get(0).id(),
+        new MeteredExecutor(),
+        Rulings.load());
   }
 
   /** The event identities in file order. */

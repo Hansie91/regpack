@@ -55,6 +55,24 @@ class SmokeCommandTest {
   }
 
   @Test
+  void smokeRunsFromTheBundledSamplePack() {
+    int exit = SmokeCommand.run(List.of(), out, err, clock);
+
+    assertThat(exit).isZero();
+    List<String> lines = stdout().lines().toList();
+    List<String> decisions = lines.stream().filter(line -> line.startsWith("decision {")).toList();
+    assertThat(decisions).hasSize(3);
+    assertThat(decisions.get(0))
+        .contains("\"outcome\":\"REPORT\"")
+        .contains("\"reasonCode\":\"SAMPLE.N08.IN_SCOPE\"");
+    assertThat(decisions.get(1)).contains("\"outcome\":\"DO_NOT_REPORT\"");
+    assertThat(decisions.get(2)).contains("\"outcome\":\"UNDETERMINED\"");
+    assertThat(stdout()).contains(" under sample.s0");
+    assertThat(lines.get(lines.size() - 1)).isEqualTo("regpack smoke: OK decisions=3");
+    assertThat(stderr()).isEmpty();
+  }
+
+  @Test
   void decisionsComeInFileOrderEachFollowedByItsOwnExplainLines() {
     assertThat(SmokeCommand.run(List.of(), out, err, clock)).isZero();
     List<String> lines = stdout().lines().toList();

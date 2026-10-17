@@ -189,6 +189,40 @@ class DistributionLayoutIT {
   }
 
   @Test
+  void theAppJarBundlesTheSamplePackByteForByteAndNoThirdPartyJarIsShipped() throws IOException {
+    Map<String, byte[]> entries = new HashMap<>();
+    try (JarInputStream in =
+        new JarInputStream(
+            new java.io.ByteArrayInputStream(read(distZip(), "lib/regpack-app.jar")))) {
+      for (java.util.jar.JarEntry entry = in.getNextJarEntry();
+          entry != null;
+          entry = in.getNextJarEntry()) {
+        if (!entry.isDirectory()) {
+          entries.put(entry.getName(), in.readAllBytes());
+        }
+      }
+    }
+    Path sample =
+        Path.of(System.getProperty("regpack.repo.root")).resolve("packs").resolve("sample.s0");
+    assertThat(entries).containsKeys("packs/sample.s0/CHECKSUMS", "packs/sample.s0/pack.yaml");
+    List<Path> sampleFiles;
+    try (Stream<Path> walk = Files.walk(sample)) {
+      sampleFiles = walk.filter(Files::isRegularFile).toList();
+    }
+    assertThat(sampleFiles).isNotEmpty();
+    for (Path file : sampleFiles) {
+      String name = "packs/sample.s0/" + sample.relativize(file).toString().replace('\\', '/');
+      assertThat(entries.get(name)).as(name).isEqualTo(Files.readAllBytes(file));
+    }
+    assertThat(entries.keySet().stream().filter(n -> n.startsWith("packs/")).count())
+        .isEqualTo(sampleFiles.size());
+
+    // the lib directory lists the six regpack jars and nothing else: no third-party jar
+    assertThat(entryNames(distZip()).stream().filter(n -> n.startsWith("lib/")))
+        .allMatch(n -> n.startsWith("lib/regpack-") && n.endsWith(".jar"));
+  }
+
+  @Test
   void sbomIsCycloneDxJson() throws IOException {
     String text =
         new String(read(distZip(), "share/sbom/regpack-bom.json"), StandardCharsets.UTF_8);
