@@ -11,7 +11,8 @@ import java.util.regex.Pattern;
  * the caller passes: the path is cut to {@value #MAX_PATH_CHARS} characters, the message to {@value
  * #MAX_MESSAGE_CHARS}, and every UTF-16 character outside printable ASCII is written as {@code
  * \}{@code uXXXX} (an escape is never cut in the middle). Callers wrap untrusted text in {@link
- * #excerpt(String)}. Problems order by path, line, code and message.
+ * #excerpt(String)}. Problems order by path, line, code and message, except that the {@value
+ * ProblemSink#TRUNCATED} markers of {@link ProblemSink} order after every other problem.
  */
 public record PackProblem(String code, String path, int line, String message)
     implements Comparable<PackProblem> {
@@ -47,6 +48,10 @@ public record PackProblem(String code, String path, int line, String message)
 
   @Override
   public int compareTo(PackProblem other) {
+    boolean marker = code.equals(ProblemSink.TRUNCATED);
+    if (marker != other.code.equals(ProblemSink.TRUNCATED)) {
+      return marker ? 1 : -1;
+    }
     int c = path.compareTo(other.path);
     if (c != 0) {
       return c;

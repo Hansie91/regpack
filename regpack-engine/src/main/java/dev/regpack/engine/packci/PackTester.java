@@ -14,7 +14,9 @@ import dev.regpack.model.IngestKey;
 import dev.regpack.model.canonical.CanonicalExecution;
 import dev.regpack.model.canonical.CanonicalExecutionCodec;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.golden.GoldenAudit;
 import dev.regpack.pack.golden.GoldenCase;
 import dev.regpack.pack.golden.GoldenCase.ProvenanceKind;
@@ -28,7 +30,6 @@ import dev.regpack.pack.source.PackSource;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -88,8 +89,9 @@ public final class PackTester {
   }
 
   private static PackTestReport finish(List<String> lines, List<PackProblem> problems) {
-    List<PackProblem> sorted = new ArrayList<>(problems);
-    Collections.sort(sorted);
+    // the stages add problems in turn: bound what is printed (the loader bounds its own list)
+    List<PackProblem> sorted =
+        ProblemSink.cap(problems, PackFormat.MAX_PROBLEMS_PER_LOAD, PackManifest.FILE);
     List<String> out = new ArrayList<>(lines);
     for (PackProblem p : sorted) {
       out.add(

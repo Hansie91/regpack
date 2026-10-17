@@ -4,11 +4,11 @@ import dev.regpack.model.Sha256;
 import dev.regpack.model.json.Json;
 import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.yaml.YamlMap;
 import dev.regpack.pack.yaml.YamlNode;
 import dev.regpack.pack.yaml.YamlScalar;
 import dev.regpack.ports.expr.ValueType;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -82,8 +82,7 @@ public record CanonicalInputSpec(Map<String, Variable> variables) {
   public static Optional<CanonicalInputSpec> parse(YamlNode root, List<PackProblem> problems) {
     Reader reader = new Reader();
     Optional<CanonicalInputSpec> spec = reader.read(root);
-    Collections.sort(reader.found);
-    problems.addAll(reader.found);
+    problems.addAll(reader.found.sorted(FILE));
     return reader.found.isEmpty() ? spec : Optional.empty();
   }
 
@@ -116,7 +115,7 @@ public record CanonicalInputSpec(Map<String, Variable> variables) {
   // ---------------------------------------------------------------------------------------------
 
   private static final class Reader {
-    final List<PackProblem> found = new ArrayList<>();
+    final ProblemSink found = ProblemSink.forFile();
 
     private void problem(String code, int line, String message) {
       found.add(new PackProblem(code, FILE, line, message));
@@ -128,6 +127,9 @@ public record CanonicalInputSpec(Map<String, Variable> variables) {
         return Optional.empty();
       }
       for (Map.Entry<String, YamlNode> e : top.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         if (!e.getKey().equals("variables")) {
           problem(
               "INPUT_KEY_UNKNOWN",
@@ -146,6 +148,9 @@ public record CanonicalInputSpec(Map<String, Variable> variables) {
       }
       Map<String, Variable> out = new TreeMap<>();
       for (Map.Entry<String, YamlNode> e : vars.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         String path = e.getKey();
         Variable variable = variable(path, e.getValue());
         boolean pathOk = validPath(path, e.getValue().line());
@@ -175,9 +180,12 @@ public record CanonicalInputSpec(Map<String, Variable> variables) {
             "the declaration of '" + PackProblem.excerpt(path) + "' must be a mapping");
         return null;
       }
-      int before = found.size();
+      int before = found.count();
       Set<String> known = Set.of("type", "enum", "source", "optional");
       for (Map.Entry<String, YamlNode> e : m.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         if (!known.contains(e.getKey())) {
           problem(
               "INPUT_KEY_UNKNOWN",
@@ -192,7 +200,7 @@ public record CanonicalInputSpec(Map<String, Variable> variables) {
       String enumName = enumName(m.entries().get("enum"), type, m.line());
       Variable.Source source = source(m.entries().get("source"));
       Boolean optional = optional(m.entries().get("optional"));
-      if (found.size() > before || type == null) {
+      if (found.count() > before || type == null) {
         return null;
       }
       return new Variable(

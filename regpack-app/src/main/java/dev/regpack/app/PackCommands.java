@@ -16,6 +16,7 @@ import dev.regpack.model.json.Json;
 import dev.regpack.model.json.JsonException;
 import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.csv.TableCsv;
 import dev.regpack.pack.csv.TableYamlWriter;
 import dev.regpack.pack.golden.ReviewerRegistry;
@@ -23,6 +24,7 @@ import dev.regpack.pack.model.DecisionTable;
 import dev.regpack.pack.model.LoadResult;
 import dev.regpack.pack.model.LoadedPack;
 import dev.regpack.pack.model.PackLoader;
+import dev.regpack.pack.model.PackManifest;
 import dev.regpack.pack.model.ReportDefinition;
 import dev.regpack.pack.model.TableRow;
 import dev.regpack.pack.source.Checksums;
@@ -367,8 +369,9 @@ public final class PackCommands {
   }
 
   private static int refuseImport(List<PackProblem> problems, PrintStream err) {
-    List<PackProblem> sorted = new ArrayList<>(problems);
-    sorted.sort(null);
+    // at most the load cap of problems is printed, whatever stage produced them
+    List<PackProblem> sorted =
+        ProblemSink.cap(problems, PackFormat.MAX_PROBLEMS_PER_LOAD, PackManifest.FILE);
     for (PackProblem p : sorted) {
       err.print(problemLine(p) + "\n");
     }
@@ -482,10 +485,12 @@ public final class PackCommands {
     if (result.pack().isPresent()) {
       return result.pack();
     }
-    for (PackProblem p : result.problems()) {
+    List<PackProblem> shown =
+        ProblemSink.cap(result.problems(), PackFormat.MAX_PROBLEMS_PER_LOAD, PackManifest.FILE);
+    for (PackProblem p : shown) {
       err.print(problemLine(p) + "\n");
     }
-    err.print("the pack has " + result.problems().size() + " problems; run pack test\n");
+    err.print("the pack has " + shown.size() + " problems; run pack test\n");
     return Optional.empty();
   }
 

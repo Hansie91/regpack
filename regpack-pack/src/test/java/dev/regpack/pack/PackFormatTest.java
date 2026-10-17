@@ -17,6 +17,8 @@ class PackFormatTest {
     assertThat(PackFormat.MAX_KEY_CHARS).isEqualTo(128);
     assertThat(PackFormat.MAX_DEPTH).isEqualTo(32);
     assertThat(PackFormat.MAX_NODES).isEqualTo(100_000);
+    assertThat(PackFormat.MAX_PROBLEMS_PER_FILE).isEqualTo(100);
+    assertThat(PackFormat.MAX_PROBLEMS_PER_LOAD).isEqualTo(1_000);
     assertThat(PackFormat.MAX_RULE_NODES).isEqualTo(4_096);
     assertThat(PackFormat.MAX_LIST_ITEMS).isEqualTo(4_096);
     assertThat(PackFormat.MAX_STRING_CODE_POINTS).isEqualTo(65_536);

@@ -3,6 +3,7 @@ package dev.regpack.pack.check;
 import dev.regpack.model.Sha256;
 import dev.regpack.pack.model.CitationRef;
 import dev.regpack.pack.model.DecisionTable;
+import dev.regpack.pack.model.PackManifest;
 import dev.regpack.pack.model.Provision;
 import dev.regpack.pack.model.RationaleRegistry;
 import dev.regpack.pack.model.ReasonEntry;
@@ -12,7 +13,6 @@ import dev.regpack.pack.model.SourceEntry;
 import dev.regpack.pack.model.SourceRegistry;
 import dev.regpack.pack.model.TableRow;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,21 +58,20 @@ public final class RegistryChecks {
    */
   public static List<PackProblem> check(
       ReasonRegistry r, SourceRegistry s, RationaleRegistry t, List<DecisionTable> tables) {
-    List<PackProblem> found = new ArrayList<>();
+    ProblemSink found = ProblemSink.forLoad();
     reasons(r, found);
     sources(s, found);
     tables(r, s, t, tables, found);
-    Collections.sort(found);
-    return found;
+    return found.sorted(PackManifest.FILE);
   }
 
-  private static void add(List<PackProblem> found, String code, String path, String message) {
+  private static void add(ProblemSink found, String code, String path, String message) {
     found.add(new PackProblem(code, path, 0, message));
   }
 
   // -- reasons.yaml ----------------------------------------------------------------------------
 
-  private static void reasons(ReasonRegistry r, List<PackProblem> found) {
+  private static void reasons(ReasonRegistry r, ProblemSink found) {
     String file = RegistryParser.REASONS_FILE;
     if (ENGINE_RESERVED.contains(r.prefix())) {
       add(
@@ -109,7 +108,7 @@ public final class RegistryChecks {
 
   /** The code must be {@code <prefix>.<node>.<label>[.<provision>]} of the registry's header. */
   private static void reasonShape(
-      ReasonRegistry r, ReasonEntry entry, String shown, List<PackProblem> found) {
+      ReasonRegistry r, ReasonEntry entry, String shown, ProblemSink found) {
     String file = RegistryParser.REASONS_FILE;
     String[] parts = entry.code().value().split("\\.", -1);
     if (parts.length < 3 || parts.length > 4) {
@@ -157,7 +156,7 @@ public final class RegistryChecks {
 
   // -- sources.yaml ----------------------------------------------------------------------------
 
-  private static void sources(SourceRegistry s, List<PackProblem> found) {
+  private static void sources(SourceRegistry s, ProblemSink found) {
     String file = RegistryParser.SOURCES_FILE;
     for (Map.Entry<String, SourceEntry> se : s.sources().entrySet()) {
       SourceEntry source = se.getValue();
@@ -184,7 +183,7 @@ public final class RegistryChecks {
     }
   }
 
-  private static void quote(Provision p, String where, List<PackProblem> found) {
+  private static void quote(Provision p, String where, ProblemSink found) {
     String file = RegistryParser.SOURCES_FILE;
     if (p.quote().isEmpty()) {
       return;
@@ -220,7 +219,7 @@ public final class RegistryChecks {
       SourceRegistry s,
       RationaleRegistry t,
       List<DecisionTable> tables,
-      List<PackProblem> found) {
+      ProblemSink found) {
     Map<String, Integer> ids = new HashMap<>();
     for (DecisionTable table : tables) {
       ids.merge(table.id(), 1, Integer::sum);
@@ -240,6 +239,9 @@ public final class RegistryChecks {
                 + " tables");
       }
       for (TableRow row : table.rows()) {
+        if (found.truncated()) {
+          return;
+        }
         row(r, s, t, table, row, found);
       }
     }
@@ -251,7 +253,7 @@ public final class RegistryChecks {
       RationaleRegistry t,
       DecisionTable table,
       TableRow row,
-      List<PackProblem> found) {
+      ProblemSink found) {
     String path = table.path();
     String id = PackProblem.excerpt(row.id());
     ReasonEntry reason = r.entries().get(row.reason().value());
@@ -293,7 +295,7 @@ public final class RegistryChecks {
   }
 
   private static void citation(
-      SourceRegistry s, String path, String rowId, CitationRef cite, List<PackProblem> found) {
+      SourceRegistry s, String path, String rowId, CitationRef cite, ProblemSink found) {
     String where = "row " + rowId + " cites ";
     if (!s.sources().containsKey(cite.sourceId())) {
       add(

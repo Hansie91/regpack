@@ -5,6 +5,7 @@ import dev.regpack.model.Sha256;
 import dev.regpack.model.json.Json;
 import dev.regpack.model.json.JsonException;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.check.RegistryChecks;
 import dev.regpack.pack.check.TableChecks;
 import dev.regpack.pack.ir.PackDigest;
@@ -24,13 +25,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Function;
 
 /**
  * Loads a whole pack from a {@link PackSource}: verifies CHECKSUMS, parses every file with the
  * strict parser, types and cross-checks them, applies the reserved-slot rules and computes the
  * canonical digest (companion contracts section 5.4; plan task T9). It fails closed: a {@link
  * LoadedPack} is returned only when there is no problem at all, and every problem found is reported
- * (sorted, without duplicates), not only the first.
+ * (sorted, without duplicates), not only the first, up to {@code PackFormat.MAX_PROBLEMS_PER_LOAD}:
+ * then one {@code PROBLEMS_TRUNCATED} ends the list and the remaining tables are not parsed.
  *
  * <p>Order: CHECKSUMS; the allowed paths; {@code pack.yaml}; the input model and its digest against
  * {@code input_schema}; the {@code as_at_field}; the files each report lists and the scope tables
@@ -101,7 +104,7 @@ public final class PackLoader {
     private static final Set<String> CLOCK_ALLOWED = Set.of("anchor", "offset", "on_expiry");
 
     private final PackSource source;
-    private final List<PackProblem> problems = new ArrayList<>();
+    private final ProblemSink problems = ProblemSink.forLoad();
     private final List<String> notes = new ArrayList<>();
     private final Map<String, YamlNode> opaque = new TreeMap<>();
     private final Map<String, Object> golden = new TreeMap<>();
@@ -114,6 +117,17 @@ public final class PackLoader {
 
     private void problem(String code, String path, int line, String message) {
       problems.add(new PackProblem(code, path, line, message));
+    }
+
+    /**
+     * Runs a reader that reports into a list and moves what it reported into the bounded sink of
+     * the load.
+     */
+    private <T> T collecting(Function<List<PackProblem>, T> reader) {
+      List<PackProblem> local = new ArrayList<>();
+      T result = reader.apply(local);
+      problems.addAll(local);
+      return result;
     }
 
     private static Kind kind(String path) {
@@ -174,7 +188,7 @@ public final class PackLoader {
       problems.addAll(Checksums.verify(source));
       paths();
 
-      Optional<PackManifest> manifest = PackManifest.parse(source, problems);
+      Optional<PackManifest> manifest = collecting(list -> PackManifest.parse(source, list));
       Optional<CanonicalInputSpec> input = input();
       manifest.ifPresent(m -> checkInputAgainstManifest(m, input));
       if (manifest.isPresent()) {
@@ -184,13 +198,17 @@ public final class PackLoader {
       YamlNode sourcesRoot = registryRoot(RegistryParser.SOURCES_FILE);
       YamlNode rationalesRoot = registryRoot(RegistryParser.RATIONALES_FILE);
       Optional<ReasonRegistry> reasons =
-          reasonsRoot == null ? Optional.empty() : RegistryParser.reasons(reasonsRoot, problems);
+          reasonsRoot == null
+              ? Optional.empty()
+              : collecting(list -> RegistryParser.reasons(reasonsRoot, list));
       Optional<SourceRegistry> sources =
-          sourcesRoot == null ? Optional.empty() : RegistryParser.sources(sourcesRoot, problems);
+          sourcesRoot == null
+              ? Optional.empty()
+              : collecting(list -> RegistryParser.sources(sourcesRoot, list));
       Optional<RationaleRegistry> rationales =
           rationalesRoot == null
               ? Optional.empty()
-              : RegistryParser.rationales(rationalesRoot, problems);
+              : collecting(list -> RegistryParser.rationales(rationalesRoot, list));
       if (reasons.isPresent() && sources.isPresent() && rationales.isPresent()) {
         problems.addAll(
             RegistryChecks.check(
@@ -200,7 +218,8 @@ public final class PackLoader {
       manifest.ifPresent(this::rowLegs);
       sealedAndOpaqueFiles();
 
-      List<PackProblem> found = problems.stream().distinct().sorted().toList();
+      // sorted, the markers last; a duplicate is reported once
+      List<PackProblem> found = problems.sorted(PackManifest.FILE).stream().distinct().toList();
       if (found.isEmpty()
           && (manifest.isEmpty()
               || input.isEmpty()
@@ -299,7 +318,9 @@ public final class PackLoader {
         return Optional.empty();
       }
       YamlNode root = yaml(CanonicalInputSpec.FILE);
-      return root == null ? Optional.empty() : CanonicalInputSpec.parse(root, problems);
+      return root == null
+          ? Optional.empty()
+          : collecting(list -> CanonicalInputSpec.parse(root, list));
     }
 
     private void checkInputAgainstManifest(PackManifest m, Optional<CanonicalInputSpec> input) {
@@ -357,11 +378,14 @@ public final class PackLoader {
         report.endpointProfiles().forEach(path -> exists(path, who));
       }
       for (String path : referenced) {
+        if (problems.truncated()) {
+          break; // the load fails anyway; do not parse the remaining tables of a hostile pack
+        }
         YamlNode root = yaml(path);
         if (root == null) {
           continue;
         }
-        Optional<DecisionTable> table = TableParser.parse(path, root, problems);
+        Optional<DecisionTable> table = collecting(list -> TableParser.parse(path, root, list));
         if (table.isPresent()) {
           problems.addAll(TableChecks.check(table.get()));
           tables.put(path, table.get());
@@ -400,6 +424,9 @@ public final class PackLoader {
       Map<String, String> refPath = new HashMap<>();
       for (DecisionTable table : tables.values()) {
         for (TableRow row : table.rows()) {
+          if (problems.truncated()) {
+            return;
+          }
           String earlier = idPath.putIfAbsent(row.id(), table.path());
           if (earlier != null && !earlier.equals(table.path())) {
             problem(
@@ -438,6 +465,9 @@ public final class PackLoader {
             continue;
           }
           for (TableRow row : table.rows()) {
+            if (problems.truncated()) {
+              return;
+            }
             for (Leg leg : row.legs()) {
               if (!report.legs().contains(leg)) {
                 problem(

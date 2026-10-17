@@ -18,6 +18,15 @@ public final class PackFormat {
   public static final int MAX_DEPTH = 32;
   public static final int MAX_NODES = 100_000;
 
+  /**
+   * Problems one file (or one CSV import) reports; further ones are replaced by one {@code
+   * PROBLEMS_TRUNCATED}.
+   */
+  public static final int MAX_PROBLEMS_PER_FILE = 100;
+
+  /** Problems one load reports in all; further ones are replaced by one marker. */
+  public static final int MAX_PROBLEMS_PER_LOAD = 1_000;
+
   // Engine hard caps for pack-declared limits (only an engine build raises them).
   public static final int MAX_RULE_NODES = 4_096;
   public static final int MAX_LIST_ITEMS = 4_096;

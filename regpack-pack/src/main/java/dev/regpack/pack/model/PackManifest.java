@@ -5,6 +5,7 @@ import dev.regpack.model.Leg;
 import dev.regpack.model.Regime;
 import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.source.PackSource;
 import dev.regpack.pack.yaml.PackSyntaxException;
 import dev.regpack.pack.yaml.StrictYaml;
@@ -95,8 +96,7 @@ public record PackManifest(
   public static Optional<PackManifest> parse(PackSource source, List<PackProblem> problems) {
     Reader reader = new Reader();
     Optional<PackManifest> manifest = reader.read(source);
-    Collections.sort(reader.found);
-    problems.addAll(reader.found);
+    problems.addAll(reader.found.sorted(FILE));
     return reader.found.isEmpty() ? manifest : Optional.empty();
   }
 
@@ -112,7 +112,7 @@ public record PackManifest(
     private static final Pattern LIMIT = Pattern.compile("[1-9][0-9]{0,17}");
     private static final int MAX_ID_CHARS = 128;
 
-    final List<PackProblem> found = new ArrayList<>();
+    final ProblemSink found = ProblemSink.forFile();
 
     private void problem(String code, int line, String message) {
       found.add(new PackProblem(code, FILE, line, message));
@@ -209,6 +209,9 @@ public record PackManifest(
 
     private void checkKeys(YamlMap m, String where, Set<String> required, Set<String> optional) {
       for (Map.Entry<String, YamlNode> e : m.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         String key = e.getKey();
         if (required.contains(key) || optional.contains(key)) {
           continue;
@@ -346,6 +349,9 @@ public record PackManifest(
       }
       boolean reserved = false;
       for (Map.Entry<String, YamlNode> e : valid.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         if (!e.getKey().equals("legal")) {
           reserved = true;
           problem(
@@ -535,6 +541,9 @@ public record PackManifest(
       }
       Set<String> seen = new HashSet<>();
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         YamlMap m = map(item, "a report");
         if (m == null) {
           continue;
@@ -548,7 +557,7 @@ public record PackManifest(
     }
 
     private ReportDefinition report(YamlMap m, Set<String> seenIds) {
-      int before = found.size();
+      int before = found.count();
       checkKeys(
           m,
           "report",
@@ -572,7 +581,7 @@ public record PackManifest(
       String lifecycle = path(m, "lifecycle");
       List<String> endpoints = paths(m, "endpoint_profiles");
       List<Leg> legs = legs(m);
-      if (found.size() > before || id == null || input == null || scope == null || legs == null) {
+      if (found.count() > before || id == null || input == null || scope == null || legs == null) {
         return null;
       }
       return new ReportDefinition(
@@ -612,6 +621,9 @@ public record PackManifest(
       }
       List<String> out = new ArrayList<>();
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         YamlScalar s = scalar(item, "an item of " + key);
         if (s == null) {
           continue;
@@ -648,6 +660,9 @@ public record PackManifest(
         vocabulary.put(leg.name(), leg);
       }
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         YamlScalar s = scalar(item, "a leg");
         if (s == null) {
           continue;

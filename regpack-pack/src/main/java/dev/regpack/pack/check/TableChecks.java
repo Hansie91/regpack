@@ -5,7 +5,6 @@ import dev.regpack.pack.model.DecisionTable;
 import dev.regpack.pack.model.TableRow;
 import dev.regpack.pack.model.Validity;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -33,18 +32,16 @@ public final class TableChecks {
 
   /** The problems of a table, sorted; empty when the table is sound. */
   public static List<PackProblem> check(DecisionTable table) {
-    List<PackProblem> found = new ArrayList<>();
-    Checker checker = new Checker(table, found);
-    checker.run();
-    Collections.sort(found);
-    return found;
+    ProblemSink found = ProblemSink.forFile();
+    new Checker(table, found).run();
+    return found.sorted(table.path());
   }
 
   private static final class Checker {
     private final DecisionTable table;
-    private final List<PackProblem> found;
+    private final ProblemSink found;
 
-    Checker(DecisionTable table, List<PackProblem> found) {
+    Checker(DecisionTable table, ProblemSink found) {
       this.table = table;
       this.found = found;
     }
@@ -69,6 +66,9 @@ public final class TableChecks {
         catchAll(rows, catchAllIndex);
       }
       for (int i = 0; i < rows.size(); i++) {
+        if (found.truncated()) {
+          break;
+        }
         TableRow row = rows.get(i);
         boolean isCatchAll = i == catchAllIndex;
         if (row.cite().isEmpty()) {
@@ -104,6 +104,9 @@ public final class TableChecks {
         byPriority.computeIfAbsent(row.priority(), p -> new ArrayList<>()).add(row.id());
       }
       for (Map.Entry<String, Integer> e : idCount.entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         if (e.getValue() > 1) {
           problem(
               "ROW_ID_DUPLICATE",
@@ -111,6 +114,9 @@ public final class TableChecks {
         }
       }
       for (Map.Entry<Integer, List<String>> e : byPriority.entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         if (e.getValue().size() > 1) {
           Set<String> ids = new LinkedHashSet<>();
           e.getValue().forEach(id -> ids.add(PackProblem.excerpt(id)));

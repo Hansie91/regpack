@@ -6,6 +6,7 @@ import dev.regpack.model.Outcome;
 import dev.regpack.model.ReasonCode;
 import dev.regpack.pack.PackText;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.yaml.YamlList;
 import dev.regpack.pack.yaml.YamlMap;
 import dev.regpack.pack.yaml.YamlNode;
@@ -61,7 +62,9 @@ public final class TableParser {
 
   /**
    * Parses one table file. The problems found are appended to {@code problems} (sorted among
-   * themselves, each naming {@code path}); the result is empty when this call found any problem.
+   * themselves, each naming {@code path}); the result is empty when this call found any problem. At
+   * most {@code PackFormat.MAX_PROBLEMS_PER_FILE} problems are kept, followed by one {@code
+   * PROBLEMS_TRUNCATED}, and reading stops there.
    *
    * @param path the pack path of the file, kept in the table and in every problem
    * @param root the parsed file
@@ -70,14 +73,13 @@ public final class TableParser {
       String path, YamlNode root, List<PackProblem> problems) {
     Reader reader = new Reader(path);
     Optional<DecisionTable> table = reader.read(root);
-    Collections.sort(reader.found);
-    problems.addAll(reader.found);
+    problems.addAll(reader.found.sorted(path));
     return reader.found.isEmpty() ? table : Optional.empty();
   }
 
   private static final class Reader {
     private final String path;
-    final List<PackProblem> found = new ArrayList<>();
+    final ProblemSink found = ProblemSink.forFile();
 
     Reader(String path) {
       this.path = path;
@@ -118,6 +120,9 @@ public final class TableParser {
         YamlList list = list(rowsNode, "rows");
         if (list != null) {
           for (YamlNode item : list.items()) {
+            if (found.truncated()) {
+              break; // the file fails anyway; do not read the rest of a hostile table
+            }
             YamlMap m = map(item, "a row");
             if (m != null) {
               TableRow row = row(m);
@@ -154,6 +159,9 @@ public final class TableParser {
 
     private void checkKeys(YamlMap m, String where, Set<String> required, Set<String> optional) {
       for (Map.Entry<String, YamlNode> e : m.entries().entrySet()) {
+        if (found.truncated()) {
+          return;
+        }
         String key = e.getKey();
         if (!required.contains(key) && !optional.contains(key)) {
           problem(
@@ -252,6 +260,9 @@ public final class TableParser {
       List<String> out = new ArrayList<>();
       boolean ok = true;
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         String value = cell(item, "an input path", INPUT_PATH, "INPUT_PATH_INVALID");
         if (value != null && value.length() > MAX_INPUT_PATH_CHARS) {
           problem("INPUT_PATH_INVALID", item.line(), "an input path is longer than 128 characters");
@@ -269,7 +280,7 @@ public final class TableParser {
     // -- rows --------------------------------------------------------------------------------
 
     private TableRow row(YamlMap m) {
-      int before = found.size();
+      int before = found.count();
       checkKeys(
           m,
           "a row",
@@ -293,7 +304,7 @@ public final class TableParser {
       Map<String, String> set = e.containsKey("set") ? set(e.get("set")) : Map.of();
       List<Leg> legs = legs(e.get("legs"), outcome);
 
-      if (found.size() > before
+      if (found.count() > before
           || id == null
           || node == null
           || priority == null
@@ -383,12 +394,15 @@ public final class TableParser {
       List<CitationRef> out = new ArrayList<>();
       boolean ok = true;
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         YamlMap m = map(item, "a citation");
         if (m == null) {
           ok = false;
           continue;
         }
-        int before = found.size();
+        int before = found.count();
         checkKeys(m, "a citation", Set.of("source_id", "provision_path", "role"), Set.of());
         String source = cell(m.entries().get("source_id"), "source_id", ID, "SOURCE_ID_INVALID");
         String provision =
@@ -398,7 +412,7 @@ public final class TableParser {
                 PROVISION_PATH,
                 "PROVISION_PATH_INVALID");
         CitationRole role = role(m.entries().get("role"));
-        if (found.size() > before || source == null || provision == null || role == null) {
+        if (found.count() > before || source == null || provision == null || role == null) {
           ok = false;
         } else {
           out.add(new CitationRef(source, provision, role));
@@ -431,6 +445,9 @@ public final class TableParser {
       }
       boolean reserved = false;
       for (Map.Entry<String, YamlNode> e : valid.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         if (!e.getKey().equals("legal")) {
           reserved = true;
           problem(
@@ -452,14 +469,14 @@ public final class TableParser {
       if (legal == null) {
         return null;
       }
-      int before = found.size();
+      int before = found.count();
       checkKeys(legal, "valid.legal", Set.of("from"), Set.of("to"));
       LocalDate from = date(legal.entries().get("from"), "valid.legal.from");
       LocalDate to =
           legal.entries().containsKey("to")
               ? date(legal.entries().get("to"), "valid.legal.to")
               : null;
-      if (found.size() > before
+      if (found.count() > before
           || from == null
           || (legal.entries().containsKey("to") && to == null)) {
         return null;
@@ -495,6 +512,9 @@ public final class TableParser {
       Map<String, String> out = new LinkedHashMap<>();
       boolean ok = true;
       for (Map.Entry<String, YamlNode> e : m.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         YamlNode valueNode = e.getValue();
         String name = e.getKey();
         boolean nameOk = clean(name, "a set name", valueNode.line());
@@ -539,6 +559,9 @@ public final class TableParser {
       List<Leg> out = new ArrayList<>();
       boolean ok = true;
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         String value = text(item, "a leg");
         if (value == null || !clean(value, "a leg", item.line())) {
           ok = false;

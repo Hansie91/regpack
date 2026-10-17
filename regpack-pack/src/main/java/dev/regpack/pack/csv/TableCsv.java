@@ -1,6 +1,8 @@
 package dev.regpack.pack.csv;
 
+import dev.regpack.pack.PackFormat;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.check.TableChecks;
 import dev.regpack.pack.model.CitationRef;
 import dev.regpack.pack.model.DecisionTable;
@@ -45,7 +47,9 @@ import java.util.Set;
  * problem ({@code CSV_COLUMNS}, {@code CSV_QUOTE}, {@code CSV_CELL_COUNT}, {@code SET_INVALID})
  * stops the later stages: the parser and the table checks do not run until the CSV itself is well
  * formed. The size of the text is not limited here; the caller reads the file with the size cap of
- * the pack format.
+ * the pack format. At most {@code PackFormat.MAX_PROBLEMS_PER_FILE} problems are reported, then one
+ * {@code PROBLEMS_TRUNCATED}, and reading stops once more records than that have a wrong number of
+ * cells.
  *
  * <p>{@link #export} does not escape spreadsheet formula characters: the guarantee that no cell
  * begins with {@code = + - @} (PF16) rests on the table having passed {@link TableChecks} ({@code
@@ -168,15 +172,19 @@ public final class TableCsv {
   public static Optional<DecisionTable> importRows(
       String csv, DecisionTable header, List<PackProblem> problems) {
     String path = header.path();
-    List<PackProblem> found = new ArrayList<>();
-    Optional<DecisionTable> result = read(csv, header, path, found);
-    Collections.sort(found);
-    problems.addAll(found);
-    return found.isEmpty() ? result : Optional.empty();
+    ProblemSink found = ProblemSink.forFile();
+    List<PackProblem> later = new ArrayList<>();
+    Optional<DecisionTable> result = read(csv, header, path, found, later);
+    // stage one (the sink) and the later stages never both report: the first stops the others
+    List<PackProblem> all = new ArrayList<>(found.sorted(path));
+    all.addAll(later);
+    Collections.sort(all);
+    problems.addAll(all);
+    return all.isEmpty() ? result : Optional.empty();
   }
 
   private static Optional<DecisionTable> read(
-      String csv, DecisionTable header, String path, List<PackProblem> found) {
+      String csv, DecisionTable header, String path, ProblemSink found, List<PackProblem> later) {
     Optional<List<Rec>> read = records(csv, path, found);
     if (read.isEmpty()) {
       return Optional.empty();
@@ -193,6 +201,9 @@ public final class TableCsv {
     int[] index = columns.get();
     List<YamlNode> rows = new ArrayList<>();
     for (Rec rec : records.subList(1, records.size())) {
+      if (found.truncated()) {
+        break; // the import fails anyway; do not read the rest of a hostile file
+      }
       if (rec.cells().size() != COLUMNS.size()) {
         found.add(
             new PackProblem(
@@ -220,21 +231,21 @@ public final class TableCsv {
     root.put("table", new YamlMap(table, 0));
     root.put("rows", new YamlList(rows, 0));
 
-    Optional<DecisionTable> parsed = TableParser.parse(path, new YamlMap(root, 0), found);
-    if (parsed.isEmpty() || !found.isEmpty()) {
+    Optional<DecisionTable> parsed = TableParser.parse(path, new YamlMap(root, 0), later);
+    if (parsed.isEmpty() || !later.isEmpty()) {
       return Optional.empty();
     }
-    found.addAll(TableChecks.check(parsed.get()));
+    later.addAll(TableChecks.check(parsed.get()));
     return parsed;
   }
 
   /** For each expected column, its position in the file; empty (with problems) on a mismatch. */
-  private static Optional<int[]> columnIndex(Rec headerRec, String path, List<PackProblem> found) {
-    int before = found.size();
+  private static Optional<int[]> columnIndex(Rec headerRec, String path, ProblemSink found) {
+    int before = found.count();
     int[] index = new int[COLUMNS.size()];
     Arrays.fill(index, -1);
     Set<String> seen = new HashSet<>();
-    for (int i = 0; i < headerRec.cells().size(); i++) {
+    for (int i = 0; i < headerRec.cells().size() && !found.truncated(); i++) {
       String name = headerRec.cells().get(i);
       int column = COLUMNS.indexOf(name);
       if (column < 0) {
@@ -258,7 +269,7 @@ public final class TableCsv {
                 "CSV_COLUMNS", path, headerRec.line(), "missing column '" + COLUMNS.get(c) + "'"));
       }
     }
-    return found.size() > before ? Optional.empty() : Optional.of(index);
+    return found.count() > before ? Optional.empty() : Optional.of(index);
   }
 
   private static YamlScalar scalar(String value, int line) {
@@ -266,7 +277,7 @@ public final class TableCsv {
   }
 
   /** The tree of one row: absent keys for empty cells, nothing trimmed. */
-  private static YamlNode rowNode(Rec rec, int[] index, String path, List<PackProblem> found) {
+  private static YamlNode rowNode(Rec rec, int[] index, String path, ProblemSink found) {
     int line = rec.line();
     String[] cell = new String[COLUMNS.size()];
     for (int c = 0; c < cell.length; c++) {
@@ -328,7 +339,7 @@ public final class TableCsv {
     return new YamlList(items, line);
   }
 
-  private static YamlNode set(String cell, int line, String path, List<PackProblem> found) {
+  private static YamlNode set(String cell, int line, String path, ProblemSink found) {
     Map<String, YamlNode> m = new LinkedHashMap<>();
     for (String item : cell.split(";", -1)) {
       int eq = item.indexOf('=');
@@ -352,13 +363,15 @@ public final class TableCsv {
    * Splits the text into records (RFC 4180). Returns empty after a {@code CSV_QUOTE} problem. A CR
    * outside quotes ends a record only together with the LF that follows it; any other CR stays in
    * the cell, where the table parser refuses it. A quoted cell may hold LF (the parser refuses it
-   * too), so line breaks never hide in a cell.
+   * too), so line breaks never hide in a cell. Reading stops once more records than the problem cap
+   * of a file have the wrong number of cells: the import is refused and the rest is not needed.
    */
-  private static Optional<List<Rec>> records(String text, String path, List<PackProblem> found) {
+  private static Optional<List<Rec>> records(String text, String path, ProblemSink found) {
     int n = text.length();
     int pos = n > 0 && text.charAt(0) == BOM ? 1 : 0;
     int line = 1;
     List<Rec> records = new ArrayList<>();
+    int wrongCount = 0;
     while (pos < n) {
       int startLine = line;
       List<String> cells = new ArrayList<>();
@@ -438,6 +451,11 @@ public final class TableCsv {
         break;
       }
       records.add(new Rec(startLine, cells));
+      if (records.size() > 1
+          && cells.size() != COLUMNS.size()
+          && ++wrongCount > PackFormat.MAX_PROBLEMS_PER_FILE) {
+        break; // enough rows to fill the problem cap of the file: the rest would only cost memory
+      }
     }
     return Optional.of(records);
   }

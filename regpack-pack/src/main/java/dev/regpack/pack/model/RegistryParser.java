@@ -6,6 +6,7 @@ import dev.regpack.model.ReasonCode;
 import dev.regpack.model.Sha256;
 import dev.regpack.pack.PackText;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.yaml.YamlList;
 import dev.regpack.pack.yaml.YamlMap;
 import dev.regpack.pack.yaml.YamlNode;
@@ -101,15 +102,14 @@ public final class RegistryParser {
 
   private static final class Reader {
     private final String path;
-    private final List<PackProblem> found = new ArrayList<>();
+    private final ProblemSink found = ProblemSink.forFile();
 
     Reader(String path) {
       this.path = path;
     }
 
     <T> Optional<T> finish(Optional<T> result, List<PackProblem> problems) {
-      Collections.sort(found);
-      problems.addAll(found);
+      problems.addAll(found.sorted(path));
       return found.isEmpty() ? result : Optional.empty();
     }
 
@@ -137,6 +137,9 @@ public final class RegistryParser {
 
     private void checkKeys(YamlMap m, String where, Set<String> required, Set<String> optional) {
       for (Map.Entry<String, YamlNode> e : m.entries().entrySet()) {
+        if (found.truncated()) {
+          break;
+        }
         String key = e.getKey();
         if (!required.contains(key) && !optional.contains(key)) {
           problem(
@@ -288,6 +291,9 @@ public final class RegistryParser {
       List<YamlNode> items = items(top, "reasons");
       if (items != null) {
         for (YamlNode item : items) {
+          if (found.truncated()) {
+            break;
+          }
           YamlMap m = map(item, "a reason");
           if (m == null) {
             continue;
@@ -321,6 +327,9 @@ public final class RegistryParser {
       Set<String> out = new LinkedHashSet<>();
       boolean ok = true;
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         String value = cell(item, "a node", NODE, "NODE_INVALID");
         if (value == null) {
           ok = false;
@@ -333,7 +342,7 @@ public final class RegistryParser {
     }
 
     private ReasonEntry reason(YamlMap m) {
-      int before = found.size();
+      int before = found.count();
       checkKeys(
           m,
           "a reason",
@@ -350,7 +359,7 @@ public final class RegistryParser {
       String owner = cell(e.get("owner"), "owner", ID, "OWNER_INVALID");
       LocalDate[] window = window(e.get("valid"));
 
-      if (found.size() > before
+      if (found.count() > before
           || code == null
           || label == null
           || category == null
@@ -391,12 +400,12 @@ public final class RegistryParser {
       if (m == null) {
         return null;
       }
-      int before = found.size();
+      int before = found.count();
       checkKeys(m, "valid", Set.of("from"), Set.of("to"));
       LocalDate from = date(m.entries().get("from"), "valid.from");
       boolean hasTo = m.entries().containsKey("to");
       LocalDate to = hasTo ? date(m.entries().get("to"), "valid.to") : null;
-      if (found.size() > before || from == null || (hasTo && to == null)) {
+      if (found.count() > before || from == null || (hasTo && to == null)) {
         return null;
       }
       return new LocalDate[] {from, to};
@@ -414,6 +423,9 @@ public final class RegistryParser {
       List<YamlNode> items = items(top, "sources");
       if (items != null) {
         for (YamlNode item : items) {
+          if (found.truncated()) {
+            break;
+          }
           YamlMap m = map(item, "a source");
           if (m == null) {
             continue;
@@ -434,7 +446,7 @@ public final class RegistryParser {
     }
 
     private SourceEntry source(YamlMap m) {
-      int before = found.size();
+      int before = found.count();
       checkKeys(
           m,
           "a source",
@@ -449,7 +461,7 @@ public final class RegistryParser {
       String eli = e.containsKey("eli") ? cell(e.get("eli"), "eli", ELI, "ELI_INVALID") : null;
       Map<String, Provision> provisions = provisions(e.get("provisions"));
 
-      if (found.size() > before
+      if (found.count() > before
           || id == null
           || version == null
           || retrievedAt == null
@@ -472,6 +484,9 @@ public final class RegistryParser {
       Map<String, Provision> out = new LinkedHashMap<>();
       boolean ok = true;
       for (YamlNode item : list.items()) {
+        if (found.truncated()) {
+          break;
+        }
         YamlMap m = map(item, "a provision");
         if (m == null) {
           ok = false;
@@ -492,7 +507,7 @@ public final class RegistryParser {
     }
 
     private Provision provision(YamlMap m) {
-      int before = found.size();
+      int before = found.count();
       checkKeys(
           m, "a provision", Set.of("path", "role", "status"), Set.of("quote", "quote_sha256"));
       Map<String, YamlNode> e = m.entries();
@@ -506,7 +521,7 @@ public final class RegistryParser {
       Sha256 quoteHash =
           e.containsKey("quote_sha256") ? hash(e.get("quote_sha256"), "quote_sha256") : null;
 
-      if (found.size() > before || provisionPath == null || role == null || status == null) {
+      if (found.count() > before || provisionPath == null || role == null || status == null) {
         return null;
       }
       return new Provision(
@@ -525,15 +540,18 @@ public final class RegistryParser {
       List<YamlNode> items = items(top, "rationales");
       if (items != null) {
         for (YamlNode item : items) {
+          if (found.truncated()) {
+            break;
+          }
           YamlMap m = map(item, "a rationale");
           if (m == null) {
             continue;
           }
-          int before = found.size();
+          int before = found.count();
           checkKeys(m, "a rationale", Set.of("id", "text"), Set.of());
           String id = cell(m.entries().get("id"), "id", RATIONALE_ID, "RATIONALE_ID_INVALID");
           String text = freeText(m.entries().get("text"), "text", "RATIONALE_TEXT_EMPTY");
-          if (found.size() > before || id == null || text == null) {
+          if (found.count() > before || id == null || text == null) {
             continue;
           }
           if (out.putIfAbsent(id, text) != null) {

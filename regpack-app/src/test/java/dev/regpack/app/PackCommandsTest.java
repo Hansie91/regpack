@@ -563,4 +563,90 @@ class PackCommandsTest {
         .contains(SCOPE)
         .noneMatch(p -> p.contains("tmp"));
   }
+
+  // ---- hostile input: the number of problem lines is bounded (final review APP-2)
+  // -----------------
+
+  /** Problem lines the commands may print: the load cap, its marker and the summary lines. */
+  private static final int MAX_LINES = 1_100;
+
+  private static final String HOSTILE_HEAD =
+      "table: {id: sample.s0.scope, hit_policy: FIRST, priority: explicit, inputs: [client.kind],"
+          + " catch_all: S-DEFAULT-catch-all}\nrows:\n";
+
+  private void hostileTable(String row, int rows) throws IOException {
+    StringBuilder text = new StringBuilder(HOSTILE_HEAD);
+    for (int i = 1; i <= rows; i++) {
+      text.append(row.replace("@N@", Integer.toString(i))).append('\n');
+    }
+    write(SCOPE, text.toString());
+    Seal.seal(pack);
+  }
+
+  @Test
+  void testOnATableOfFortyNineThousandBadRowsPrintsAtMostTheCappedList() throws IOException {
+    hostileTable("  - {id: R1}", 49_000);
+
+    assertThat(run("pack", "test", pack.toString())).isEqualTo(1);
+
+    List<String> lines = stdoutLines();
+    assertThat(lines.size()).isLessThanOrEqualTo(MAX_LINES);
+    assertThat(lines).anyMatch(l -> l.startsWith("problem PROBLEMS_TRUNCATED"));
+    assertThat(last(lines)).startsWith("pack test: FAIL (");
+  }
+
+  @Test
+  void testOnATableWhoseEveryRowFailsToCompilePrintsAtMostTheCappedList() throws IOException {
+    hostileTable(
+        "  - {id: R@N@, node: N03, priority: @N@, when: \"no.such == 1\", outcome: DO_NOT_REPORT,"
+            + " reason: SAMPLE.N03.EXCLUDED, rationale: RAT-0001, valid: {legal: {from: 2018-01-03}},"
+            + " cite: [{source_id: sample-law, provision_path: sample/1, role: BASIS}]}",
+        3_000);
+    String catchAll = text("scope/sample-scope.yaml");
+    write(
+        SCOPE,
+        catchAll
+            + "  - {id: S-DEFAULT-catch-all, node: DEFAULT, priority: 9999, when: \"true\","
+            + " outcome: UNDETERMINED, reason: SAMPLE.DEFAULT.NO_RULE_HIT, rationale: RAT-0004,"
+            + " cite: [{source_id: regpack-spec, provision_path: I5, role: GUIDANCE}]}\n");
+    Seal.seal(pack);
+
+    assertThat(run("pack", "test", pack.toString())).isEqualTo(1);
+
+    List<String> lines = stdoutLines();
+    assertThat(lines.size()).isLessThanOrEqualTo(MAX_LINES);
+    assertThat(lines).anyMatch(l -> l.startsWith("problem PROBLEMS_TRUNCATED"));
+  }
+
+  @Test
+  void theLoadFailurePathPrintsAtMostTheCappedList() throws IOException {
+    hostileTable("  - {id: R1}", 49_000);
+
+    assertThat(run("pack", "explain", pack.toString(), "--rule", "RULE-0001")).isEqualTo(1);
+
+    List<String> lines = stderr().lines().toList();
+    assertThat(lines.size()).isLessThanOrEqualTo(MAX_LINES);
+    assertThat(lines).anyMatch(l -> l.startsWith("problem PROBLEMS_TRUNCATED"));
+  }
+
+  @Test
+  void tableImportOfAHalfMillionLineCsvPrintsAtMostTheCappedList() throws IOException {
+    StringBuilder csv =
+        new StringBuilder(
+            "id,node,priority,when,outcome,reason,rule_ref,cite,rationale,valid_from,valid_to,set,"
+                + "legs\n");
+    for (int i = 0; i < 520_000; i++) {
+      csv.append("x\n");
+    }
+    Path file = temp.resolve("many.csv");
+    Files.writeString(file, csv.toString(), UTF_8);
+
+    assertThat(run("pack", "table", "import", pack.toString(), SCOPE, file.toString()))
+        .isEqualTo(1);
+
+    List<String> lines = stderr().lines().toList();
+    assertThat(lines.size()).isLessThanOrEqualTo(105);
+    assertThat(lines).anyMatch(l -> l.startsWith("problem PROBLEMS_TRUNCATED"));
+    assertThat(last(lines)).startsWith("pack table import: FAIL (101 problems)");
+  }
 }

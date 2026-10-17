@@ -2,10 +2,10 @@ package dev.regpack.pack.source;
 
 import dev.regpack.model.Sha256;
 import dev.regpack.pack.check.PackProblem;
+import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.yaml.PackSyntaxException;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,23 +41,26 @@ public final class Checksums {
 
   /** Compares the CHECKSUMS file of a source with its files; the result is sorted. */
   public static List<PackProblem> verify(PackSource source) {
-    List<PackProblem> problems = new ArrayList<>();
+    ProblemSink problems = ProblemSink.forLoad();
     if (!source.has(PackSource.CHECKSUMS)) {
       problems.add(
           new PackProblem(
               "CHECKSUMS_MISSING", PackSource.CHECKSUMS, 0, "the pack has no CHECKSUMS"));
-      return problems;
+      return problems.sorted(PackSource.CHECKSUMS);
     }
     String text;
     try {
       text = source.text(PackSource.CHECKSUMS);
     } catch (PackSyntaxException e) {
       problems.add(new PackProblem(e.code(), PackSource.CHECKSUMS, 0, "CHECKSUMS is not text"));
-      return problems;
+      return problems.sorted(PackSource.CHECKSUMS);
     }
     Map<String, String> listed = new HashMap<>();
     int lineNo = 0;
     for (String line : lines(text)) {
+      if (problems.truncated()) {
+        break;
+      }
       lineNo++;
       Matcher m = LINE.matcher(line);
       if (!m.matches() || !validPath(m.group(2)) || isReserved(m.group(2))) {
@@ -97,8 +100,7 @@ public final class Checksums {
                 "CHECKSUM_UNLISTED_FILE", path, 0, "the file is not listed in CHECKSUMS"));
       }
     }
-    Collections.sort(problems);
-    return problems;
+    return problems.sorted(PackSource.CHECKSUMS);
   }
 
   /**
