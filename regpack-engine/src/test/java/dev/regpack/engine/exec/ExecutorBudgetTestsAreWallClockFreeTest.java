@@ -15,24 +15,32 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Spec 14.1: every executor budget test counts cost units and never reads wall-clock time (review
- * focus RF7). The budget tests are the toy-program {@code MeteredExecutorTest} and the seeded
- * over-budget case {@code ScopeEngineTest#budgetExhaustionYieldsUndeterminedExecBudget}.
+ * focus RF7, PF9). The budget tests are the toy-program {@code MeteredExecutorTest}, the seeded
+ * over-budget cases of {@code ScopeEngineTest} and {@code PackScopeEngineTest}, the interpreter
+ * test {@code PackProgramTest} and the expression layer's {@code CostTest} and {@code
+ * AmplificationTest}. The poison circuit's {@code RuleCircuitTest} joins the list in task T17.
  */
 class ExecutorBudgetTestsAreWallClockFreeTest {
+  private static final List<String> SCANNED =
+      List.of(
+          "MeteredExecutorTest",
+          "ScopeEngineTest",
+          "PackScopeEngineTest",
+          "PackProgramTest",
+          "CostTest",
+          "AmplificationTest");
+
   @Test
   void budgetTestsUseNoWallClock(@TempDir Path tmp) throws IOException {
     Path testClasses = Path.of(System.getProperty("regpack.test.classes.dir"));
-    List<Path> meteredExecutorTests = classesMatching(testClasses, "MeteredExecutorTest.*\\.class");
-    List<Path> scopeEngineTests = classesMatching(testClasses, "ScopeEngineTest.*\\.class");
-    for (Path source : meteredExecutorTests) {
-      copy(testClasses, source, tmp);
-    }
-    for (Path source : scopeEngineTests) {
-      copy(testClasses, source, tmp);
+    for (String name : SCANNED) {
+      List<Path> classes = classesMatching(testClasses, name + ".*\\.class");
+      assertThat(classes).as(name).isNotEmpty();
+      for (Path source : classes) {
+        copy(testClasses, source, tmp);
+      }
     }
 
-    assertThat(meteredExecutorTests).isNotEmpty();
-    assertThat(scopeEngineTests).isNotEmpty();
     assertThat(ForbiddenCallScan.scan(tmp, EnumSet.of(RuleSet.WALL_CLOCK))).isEmpty();
   }
 
