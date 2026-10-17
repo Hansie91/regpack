@@ -1,4 +1,4 @@
-package dev.regpack.testkit.golden;
+package dev.regpack.pack.golden;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;

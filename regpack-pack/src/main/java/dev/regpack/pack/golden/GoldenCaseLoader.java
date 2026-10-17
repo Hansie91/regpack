@@ -1,11 +1,11 @@
-package dev.regpack.testkit.golden;
+package dev.regpack.pack.golden;
 
 import dev.regpack.model.Outcome;
 import dev.regpack.model.ReasonCode;
 import dev.regpack.model.json.Json;
-import dev.regpack.testkit.golden.GoldenCase.Expected;
-import dev.regpack.testkit.golden.GoldenCase.Provenance;
-import dev.regpack.testkit.golden.GoldenCase.ProvenanceKind;
+import dev.regpack.pack.golden.GoldenCase.Expected;
+import dev.regpack.pack.golden.GoldenCase.Provenance;
+import dev.regpack.pack.golden.GoldenCase.ProvenanceKind;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;

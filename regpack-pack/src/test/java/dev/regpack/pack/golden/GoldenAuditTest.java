@@ -1,10 +1,10 @@
-package dev.regpack.testkit.golden;
+package dev.regpack.pack.golden;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import dev.regpack.testkit.golden.GoldenAudit.Row;
-import dev.regpack.testkit.golden.GoldenCase.ProvenanceKind;
+import dev.regpack.pack.golden.GoldenAudit.Row;
+import dev.regpack.pack.golden.GoldenCase.ProvenanceKind;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;

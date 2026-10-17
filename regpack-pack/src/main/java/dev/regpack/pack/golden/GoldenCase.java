@@ -1,4 +1,4 @@
-package dev.regpack.testkit.golden;
+package dev.regpack.pack.golden;
 
 import dev.regpack.model.Outcome;
 import dev.regpack.model.ReasonCode;
