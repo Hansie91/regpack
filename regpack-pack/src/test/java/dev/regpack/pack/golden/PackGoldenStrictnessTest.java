@@ -346,4 +346,21 @@ class PackGoldenStrictnessTest {
     assertThat(first.get("quantity")).isInstanceOf(Long.class);
     assertThat(first.get("price")).isInstanceOf(java.math.BigDecimal.class);
   }
+
+  @Test
+  void aNumberOf200000DigitsIsAProblemAndNotAHang() {
+    // Json refuses a literal of more than 1,100 characters before building a decimal (it takes
+    // quadratic time otherwise), so the file is a GOLDEN_JSON_INVALID problem with a short message
+    String json =
+        caseJson("GC-1", "agent:golden", "d", CONSISTENCY)
+            .replace("\"price\":12.25", "\"price\":0." + "7".repeat(200_000));
+
+    Loaded loaded = load(fixture("GC-1", json));
+
+    assertThat(has(loaded, "GOLDEN_JSON_INVALID", PREFIX + "GC-1.json")).isTrue();
+    assertThat(loaded.problems())
+        .allSatisfy(p -> assertThat(p.message().length()).isLessThan(1_000));
+    assertThat(loaded.problems().stream().map(PackProblem::message))
+        .anySatisfy(m -> assertThat(m).contains("number too long"));
+  }
 }

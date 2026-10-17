@@ -10,6 +10,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.engine.expr.ExprTestSupport.Recording;
+import dev.regpack.ports.exec.CostBudget;
+import dev.regpack.ports.exec.CostMeter;
+import dev.regpack.ports.expr.Value;
 import dev.regpack.ports.expr.Value.DateValue;
 import dev.regpack.ports.expr.Value.DecimalValue;
 import dev.regpack.ports.expr.Value.EnumValue;
@@ -336,5 +339,43 @@ class LibraryTest {
       assertThat(eval(source, b)).as(source).isNotNull();
     }
     assertThat(eval("upper(s)", b)).isEqualTo(new StringValue("ABC"));
+  }
+
+  private static Value decDirect(String s) {
+    return Library.DEC.apply(
+        new Value[] {text(s)},
+        new CostMeter(new CostBudget(ExprTestSupport.BIG)),
+        InHouseExpression.Limits.defaults());
+  }
+
+  @Test
+  void decRefusesAWideTextBeforeBuildingADecimal() {
+    // called directly, because the evaluator holds a string input to 4096 code points first; the
+    // text is counted from its indices, so a million digits are refused in linear time
+    for (String wide :
+        List.of(
+            "9".repeat(1_000_000),
+            "-" + "9".repeat(1_000_000),
+            "1." + "9".repeat(1_000_000),
+            "9".repeat(500_000) + "." + "9".repeat(500_000),
+            "0." + "0".repeat(1_000_000) + "1",
+            "9".repeat(39),
+            "0.".concat("0".repeat(38)).concat("1"))) {
+      assertThatThrownBy(() -> decDirect(wide))
+          .isInstanceOfSatisfying(
+              ExprException.class,
+              e -> {
+                assertThat(e.kind()).isEqualTo(ErrorKind.SCALE);
+                assertThat(e.getMessage()).hasSizeLessThan(100);
+              });
+    }
+    // leading zeros do not count as precision, a bad character is still a PARSE error
+    assertThat(decDirect("0".repeat(5_000) + "1.5")).isEqualTo(decimal("1.5"));
+    assertThat(decDirect("0".repeat(5_000))).isEqualTo(decimal("0"));
+    assertThat(decDirect("0." + "0".repeat(37) + "1"))
+        .isEqualTo(decimal("0." + "0".repeat(37) + "1"));
+    assertThatThrownBy(() -> decDirect("9".repeat(1_000_000) + "x"))
+        .isInstanceOfSatisfying(
+            ExprException.class, e -> assertThat(e.kind()).isEqualTo(ErrorKind.PARSE));
   }
 }

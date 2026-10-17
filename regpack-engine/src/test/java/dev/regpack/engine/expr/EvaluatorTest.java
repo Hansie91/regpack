@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.engine.expr.ExprTestSupport.Recording;
+import dev.regpack.ports.exec.BudgetExceededException;
 import dev.regpack.ports.exec.CostBudget;
 import dev.regpack.ports.exec.CostMeter;
 import dev.regpack.ports.expr.Value;
@@ -274,5 +275,123 @@ class EvaluatorTest {
     assertThat(onSmallStack("-".repeat(99) + "1")).isEqualTo(integer(-1));
     // never a StackOverflowError: a result or an ExprException
     assertThat(onSmallStack("(1 + 1) / 0")).isInstanceOf(ExprException.class);
+  }
+
+  // ---- inputs are held to the limits on entry (FX1) --------------------------------------------
+
+  private static Value wideDecimal(int digits) {
+    return new Value.DecimalValue(new java.math.BigDecimal(java.math.BigInteger.TEN.pow(digits)));
+  }
+
+  private static void assertErrorWithShortMessage(
+      ErrorKind kind, String source, Recording bindings, String... declared) {
+    assertThatThrownBy(() -> eval(source, bindings, declared))
+        .isInstanceOfSatisfying(
+            ExprException.class,
+            e -> {
+              assertThat(e.kind()).as(source).isEqualTo(kind);
+              assertThat(e.getMessage()).hasSizeLessThan(200);
+            });
+  }
+
+  @Test
+  void aDecimalInputWiderThan38DigitsIsRefusedBeforeAnyUse() {
+    Recording wide = bind("q", wideDecimal(200_000), "p", wideDecimal(200_000));
+    for (String source :
+        List.of(
+            "q / p > 1.0",
+            "q > 1.0",
+            "q == p",
+            "q + 1.0 > 1.0",
+            "-q > 1.0",
+            "string(q) == 'x'",
+            "round(q, 2, 'HALF_UP') > 1.0",
+            "int(q) > 1",
+            "has(q)",
+            "has(q) && q > 1.0")) {
+      assertErrorWithShortMessage(ErrorKind.SCALE, source, wide);
+    }
+    // a scale beyond 38 in either direction, with few digits
+    assertError(
+        ErrorKind.SCALE,
+        "q > 1.0",
+        bind("q", decimal("0.1234567890123456789012345678901234567890")));
+    assertError(ErrorKind.SCALE, "q > 1.0", bind("q", decimal("1E+39")));
+    assertError(ErrorKind.SCALE, "has(q)", bind("q", decimal("1E+39")));
+    // a list element is held to the same limit
+    assertError(
+        ErrorKind.SCALE, "size(l) > 0", bind("l", new ListValue(List.of(wideDecimal(200_000)))));
+  }
+
+  @Test
+  void aDecimalInputOf38DigitsStillEvaluates() {
+    Recording at = bind("q", decimal("99999999999999999999999999999999999999"));
+    assertThat(eval("q > 1.0", at)).isEqualTo(TRUE);
+    assertThat(eval("has(q)", at)).isEqualTo(TRUE);
+    Recording scaled = bind("q", decimal("0.99999999999999999999999999999999999999")); // scale 38
+    assertThat(eval("q < 1.0", scaled)).isEqualTo(TRUE);
+    assertThat(eval("q > 1.0", bind("q", decimal("1E+38")))).isEqualTo(TRUE);
+  }
+
+  @Test
+  void aStringInputLongerThanTheLimitIsRefusedBeforeAnyUse() {
+    Recording huge = bind("s", text("a".repeat(1_000_000)), "t", text("b"));
+    for (String source :
+        List.of(
+            "size(s) > 0",
+            "dec(s) > 1.5",
+            "s == t",
+            "s + t == t",
+            "contains(s, t)",
+            "s.contains(t)",
+            "t.contains(s)",
+            "upper(s) == t",
+            "s.startsWith(t)",
+            "s < t",
+            "has(s)",
+            "has(s) && size(s) > 0")) {
+      assertErrorWithShortMessage(ErrorKind.RANGE, source, huge);
+    }
+    // 4097 code points are over the limit, 4096 are not (code points, not chars)
+    String grin = new String(Character.toChars(0x1F600));
+    assertError(ErrorKind.RANGE, "size(s) > 0", bind("s", text("a".repeat(4097))));
+    assertThat(eval("size(s) == 4096", bind("s", text("a".repeat(4096))))).isEqualTo(TRUE);
+    assertThat(eval("size(s) == 4096", bind("s", text(grin.repeat(4096))))).isEqualTo(TRUE);
+    assertError(ErrorKind.RANGE, "size(s) > 0", bind("s", text(grin.repeat(4097))));
+    assertThat(eval("has(s)", bind("s", text("a".repeat(4096))))).isEqualTo(TRUE);
+    // a string inside a list is held to the limit as well
+    assertError(
+        ErrorKind.RANGE, "size(l) > 0", bind("l", new ListValue(List.of(text("a".repeat(4097))))));
+  }
+
+  @Test
+  void aListInputLongerThanTheLimitIsRefusedBeforeAnyUse() {
+    List<Value> items = new ArrayList<>();
+    for (int i = 0; i < 257; i++) {
+      items.add(integer(i));
+    }
+    Recording longList = bind("l", new ListValue(items), "x", integer(1));
+    for (String source :
+        List.of("size(l) > 0", "x in l", "contains(l, x)", "l == l", "has(l)", "l + l == l")) {
+      assertErrorWithShortMessage(ErrorKind.RANGE, source, longList);
+    }
+    assertThat(eval("size(l) == 256", bind("l", new ListValue(items.subList(0, 256)))))
+        .isEqualTo(TRUE);
+  }
+
+  @Test
+  void anOversizedInputIsChargedItsSizeBeforeItIsRefused() {
+    List<Value> items = new ArrayList<>();
+    for (int i = 0; i < 1000; i++) {
+      items.add(integer(i));
+    }
+    Recording longList = bind("l", new ListValue(items));
+    Recording longText = bind("s", text("a".repeat(100_000)));
+    var listCall = ExprTestSupport.compile(new InHouseExpression(), "size(l)", longList);
+    var textCall = ExprTestSupport.compile(new InHouseExpression(), "size(s)", longText);
+    assertThatThrownBy(() -> listCall.evaluate(longList, new CostMeter(new CostBudget(100))))
+        .isInstanceOf(BudgetExceededException.class);
+    assertThatThrownBy(() -> textCall.evaluate(longText, new CostMeter(new CostBudget(100))))
+        .isInstanceOf(BudgetExceededException.class);
   }
 }

@@ -215,10 +215,12 @@ public enum Library {
     while (i < n && isDigit(s.charAt(i))) {
       i++;
     }
+    int integerEnd = i;
     boolean valid = i > integerStart;
+    int fractionStart = -1;
     if (valid && i < n && s.charAt(i) == '.') {
       i++;
-      int fractionStart = i;
+      fractionStart = i;
       while (i < n && isDigit(s.charAt(i))) {
         i++;
       }
@@ -226,6 +228,26 @@ public enum Library {
     }
     if (!valid || i != n) {
       throw Evaluator.error(ErrorKind.PARSE, "not a decimal");
+    }
+    // Scale and precision as BigDecimal would measure them (the precision ignores leading zeros),
+    // counted from the indices: building the BigDecimal of a long digit string costs quadratic time
+    int fractionDigits = fractionStart < 0 ? 0 : n - fractionStart;
+    int significantFrom = integerStart;
+    while (significantFrom < integerEnd && s.charAt(significantFrom) == '0') {
+      significantFrom++;
+    }
+    int digits = integerEnd - significantFrom;
+    if (digits == 0 && fractionStart >= 0) {
+      significantFrom = fractionStart;
+      while (significantFrom < n && s.charAt(significantFrom) == '0') {
+        significantFrom++;
+      }
+      digits = n - significantFrom;
+    } else {
+      digits += fractionDigits;
+    }
+    if (fractionDigits > MAX_DECIMAL_DIGITS || Math.max(digits, 1) > MAX_DECIMAL_DIGITS) {
+      throw Evaluator.error(ErrorKind.SCALE, "decimal exceeds " + MAX_DECIMAL_DIGITS + " digits");
     }
     return new BigDecimal(s);
   }

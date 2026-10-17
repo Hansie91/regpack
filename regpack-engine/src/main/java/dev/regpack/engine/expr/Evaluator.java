@@ -30,9 +30,14 @@ import java.util.Set;
  * evaluation on one thread. Every charge is made before the work it pays for: one unit for each
  * node on entry, then the surcharge of the operation before it allocates or scans. A budget overrun
  * is the port's {@code BudgetExceededException}; every other failure is an {@link ExprException}.
- * The evaluator recurses per tree level (at most 256, see {@link Parser#MAX_DEPTH}; {@code &&} and
- * {@code ||} use three frames per level, the worst case), so it fits a small worker stack; it does
- * not catch a {@code StackOverflowError}.
+ * Inputs are held to the limits on entry: a value taken from the bindings (by a read or by {@code
+ * has}) is refused before any use when a decimal has more than 38 digits of precision or a scale
+ * outside -38 to 38 (SCALE), a string has more than {@code maxStringCodePoints} code points or a
+ * list more than {@code maxListItems} items (RANGE), elements included. An oversized string or list
+ * is first charged its size like any operand (so a budget overrun can come before the RANGE). The
+ * static worst case holds only for inputs within the limits. The evaluator recurses per tree level
+ * (at most 256, see {@link Parser#MAX_DEPTH}; {@code &&} and {@code ||} use three frames per level,
+ * the worst case), so it fits a small worker stack; it does not catch a {@code StackOverflowError}.
  *
  * <p>Stack need, measured on a bare thread with a left chain of depth 256 ({@code +}, {@code &&},
  * {@code ||}, 255 operators each): a 128 KB stack overflows interpreted or cold, 160 KB passes with
@@ -88,7 +93,51 @@ final class Evaluator {
   // ---- paths and absence ---------------------------------------------------------------------
 
   private Value read(String path) {
-    return bindings.get(path).orElseThrow(() -> error(ErrorKind.ABSENT, "unbound path " + path));
+    return held(
+        bindings.get(path).orElseThrow(() -> error(ErrorKind.ABSENT, "unbound path " + path)));
+  }
+
+  /**
+   * Holds a bound value to the limits on entry, before anything uses it: a decimal of more than 38
+   * digits of precision or a scale outside -38 to 38 is SCALE, a string of more than {@code
+   * maxStringCodePoints} code points and a list of more than {@code maxListItems} items are RANGE
+   * (the elements of a list are held to the same limits). The static worst case is only a bound for
+   * inputs within the limits, so nothing may touch an input beyond them.
+   */
+  private Value held(Value value) {
+    switch (value) {
+      case DecimalValue(BigDecimal d) -> {
+        // bitLength first: 38 digits fit 127 bits, and precision() of a huge value is not cheap
+        if (Math.abs((long) d.scale()) > Library.MAX_DECIMAL_DIGITS
+            || d.unscaledValue().bitLength() > 127
+            || d.precision() > Library.MAX_DECIMAL_DIGITS) {
+          throw error(
+              ErrorKind.SCALE, "decimal input exceeds " + Library.MAX_DECIMAL_DIGITS + " digits");
+        }
+      }
+      case StringValue(String s) -> {
+        // a string of at most the limit in chars has at most the limit in code points
+        if (s.length() > limits.maxStringCodePoints()) {
+          int codePoints = Library.codePoints(s);
+          if (codePoints > limits.maxStringCodePoints()) {
+            meter.charge(codePoints / 256); // charged its size first, as every string operand is
+            throw error(
+                ErrorKind.RANGE, "string input longer than " + limits.maxStringCodePoints());
+          }
+        }
+      }
+      case ListValue(List<Value> items) -> {
+        if (items.size() > limits.maxListItems()) {
+          meter.charge(items.size()); // charged its length first, as every list operand is
+          throw error(ErrorKind.RANGE, "list input longer than " + limits.maxListItems());
+        }
+        for (Value item : items) {
+          held(item);
+        }
+      }
+      default -> {}
+    }
+    return value;
   }
 
   private Value has(String path) {
@@ -100,7 +149,7 @@ final class Evaluator {
         }
       }
     }
-    return bindings.get(path).isPresent() ? TRUE : FALSE;
+    return bindings.get(path).map(this::held).isPresent() ? TRUE : FALSE;
   }
 
   private Value list(Ast.ListLit literal) {
