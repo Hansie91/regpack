@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.regpack.engine.exec.MeteredExecutor;
 import dev.regpack.engine.expr.Rulings;
+import dev.regpack.engine.packci.PackExplainer;
 import dev.regpack.model.Citation;
 import dev.regpack.model.CitationRole;
 import dev.regpack.model.IngestKey;
@@ -279,26 +280,78 @@ class PackScopeEngineTest {
                 .scope(PackBuilder.Rule.of("R-ISIN", "instrument.isin + 1"))
                 .load());
 
-    DecisionBody body =
-        decide(
-            provider,
-            execution(
-                LifecycleKind.NEW,
-                AssetClass.EQUITY,
-                true,
-                PartyKind.LEGAL_ENTITY,
-                "SECRET-ISIN-7"),
-            100);
+    CanonicalExecution secret =
+        execution(
+            LifecycleKind.NEW, AssetClass.EQUITY, true, PartyKind.LEGAL_ENTITY, "SECRET-ISIN-7");
+
+    DecisionBody body = decide(provider, secret, 100);
 
     assertThat(body.reasonCode()).isEqualTo(new ReasonCode("EXEC_ERROR"));
     // exactly the keys of the contract (companion section 5.6), in this order
     assertThat(body.flags().stream().map(f -> f.substring(0, f.indexOf('='))).toList())
         .containsExactly("rule_id", "error_class", "error_kind", "cost_units");
+    // every flag VALUE of an EXEC_ERROR decision is a rule id, a class name, a kind or a count
+    assertThat(body.flags())
+        .hasSize(4)
+        .anyMatch(f -> f.equals("rule_id=R-ISIN"))
+        .anyMatch(f -> f.equals("error_class=ExprException"))
+        .anyMatch(f -> f.equals("error_kind=TYPE"))
+        .anyMatch(f -> f.matches("cost_units=[0-9]+"));
     assertThat(body.toString()).doesNotContain("SECRET-ISIN-7");
     assertThat(String.join("|", body.flags())).doesNotContain("SECRET");
     assertThat(body.path()).extracting(PathStep::ruleId).noneMatch(id -> id.contains("SECRET"));
     assertThat(List.copyOf(body.citations()).toString()).doesNotContain("SECRET");
-    // the PackExplainer.explainEvent assertion is added in T18, which creates the class
+    // the explanation (Tier 1 text and the full trace) does not echo the value either
+    String explained = PackExplainer.explainEvent(provider, secret, INGEST_KEY, EVALUATED_AT);
+    assertThat(explained)
+        .contains("Reason: EXEC_ERROR (node EXEC)")
+        .contains("R-ISIN: ERROR TYPE")
+        .doesNotContain("SECRET-ISIN-7")
+        .doesNotContain("SECRET");
+  }
+
+  @Test
+  void execErrorFlagValuesNeverEchoARecordValueWhateverTheFailure() {
+    // a record value reaches an error through each of these rules; no flag value may contain it
+    Map<String, String> whens =
+        Map.of(
+            "TYPE", "instrument.isin + 1",
+            "TYPE_COMPARE", "instrument.isin < 5",
+            "ABSENT", "client.lei == instrument.isin");
+    for (Map.Entry<String, String> mode : whens.entrySet()) {
+      PackRegime provider =
+          regimeOf(
+              PackBuilder.sample().scope(PackBuilder.Rule.of("R-LEAK", mode.getValue())).load());
+      CanonicalExecution secret =
+          new CanonicalExecution(
+              "LEI-FIRM-0001",
+              "XPAR",
+              "EX-1",
+              LifecycleKind.NEW,
+              TRADED_AT,
+              AssetClass.EQUITY,
+              "SECRET-ISIN-7",
+              true,
+              PartyKind.NATURAL_PERSON,
+              Optional.empty(),
+              new BigDecimal("100"),
+              new BigDecimal("12.25"),
+              "EUR");
+
+      DecisionBody body = decide(provider, secret, 100);
+
+      assertThat(body.reasonCode()).as(mode.getKey()).isEqualTo(new ReasonCode("EXEC_ERROR"));
+      assertThat(body.flags()).as(mode.getKey()).hasSize(4);
+      for (String flag : body.flags()) {
+        assertThat(flag.substring(flag.indexOf('=') + 1))
+            .as(mode.getKey() + " " + flag)
+            .matches("[A-Za-z][A-Za-z0-9_.-]*|[0-9]+")
+            .doesNotContain("SECRET");
+      }
+      assertThat(PackExplainer.explainEvent(provider, secret, INGEST_KEY, EVALUATED_AT))
+          .as(mode.getKey())
+          .doesNotContain("SECRET");
+    }
   }
 
   // ---- T17: the poison circuit (spec 7.3, 14.1); every number here is a count, never a time ----

@@ -7,12 +7,14 @@ import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.model.decision.PathStep;
 import java.util.List;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 /**
  * Tier-1 explanation of a decision: a fixed text rendering of the stored record. Lines end with LF
  * and the text has no trailing newline; an empty list of flags, legs or rule hits reads {@code
- * none}.
+ * none}. An {@code Attributes:} line (names sorted) follows {@code Legs:} only when the decision
+ * has attributes, so the text of a decision without them is what it always was.
  */
 public final class Tier1Explainer {
   private Tier1Explainer() {}
@@ -73,6 +75,17 @@ public final class Tier1Explainer {
     out.append("Legs: ")
         .append(joinOrNone(body.legs().stream().map(Leg::name).collect(Collectors.toList())))
         .append('\n');
+    if (!body.attributes().isEmpty()) {
+      // only when there are attributes (BRK-10), so the text of a decision without them is
+      // unchanged
+      out.append("Attributes: ")
+          .append(
+              new TreeMap<>(body.attributes())
+                  .entrySet().stream()
+                      .map(e -> e.getKey() + "=" + e.getValue())
+                      .collect(Collectors.joining(", ")))
+          .append('\n');
+    }
     out.append("Input digest: ").append(body.inputDigest().hex()).append('\n');
     out.append("Context: ").append(body.decisionContextId().hex());
     return out.toString();

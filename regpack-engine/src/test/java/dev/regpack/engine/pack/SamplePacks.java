@@ -21,16 +21,16 @@ import java.util.TreeMap;
  * variants of it. A variant replaces the text of some files; {@link #sealed} recomputes {@code
  * CHECKSUMS}, so the loader's integrity check passes and only the intended change is under test.
  */
-final class SamplePacks {
+public final class SamplePacks {
   private SamplePacks() {}
 
   /** The directory of the sample pack under the repository root. */
-  static Path directory() {
+  public static Path directory() {
     return Path.of(System.getProperty("regpack.repo.root")).resolve("packs").resolve("sample.s0");
   }
 
   /** Every file of the sample pack except {@code CHECKSUMS} and {@code ATTESTATION}, as text. */
-  static Map<String, String> files() {
+  public static Map<String, String> files() {
     PackSource source = PackSource.fromDirectory(directory());
     Map<String, String> files = new TreeMap<>();
     for (String path : source.paths()) {
@@ -45,7 +45,7 @@ final class SamplePacks {
    * The sample pack with the given files replaced (a null text removes the file; a new path adds
    * it), sealed with a fresh {@code CHECKSUMS}.
    */
-  static PackSource sealed(Map<String, String> overrides) {
+  public static PackSource sealed(Map<String, String> overrides) {
     Map<String, String> files = files();
     overrides.forEach(
         (path, text) -> {
@@ -63,12 +63,12 @@ final class SamplePacks {
   }
 
   /** Loads the unchanged sample pack; fails the test on any problem. */
-  static LoadedPack load() {
+  public static LoadedPack load() {
     return loadSealed(Map.of());
   }
 
   /** Loads a sealed variant; fails the test on any problem (the variant must be loadable). */
-  static LoadedPack loadSealed(Map<String, String> overrides) {
+  public static LoadedPack loadSealed(Map<String, String> overrides) {
     LoadResult result = PackLoader.load(sealed(overrides));
     List<String> problems = new ArrayList<>();
     for (PackProblem p : result.problems()) {
@@ -79,7 +79,7 @@ final class SamplePacks {
   }
 
   /** The text of a sample file with every occurrence of {@code from} replaced. */
-  static String replaced(String path, String from, String to) {
+  public static String replaced(String path, String from, String to) {
     String text = files().get(path);
     assertThat(text).as(path).contains(from);
     return text.replace(from, to);

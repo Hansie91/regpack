@@ -192,6 +192,32 @@ public final class PackRegime implements RegimeProvider {
 
   @Override
   public Result evaluate(CanonicalEvent event, EvaluationContext context) {
+    return run(event, context, false, circuit).result();
+  }
+
+  /** A decision and the row-by-row trace of the evaluation that made it. */
+  public record Traced(Result result, List<PackProgram.RowTrace> rows) {
+    public Traced {
+      Objects.requireNonNull(result, "result");
+      rows = List.copyOf(rows);
+    }
+  }
+
+  /**
+   * Evaluates like {@link #evaluate} and also returns the rows the interpreter evaluated, for
+   * {@code explain} (spec 6.3, Tier 2). The evaluation is a re-evaluation, so it neither reads nor
+   * feeds the poison circuit: a row whose circuit is open is evaluated again and its real outcome
+   * is shown.
+   */
+  public Traced evaluateTraced(CanonicalEvent event, EvaluationContext context) {
+    return run(event, context, true, Optional.empty());
+  }
+
+  private Traced run(
+      CanonicalEvent event,
+      EvaluationContext context,
+      boolean fullTrace,
+      Optional<RuleCircuit> poisonCircuit) {
     Objects.requireNonNull(event, "event");
     Objects.requireNonNull(context, "context");
     CanonicalExecution execution =
@@ -199,7 +225,7 @@ public final class PackRegime implements RegimeProvider {
           case CanonicalExecution e -> e;
         };
     Bindings bindings = new CanonicalBindings(execution);
-    PackProgram program = new PackProgram(compiled, false, circuit);
+    PackProgram program = new PackProgram(compiled, fullTrace, poisonCircuit);
     ExecutionResult<PackProgram.Decision> result =
         executor.execute(program, bindings, context.budget());
     Instant asAt =
@@ -260,7 +286,7 @@ public final class PackRegime implements RegimeProvider {
                   List.of(),
                   Map.of());
         };
-    return new Result(body, List.of(), Optional.empty());
+    return new Traced(new Result(body, List.of(), Optional.empty()), program.rowTraces());
   }
 
   /**

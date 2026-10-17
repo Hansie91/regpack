@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
  * them and the header {@code inputs} is the set of declared paths the rules read, so the variant
  * satisfies the header check of {@link CompiledPack} without further ado.
  */
-final class PackBuilder {
+public final class PackBuilder {
   private static final String MAIN_REPORT = "sample.s0";
   private static final String MAIN_FILE = "scope/sample-scope.yaml";
   private static final String PACK = "pack.yaml";
@@ -35,7 +35,7 @@ final class PackBuilder {
   private static final Pattern EXPECTED = Pattern.compile("expected ([0-9a-f]{64})");
 
   /** One rule row; the defaults make a REPORT row that cites the first sample provision. */
-  record Rule(
+  public record Rule(
       String id,
       String when,
       String node,
@@ -45,30 +45,30 @@ final class PackBuilder {
       String validTo,
       String set,
       int priority) {
-    static Rule of(String id, String when) {
+    public static Rule of(String id, String when) {
       return new Rule(
           id, when, "N08", "REPORT", "SAMPLE.N08.IN_SCOPE", "2018-01-03", null, null, 0);
     }
 
-    Rule outcome(String node, String outcome, String reason) {
+    public Rule outcome(String node, String outcome, String reason) {
       return new Rule(id, when, node, outcome, reason, validFrom, validTo, set, priority);
     }
 
-    Rule validFrom(String date) {
+    public Rule validFrom(String date) {
       return new Rule(id, when, node, outcome, reason, date, validTo, set, priority);
     }
 
-    Rule validTo(String date) {
+    public Rule validTo(String date) {
       return new Rule(id, when, node, outcome, reason, validFrom, date, set, priority);
     }
 
     /** The text of a flow mapping body, for example {@code action: NEWT}. */
-    Rule set(String flowMappingBody) {
+    public Rule set(String flowMappingBody) {
       return new Rule(
           id, when, node, outcome, reason, validFrom, validTo, flowMappingBody, priority);
     }
 
-    Rule priority(int value) {
+    public Rule priority(int value) {
       return new Rule(id, when, node, outcome, reason, validFrom, validTo, set, value);
     }
   }
@@ -87,18 +87,18 @@ final class PackBuilder {
   private PackBuilder() {}
 
   /** The sample pack as it is. */
-  static PackBuilder sample() {
+  public static PackBuilder sample() {
     return new PackBuilder();
   }
 
   /** Replaces the rows of the main scope table. */
-  PackBuilder scope(Rule... rules) {
+  public PackBuilder scope(Rule... rules) {
     tables.put(MAIN_FILE, new Table(MAIN_FILE, "sample.s0.scope", List.of(rules)));
     return this;
   }
 
   /** Adds a second report with its own scope table; its id is the id of its regime. */
-  PackBuilder secondReport(String id, Rule... rules) {
+  public PackBuilder secondReport(String id, Rule... rules) {
     String file = "scope/" + id + ".yaml";
     tables.put(file, new Table(file, id + ".scope", List.of(rules)));
     reports.add(new Report(id, List.of(file)));
@@ -107,7 +107,7 @@ final class PackBuilder {
   }
 
   /** A pack with two scope tables in the first report, consulted in the given order. */
-  PackBuilder chain(List<Rule> first, List<Rule> second) {
+  public PackBuilder chain(List<Rule> first, List<Rule> second) {
     String file = "scope/second-table.yaml";
     tables.put(MAIN_FILE, new Table(MAIN_FILE, "sample.s0.scope", first));
     tables.put(file, new Table(file, "sample.s0.scope2", second));
@@ -117,24 +117,24 @@ final class PackBuilder {
   }
 
   /** The text after {@code limits: {...}}, for example {@code rule_nodes: 3}. */
-  PackBuilder limits(String flowMappingBody) {
+  public PackBuilder limits(String flowMappingBody) {
     this.limits = flowMappingBody;
     return this;
   }
 
-  PackBuilder engineMin(String text) {
+  public PackBuilder engineMin(String text) {
     this.engineMin = text;
     return this;
   }
 
   /** Replaces or adds the text of any file; null removes it. */
-  PackBuilder file(String path, String text) {
+  public PackBuilder file(String path, String text) {
     overrides.put(path, text);
     return this;
   }
 
   /** The sealed source, with {@code input_schema} recomputed when the canonical input changed. */
-  PackSource source() {
+  public PackSource source() {
     Map<String, String> all = new TreeMap<>(overrides);
     String pack = all.getOrDefault(PACK, SamplePacks.files().get(PACK));
     if (engineMin != null) {
@@ -166,7 +166,7 @@ final class PackBuilder {
   }
 
   /** Loads the variant and fails the test on any problem. */
-  LoadedPack load() {
+  public LoadedPack load() {
     LoadResult result = PackLoader.load(source());
     List<String> found = new ArrayList<>();
     for (PackProblem p : result.problems()) {
