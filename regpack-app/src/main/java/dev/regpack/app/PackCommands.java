@@ -44,7 +44,9 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,9 +61,27 @@ import java.util.Optional;
  * missing or unreadable file, a file over {@link PackFormat#MAX_FILE_BYTES}, a file that is not
  * UTF-8, an unknown rule id, a table path that is not a scope table of the pack).
  *
- * <p>Output lines end in LF on every platform. Text that comes from files is bounded and escaped
- * (the problems through {@link PackProblem}, other text through {@link #printable}). A file named
- * on the command line is read with the size cap of the pack format before anything parses it.
+ * <p>Output lines end in LF on every platform. What is escaped, exactly:
+ *
+ * <ul>
+ *   <li>{@code pack test}: the problem lines (path and message) through {@link PackProblem}, and
+ *       the reviewer registry name of the audit line, escaped and cut to 240 characters. The other
+ *       report lines hold fixed text, counts and the pack's own checked identity.
+ *   <li>{@code pack explain} ({@code --rule} and {@code --event}): the whole output goes through
+ *       {@link #safeOutput}: every character outside 0x20..0x7E, except the LF that ends a line, is
+ *       written as {@code \}{@code uXXXX}, and a line longer than {@value #MAX_OUTPUT_LINE}
+ *       characters after escaping is cut there and ends in {@value #CUT_MARKER}. This covers the
+ *       event identity (firm, venue, execution id) of the Tier-1 line.
+ *   <li>error messages on standard error: names and messages that come from arguments or files
+ *       through {@link #printable} (escaped and cut to a fixed length), problems through {@link
+ *       PackProblem}.
+ *   <li>not escaped: the CSV of {@code pack table export} on standard output, which is data by
+ *       design (its cells passed the table checks).
+ * </ul>
+ *
+ * <p>A file named on the command line is read with the size cap of the pack format before anything
+ * parses it. {@code pack table export --out} refuses a file inside the pack directory and, like the
+ * table import, writes through a temporary file and a move.
  */
 public final class PackCommands {
   /** The pack lines of the usage text of {@code regpack help}. */
@@ -69,7 +89,8 @@ public final class PackCommands {
       String.join(
           "\n",
           "  pack test <dir> [--reviewers <file>]",
-          "          check a rule pack; exit 0 pass, 1 fail",
+          "          check a rule pack; exit 0 pass, 1 fail; without --reviewers the registry is",
+          "          governance/golden-reviewers.txt in the working directory, if there is one",
           "  pack explain <dir> --rule <id>",
           "          explain one rule of a pack",
           "  pack explain <dir> --event <execution.json>",
@@ -81,6 +102,12 @@ public final class PackCommands {
           "  pack table import <dir> <table-path> <csv> [--write]",
           "          check a CSV against a table; --write rewrites the table file",
           "");
+
+  /** Longest line of explain output, after escaping, not counting the cut marker. */
+  static final int MAX_OUTPUT_LINE = 1000;
+
+  /** Ends a line of explain output that was cut at {@link #MAX_OUTPUT_LINE}. */
+  static final String CUT_MARKER = "[cut]";
 
   private static final String USAGE = "usage: regpack pack <command>\n" + COMMANDS;
   private static final String DEFAULT_REVIEWERS = "governance/golden-reviewers.txt";
@@ -175,7 +202,7 @@ public final class PackCommands {
       }
       reviewersFile = Optional.of(args.get(i + 1));
     }
-    ReviewerRegistry reviewers = reviewers(reviewersFile);
+    NamedRegistry reviewers = reviewers(reviewersFile);
     PackSource source;
     try {
       source = PackSource.fromDirectory(dir);
@@ -185,23 +212,34 @@ public final class PackCommands {
       out.print(problemLine(problem) + "\npack test: FAIL (1 problems)\n");
       return 1;
     }
-    PackTestReport report = PackTester.run(source, reviewers);
+    PackTestReport report = PackTester.run(source, reviewers.registry(), reviewers.name());
     out.print(report.render() + "\n");
     return report.passed() ? 0 : 1;
   }
 
-  private static ReviewerRegistry reviewers(Optional<String> file) {
+  /** The reviewers of a run and where they came from (what the audit line prints). */
+  private record NamedRegistry(ReviewerRegistry registry, String name) {}
+
+  /**
+   * The registry of the run: the file named by {@code --reviewers}, else {@value
+   * #DEFAULT_REVIEWERS} resolved against the JVM working directory, else an empty registry. The
+   * name is the absolute, normalised path of the file that was read, or {@link
+   * PackTester#NO_REGISTRY}.
+   */
+  private static NamedRegistry reviewers(Optional<String> file) {
     Path path;
     if (file.isPresent()) {
       path = path(file.get());
     } else {
       path = Path.of(DEFAULT_REVIEWERS);
       if (!Files.isRegularFile(path)) {
-        return ReviewerRegistry.parse("");
+        return new NamedRegistry(ReviewerRegistry.parse(""), PackTester.NO_REGISTRY);
       }
     }
     try {
-      return ReviewerRegistry.parse(readText(path, "the reviewer registry"));
+      return new NamedRegistry(
+          ReviewerRegistry.parse(readText(path, "the reviewer registry")),
+          path.toAbsolutePath().normalize().toString());
     } catch (IllegalArgumentException e) {
       throw input("invalid reviewer registry: " + printable(e.getMessage(), 160));
     }
@@ -223,7 +261,7 @@ public final class PackCommands {
     }
     if (rule) {
       try {
-        out.print(PackExplainer.explainRule(pack.get(), args.get(2)) + "\n");
+        out.print(safeOutput(PackExplainer.explainRule(pack.get(), args.get(2))) + "\n");
       } catch (IllegalArgumentException e) {
         throw input(printable(e.getMessage(), 160));
       }
@@ -253,7 +291,7 @@ public final class PackCommands {
     } catch (IllegalArgumentException e) {
       throw input("no decision can be made for the event: " + printable(e.getMessage(), 160));
     }
-    out.print(explanation + "\n");
+    out.print(safeOutput(explanation) + "\n");
     return 0;
   }
 
@@ -312,18 +350,21 @@ public final class PackCommands {
     Path dir = directory(args.get(0));
     String tablePath = args.get(1);
     requireValidTablePath(tablePath);
+    Optional<Path> outFile = toFile ? Optional.of(path(args.get(3))) : Optional.empty();
+    if (outFile.isPresent() && inside(outFile.get(), dir)) {
+      throw input(
+          "OUT_INSIDE_PACK the output file '"
+              + printable(args.get(3), 64)
+              + "' is inside the pack directory; export to a file outside it");
+    }
     Optional<LoadedPack> pack = load(dir, err);
     if (pack.isEmpty()) {
       return 1;
     }
     DecisionTable table = scopeTable(pack.get(), tablePath);
     byte[] csv = TableCsv.export(table).getBytes(UTF_8);
-    if (toFile) {
-      try {
-        Files.write(path(args.get(3)), csv);
-      } catch (IOException e) {
-        throw input("cannot write the output file: " + e.getClass().getSimpleName());
-      }
+    if (outFile.isPresent()) {
+      writeAtomically(outFile.get(), csv);
       out.print("wrote " + table.rows().size() + " rows of " + tablePath + "\n");
     } else {
       out.write(csv, 0, csv.length);
@@ -448,19 +489,36 @@ public final class PackCommands {
     return new int[] {added, removed, changed};
   }
 
-  /** Temp file in the same directory, then an atomic move; the temp file never survives. */
+  /**
+   * Temp file in the same directory, then an atomic move; the temp file never survives (unless the
+   * JVM is killed between the two steps: a leftover {@code .table-*.tmp} in a pack directory makes
+   * {@code PackSource} refuse the pack until it is removed by hand). Where the file system has
+   * POSIX permissions the new file gets those of the file it replaces, else the default of the
+   * process (the umask), not the owner-only mode of a temp file; elsewhere nothing differs.
+   */
   private static void writeAtomically(Path target, byte[] bytes) {
+    Path absolute = target.toAbsolutePath();
     Path temp = null;
     try {
-      temp = Files.createTempFile(target.getParent(), ".table-", ".tmp");
+      temp = Files.createTempFile(absolute.getParent(), ".table-", ".tmp");
+      if (temp.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+        if (Files.isRegularFile(absolute)) {
+          Files.setPosixFilePermissions(temp, Files.getPosixFilePermissions(absolute));
+        } else {
+          // createTempFile makes the file owner-only; a file created without attributes gets the
+          // default of the process
+          Files.delete(temp);
+          Files.createFile(temp);
+        }
+      }
       Files.write(temp, bytes);
       try {
-        Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE);
+        Files.move(temp, absolute, StandardCopyOption.ATOMIC_MOVE);
       } catch (AtomicMoveNotSupportedException e) {
-        throw input("cannot replace the table file atomically on this file system");
+        throw input("cannot replace the file atomically on this file system");
       }
     } catch (IOException e) {
-      throw input("cannot write the table file: " + e.getClass().getSimpleName());
+      throw input("cannot write the file: " + e.getClass().getSimpleName());
     } finally {
       if (temp != null) {
         try {
@@ -469,6 +527,44 @@ public final class PackCommands {
           // nothing to do: the original file is untouched or already replaced
         }
       }
+    }
+  }
+
+  /** Whether the file is the directory or below it, after symbolic links are resolved. */
+  private static boolean inside(Path file, Path dir) {
+    Path root;
+    try {
+      root = dir.toRealPath();
+    } catch (IOException e) {
+      throw input("cannot resolve the pack directory: " + e.getClass().getSimpleName());
+    }
+    return resolved(file).startsWith(root);
+  }
+
+  /**
+   * The path with every symbolic link of its existing part resolved: the longest existing ancestor
+   * goes through {@code toRealPath}, the names below it (which cannot be links) are appended and
+   * normalised.
+   */
+  private static Path resolved(Path path) {
+    Path existing = path.toAbsolutePath();
+    Deque<Path> below = new ArrayDeque<>();
+    while (!Files.exists(existing)) {
+      Path parent = existing.getParent();
+      if (parent == null) {
+        return path.toAbsolutePath().normalize();
+      }
+      below.addFirst(existing.getFileName());
+      existing = parent;
+    }
+    try {
+      Path real = existing.toRealPath();
+      for (Path name : below) {
+        real = real.resolve(name);
+      }
+      return real.normalize();
+    } catch (IOException e) {
+      throw input("cannot resolve the output file: " + e.getClass().getSimpleName());
     }
   }
 
@@ -563,20 +659,40 @@ public final class PackCommands {
     }
   }
 
-  /** Text safe to print: printable ASCII only (anything else as an escape), cut at {@code max}. */
-  private static String printable(String text, int max) {
-    String source = text == null ? "" : text;
+  /**
+   * Text safe to print: printable ASCII only (anything else as a {@code \}{@code uXXXX} escape per
+   * UTF-16 unit), cut to {@code max} characters after escaping without splitting an escape. A
+   * {@code null} text is empty.
+   */
+  static String printable(String text, int max) {
+    return PackProblem.bounded(text == null ? "" : text, max);
+  }
+
+  /**
+   * The text of an explanation made safe for a terminal or a log: LF ends a line and is kept, every
+   * other character outside 0x20..0x7E is escaped, and a line longer than {@link #MAX_OUTPUT_LINE}
+   * characters after escaping is cut there and ends in {@link #CUT_MARKER}.
+   */
+  static String safeOutput(String text) {
     StringBuilder out = new StringBuilder();
-    for (int i = 0; i < source.length() && out.length() < max; i++) {
-      char c = source.charAt(i);
-      if (c >= 0x20 && c <= 0x7E) {
-        out.append(c);
-      } else {
-        out.append("\\u");
-        String hex = Integer.toHexString(c);
-        out.append("0".repeat(4 - hex.length())).append(hex);
+    int start = 0;
+    while (true) {
+      int end = text.indexOf('\n', start);
+      out.append(boundedLine(end < 0 ? text.substring(start) : text.substring(start, end)));
+      if (end < 0) {
+        return out.toString();
       }
+      out.append('\n');
+      start = end + 1;
     }
-    return out.toString();
+  }
+
+  private static String boundedLine(String line) {
+    // an escape is at most 6 characters: with that much room left, nothing was dropped
+    String escaped = PackProblem.bounded(line, MAX_OUTPUT_LINE + 6);
+    if (escaped.length() <= MAX_OUTPUT_LINE) {
+      return escaped;
+    }
+    return PackProblem.bounded(line, MAX_OUTPUT_LINE) + CUT_MARKER;
   }
 }

@@ -65,8 +65,9 @@ public final class PackExplainer {
 
   /**
    * The Tier-2 view of one event: the Tier-1 text of the decision the regime makes for it, then the
-   * full trace of the rows the interpreter evaluated, then the Tier-2 line. The event is
-   * re-evaluated, so the decision is not stored and the poison circuit of the regime is neither
+   * full trace of the rows the interpreter evaluated, then the Tier-2 line (it says that no
+   * decision is stored and which engine evaluated the event; it makes no replay claim). The event
+   * is re-evaluated, so the decision is not stored and the poison circuit of the regime is neither
    * read nor fed ({@link PackRegime#evaluateTraced}).
    */
   public static String explainEvent(
@@ -101,11 +102,22 @@ public final class PackExplainer {
       }
       out.append(" (").append(row.units()).append(" units): ").append(row.when());
     }
-    out.append('\n').append(tier2Line(regime.decisionContext().engineBuild(), EngineInfo.BUILD));
+    out.append('\n').append(noStoredDecisionLine(EngineInfo.BUILD));
     return out.toString();
   }
 
-  /** The closing line of the explanation: where the re-evaluation ran (Tier2Plan). */
+  /**
+   * The closing line of the explanation of an event: nothing is stored, so there is no stored build
+   * to compare and no replay verdict; the event ran on the current engine.
+   */
+  static String noStoredDecisionLine(EngineBuild current) {
+    return "Tier 2: no stored decision; evaluated on the current engine " + current;
+  }
+
+  /**
+   * The closing line of the explanation of a stored decision, for the overload that will take one
+   * (P3): where the re-evaluation ran (Tier2Plan).
+   */
   static String tier2Line(String storedEngineBuild, EngineBuild current) {
     return switch (Tier2Plan.decide(storedEngineBuild, current)) {
       case CURRENT_ENGINE ->

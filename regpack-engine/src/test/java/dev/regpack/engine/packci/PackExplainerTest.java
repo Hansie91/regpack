@@ -94,9 +94,10 @@ class PackExplainerTest {
             "Trace (full):",
             "  1. S-N03-novation: no match (8 units): event.kind in ['NOVATION','ASSIGNMENT']",
             "  2. S-D14-natural-person: MATCH (4 units): client.kind == 'NATURAL_PERSON'",
-            "Tier 2: re-evaluated on the current engine 1.0.0+lib1"
-                + " (stored build 1.0.0+lib1: replay-compatible)");
+            "Tier 2: no stored decision; evaluated on the current engine 1.0.0+lib1");
     assertThat(text).isEqualTo(expected);
+    // the line makes no claim about a stored build: nothing is stored
+    assertThat(text).doesNotContain("stored build").doesNotContain("replay-compatible");
   }
 
   @Test
@@ -150,7 +151,7 @@ class PackExplainerTest {
         .contains("Reason: EXEC_ERROR (node EXEC)\n")
         .contains("Trace (full):\n  1. R-FIRST: no match (")
         .containsPattern("\n  2\\. R-FAIL: ERROR DIV_ZERO \\([0-9]+ units\\): 1 / 0 == 1\n")
-        .endsWith("(stored build 1.0.0+lib1: replay-compatible)");
+        .endsWith("Tier 2: no stored decision; evaluated on the current engine 1.0.0+lib1");
     // the last trace line is the failing row: nothing was evaluated after it
     assertThat(text).doesNotContain("S-DEFAULT-catch-all: MATCH");
   }

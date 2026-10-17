@@ -46,6 +46,18 @@ public record PackProblem(String code, String path, int line, String message)
     return escapeAndCut(untrusted, MAX_EXCERPT_CHARS);
   }
 
+  /**
+   * Untrusted text made safe to print: escaped as the constructor does and cut to {@code max}
+   * characters after escaping (an escape is never cut in the middle).
+   */
+  public static String bounded(String untrusted, int max) {
+    Objects.requireNonNull(untrusted, "untrusted");
+    if (max < 0) {
+      throw new IllegalArgumentException("max must not be negative");
+    }
+    return escapeAndCut(untrusted, max);
+  }
+
   @Override
   public int compareTo(PackProblem other) {
     boolean marker = code.equals(ProblemSink.TRUNCATED);

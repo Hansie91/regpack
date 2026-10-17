@@ -47,14 +47,14 @@ class PackTesterTest {
           "engine: 1.0.0+lib1 satisfies engine_min 1.0.0+lib1",
           "golden: 4 of 4 pass",
           "coverage: rows 4/4, reasons 4/4, provisions 4/4 (all cases); rows 0/4 (counting cases)",
-          "audit: 0 of 4 counting, 4 consistency-only; reviewers registered: 0"
+          "audit: 0 of 4 counting, 4 consistency-only; reviewers registered: 0 from none (empty registry)"
               + " (gate G1: no named Compliance owner)",
           "budget: record budget 40 units (static worst case 20); largest rule 5 nodes;"
               + " rule ceiling 512; SP-R recommended 64",
           "pack test: PASS");
 
   private static PackTestReport run(PackSource source) {
-    return PackTester.run(source, NO_REVIEWERS);
+    return PackTester.run(source, NO_REVIEWERS, PackTester.NO_REGISTRY);
   }
 
   private static PackTestReport runSample(Map<String, String> overrides) {
@@ -342,7 +342,7 @@ class PackTesterTest {
                     && l.contains("REVIEWER_NOT_REGISTERED"));
     assertThat(report.lines())
         .contains(
-            "audit: 0 of 4 counting, 3 consistency-only; reviewers registered: 0"
+            "audit: 0 of 4 counting, 3 consistency-only; reviewers registered: 0 from none (empty registry)"
                 + " (gate G1: no named Compliance owner)");
   }
 
@@ -357,15 +357,33 @@ class PackTesterTest {
     ReviewerRegistry registry = ReviewerRegistry.parse("reviewer.test|Test Reviewer|test role\n");
 
     PackTestReport report =
-        PackTester.run(SamplePacks.sealed(with("tests/golden/GC-N03-1.json", claimed)), registry);
+        PackTester.run(
+            SamplePacks.sealed(with("tests/golden/GC-N03-1.json", claimed)),
+            registry,
+            "reviewers.txt");
 
     assertThat(report.problems()).isEmpty();
     assertThat(report.passed()).isTrue();
     assertThat(report.lines())
-        .contains("audit: 1 of 4 counting, 3 consistency-only; reviewers registered: 1");
+        .contains(
+            "audit: 1 of 4 counting, 3 consistency-only; reviewers registered: 1 from reviewers.txt");
     assertThat(report.lines())
         .contains(
             "coverage: rows 4/4, reasons 4/4, provisions 4/4 (all cases); rows 1/4 (counting cases)");
+  }
+
+  @Test
+  void theAuditLineNamesTheRegistryAndEscapesAHostileName() {
+    String hostile = "r" + (char) 0x1B + new String(Character.toChars(0x202E)) + "x".repeat(2000);
+
+    PackTestReport report = PackTester.run(SamplePacks.sealed(Map.of()), NO_REVIEWERS, hostile);
+
+    String audit = report.lines().stream().filter(l -> l.startsWith("audit: ")).findFirst().get();
+    assertThat(audit)
+        .contains("reviewers registered: 0 from r\\u001b\\u202exxx")
+        .endsWith(" (gate G1: no named Compliance owner)")
+        .hasSizeLessThan(500);
+    assertThat(audit.chars().allMatch(c -> c >= 0x20 && c <= 0x7E)).isTrue();
   }
 
   @Test
@@ -380,7 +398,10 @@ class PackTesterTest {
         ReviewerRegistry.parse("agent:p2a-implementer|The Implementer|test role\n");
 
     PackTestReport report =
-        PackTester.run(SamplePacks.sealed(with("tests/golden/GC-N03-1.json", claimed)), registry);
+        PackTester.run(
+            SamplePacks.sealed(with("tests/golden/GC-N03-1.json", claimed)),
+            registry,
+            "reviewers.txt");
 
     assertThat(report.passed()).isFalse();
     assertThat(codes(report)).containsExactly("GOLDEN_AUDIT");
@@ -429,7 +450,8 @@ class PackTesterTest {
 
   @Test
   void aTwoTableChainPassesWithEveryRowCovered() {
-    PackTestReport report = PackTester.run(chainWithGoldens().source(), NO_REVIEWERS);
+    PackTestReport report =
+        PackTester.run(chainWithGoldens().source(), NO_REVIEWERS, PackTester.NO_REGISTRY);
 
     assertThat(report.problems()).isEmpty();
     assertThat(report.passed()).isTrue();
@@ -446,7 +468,7 @@ class PackTesterTest {
     PackSource source =
         chain().file(DEFAULT_GOLDEN, null).file("tests/golden/GC-N13-1.json", null).source();
 
-    PackTestReport report = PackTester.run(source, NO_REVIEWERS);
+    PackTestReport report = PackTester.run(source, NO_REVIEWERS, PackTester.NO_REGISTRY);
 
     assertThat(report.lines()).contains("golden: 2 of 2 pass");
     assertThat(report.lines())
@@ -473,7 +495,7 @@ class PackTesterTest {
     PackSource source =
         chain().file(DEFAULT_GOLDEN, null).file("tests/golden/GC-N08-1.json", null).source();
 
-    PackTestReport report = PackTester.run(source, NO_REVIEWERS);
+    PackTestReport report = PackTester.run(source, NO_REVIEWERS, PackTester.NO_REGISTRY);
 
     assertThat(report.passed()).isFalse();
     assertThat(codes(report)).contains("COVERAGE_ROW_NOT_HIT", "COVERAGE_REASON_NOT_REACHED");
@@ -486,7 +508,7 @@ class PackTesterTest {
   void aGoldenExpectingAPassedThroughCatchAllAsTheDecidingRowFails() {
     // the golden's ruleIdsHit is the DECIDING row; the first table's catch-all never decides
     // the unchanged sample golden expects [S-DEFAULT-catch-all]
-    PackTestReport report = PackTester.run(chain().source(), NO_REVIEWERS);
+    PackTestReport report = PackTester.run(chain().source(), NO_REVIEWERS, PackTester.NO_REGISTRY);
 
     assertThat(codes(report)).contains("GOLDEN_CASE_FAILED");
     assertThat(report.lines()).contains("golden: 3 of 4 pass");

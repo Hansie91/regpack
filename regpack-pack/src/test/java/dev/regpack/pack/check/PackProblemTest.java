@@ -81,6 +81,19 @@ class PackProblemTest {
   }
 
   @Test
+  void boundedEscapesAndCutsToTheGivenLengthWithoutSplittingAnEscape() {
+    assertThat(PackProblem.bounded("ab" + RLO + "cd", 100)).isEqualTo("ab\\u202ecd");
+    // 2 characters and one 6-character escape fit exactly in 8; the next character does not
+    assertThat(PackProblem.bounded("ab" + RLO + "cd", 8)).isEqualTo("ab\\u202e");
+    assertThat(PackProblem.bounded("ab" + RLO + "cd", 7)).isEqualTo("ab");
+    assertThat(PackProblem.bounded("x".repeat(500), 240)).hasSize(240);
+    assertThat(PackProblem.bounded("", 5)).isEmpty();
+    assertThatThrownBy(() -> PackProblem.bounded(null, 5)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> PackProblem.bounded("a", -1))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void problemsSortByPathThenLineThenCode() {
     PackProblem a = new PackProblem("ZZZ", "a.yaml", 9, "m");
     PackProblem b = new PackProblem("AAA", "b.yaml", 1, "m");

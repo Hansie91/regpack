@@ -67,16 +67,29 @@ public final class PackTester {
   /** The fixed evaluation instant of golden cases. */
   public static final String EVALUATED_AT = "2026-01-01T00:00:00Z";
 
+  /** The registry name of a run without a reviewer registry file. */
+  public static final String NO_REGISTRY = "none (empty registry)";
+
+  /** Longest registry name the audit line shows, after escaping. */
+  static final int MAX_REGISTRY_CHARS = 240;
+
   private static final Instant EVALUATED_AT_INSTANT = Instant.parse(EVALUATED_AT);
   private static final String SIGNATURE_LINE =
       "signature: UNSIGNED (an ATTESTATION is not verified before P9b)";
 
   private PackTester() {}
 
-  /** Runs the test of one pack; see the class description. */
-  public static PackTestReport run(PackSource source, ReviewerRegistry reviewers) {
+  /**
+   * Runs the test of one pack; see the class description. {@code registryName} says where the
+   * reviewers came from (the path of the registry file, or {@link #NO_REGISTRY}); the audit line
+   * prints it, escaped and cut to {@value #MAX_REGISTRY_CHARS} characters, so that a result can be
+   * reproduced.
+   */
+  public static PackTestReport run(
+      PackSource source, ReviewerRegistry reviewers, String registryName) {
     Objects.requireNonNull(source, "source");
     Objects.requireNonNull(reviewers, "reviewers");
+    Objects.requireNonNull(registryName, "registryName");
     LoadResult loaded = PackLoader.load(source);
     if (loaded.pack().isEmpty()) {
       List<String> lines = new ArrayList<>();
@@ -84,7 +97,7 @@ public final class PackTester {
       lines.add(staticLine(loaded.problems().size()));
       return finish(lines, new ArrayList<>(loaded.problems()));
     }
-    return new Run(source, loaded.pack().get(), reviewers).run();
+    return new Run(source, loaded.pack().get(), reviewers, registryName).run();
   }
 
   private static String staticLine(int count) {
@@ -115,13 +128,15 @@ public final class PackTester {
     private final PackSource source;
     private final LoadedPack pack;
     private final ReviewerRegistry reviewers;
+    private final String registryName;
     private final List<PackProblem> problems = new ArrayList<>();
     private final List<String> lines = new ArrayList<>();
 
-    Run(PackSource source, LoadedPack pack, ReviewerRegistry reviewers) {
+    Run(PackSource source, LoadedPack pack, ReviewerRegistry reviewers, String registryName) {
       this.source = source;
       this.pack = pack;
       this.reviewers = reviewers;
+      this.registryName = PackProblem.bounded(registryName, MAX_REGISTRY_CHARS);
     }
 
     PackTestReport run() {
@@ -282,6 +297,8 @@ public final class PackTester {
               + consistencyOnly
               + " consistency-only; reviewers registered: "
               + reviewers.size()
+              + " from "
+              + registryName
               + (reviewers.size() == 0 ? " (gate G1: no named Compliance owner)" : ""));
 
       PackBudget budget = compiled.budget();
