@@ -85,6 +85,84 @@ class EvaluatorTest {
   }
 
   @Test
+  void strictComparisonsAreFalseOnEqualOperands() {
+    // pack rules use < and > for thresholds: the equal case must be on the right side of both
+    assertThat(eval("1 < 1")).isEqualTo(FALSE);
+    assertThat(eval("1 > 1")).isEqualTo(FALSE);
+    assertThat(eval("1 <= 1")).isEqualTo(TRUE);
+    assertThat(eval("1 >= 1")).isEqualTo(TRUE);
+    assertThat(eval("1.50 < 1.5")).isEqualTo(FALSE);
+    assertThat(eval("1.50 > 1.5")).isEqualTo(FALSE);
+    assertThat(eval("'a' < 'a'")).isEqualTo(FALSE);
+    assertThat(eval("'a' > 'a'")).isEqualTo(FALSE);
+    assertThat(eval("'a' <= 'a' && 'a' >= 'a'")).isEqualTo(TRUE);
+    assertThat(eval("date('2026-03-01') < date('2026-03-01')")).isEqualTo(FALSE);
+    assertThat(eval("date('2026-03-01') > date('2026-03-01')")).isEqualTo(FALSE);
+    assertThat(eval("date('2026-03-01') <= date('2026-03-01')")).isEqualTo(TRUE);
+    assertThat(eval("date('2026-03-01') >= date('2026-03-01')")).isEqualTo(TRUE);
+    String t = "timestamp('2026-03-01T10:00:00Z')";
+    String sameInstant = "timestamp('2026-03-01T12:00:00+02:00')";
+    assertThat(eval(t + " < " + sameInstant)).isEqualTo(FALSE);
+    assertThat(eval(t + " > " + sameInstant)).isEqualTo(FALSE);
+    assertThat(eval(t + " <= " + sameInstant)).isEqualTo(TRUE);
+    assertThat(eval(t + " >= " + sameInstant)).isEqualTo(TRUE);
+    // and the unequal case is still ordered
+    assertThat(eval("date('2026-03-01') < date('2026-03-02')")).isEqualTo(TRUE);
+    assertThat(eval("date('2026-03-02') > date('2026-03-01')")).isEqualTo(TRUE);
+  }
+
+  @Test
+  void stringsAreOrderedByCodePointIncludingPrefixes() {
+    assertThat(eval("'a' < 'ab'")).isEqualTo(TRUE);
+    assertThat(eval("'ab' > 'a'")).isEqualTo(TRUE);
+    assertThat(eval("'ab' < 'a'")).isEqualTo(FALSE);
+    assertThat(eval("'a' > 'ab'")).isEqualTo(FALSE);
+    assertThat(eval("'' < 'a'")).isEqualTo(TRUE);
+    assertThat(eval("'' < ''")).isEqualTo(FALSE);
+    assertThat(eval("'' >= ''")).isEqualTo(TRUE);
+    assertThat(eval("'ab' < 'ac'")).isEqualTo(TRUE);
+    assertThat(eval("'abc' > 'abd'")).isEqualTo(FALSE);
+    // code point order, not UTF-16 unit order: U+10000 (a surrogate pair) is above U+FF5E
+    Recording supplementary =
+        bind(
+            "high", text(Character.toString(0x10000)),
+            "low", text(Character.toString(0xFF5E)));
+    assertThat(eval("high > low", supplementary)).isEqualTo(TRUE);
+    assertThat(eval("low < high", supplementary)).isEqualTo(TRUE);
+    assertThat(eval("high < low", supplementary)).isEqualTo(FALSE);
+    assertThat(eval("high <= high && high >= high && high == high", supplementary)).isEqualTo(TRUE);
+  }
+
+  @Test
+  void boolAndListEquality() {
+    assertThat(eval("true == true")).isEqualTo(TRUE);
+    assertThat(eval("false == false")).isEqualTo(TRUE);
+    assertThat(eval("true == false")).isEqualTo(FALSE);
+    assertThat(eval("true != false")).isEqualTo(TRUE);
+    assertThat(eval("true != true")).isEqualTo(FALSE);
+    assertThat(eval("[1, 2] == [1, 2]")).isEqualTo(TRUE);
+    assertThat(eval("[1, 2] == [1, 3]")).isEqualTo(FALSE);
+    assertThat(eval("[1, 2] != [1, 3]")).isEqualTo(TRUE);
+    assertThat(eval("[2, 2] == [1, 2]")).isEqualTo(FALSE);
+    assertThat(eval("[1, 2] == [1]")).isEqualTo(FALSE);
+    assertThat(eval("[] == []")).isEqualTo(TRUE);
+    assertThat(eval("[[1], [2]] == [[1], [3]]")).isEqualTo(FALSE);
+  }
+
+  @Test
+  void integerDivisionOverflowIsOnlyTheMinimumByMinusOne() {
+    assertThat(eval("6 / -1")).isEqualTo(integer(-6));
+    assertThat(eval("-6 / -1")).isEqualTo(integer(6));
+    Recording min = bind("x", integer(Long.MIN_VALUE));
+    assertThat(eval("x / 2", min)).isEqualTo(integer(Long.MIN_VALUE / 2));
+    assertThat(eval("x / 1", min)).isEqualTo(integer(Long.MIN_VALUE));
+    assertThat(eval("x / -2", min)).isEqualTo(integer(-(Long.MIN_VALUE / 2)));
+    assertError(ErrorKind.OVERFLOW, "x / -1", min);
+    Recording max = bind("x", integer(Long.MAX_VALUE));
+    assertThat(eval("x / -1", max)).isEqualTo(integer(-Long.MAX_VALUE));
+  }
+
+  @Test
   void decimalsAreLimitedTo38Digits() {
     Recording big = bind("x", decimal("99999999999999999999999999999999999999")); // 38 digits
     assertThat(eval("x + 0", big)).isEqualTo(decimal("99999999999999999999999999999999999999"));

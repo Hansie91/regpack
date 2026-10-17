@@ -74,6 +74,26 @@ class PackRegimeTest {
   }
 
   @Test
+  void onlyTheCommittedRulingsAreAcceptedBecauseTheContextPinsTheBuildAndNotTheRulings() {
+    // decision_context_id carries the engine build but not the rulings, so a regime whose
+    // rulings differ from rulings.tsv would put different semantics under one context id (I3)
+    Rulings alternative =
+        new Rulings(
+            Rulings.IntDecimalMix.DENY,
+            Rulings.load().andLeftError(),
+            Rulings.load().orLeftError(),
+            Rulings.load().hasBelowAbsent());
+    assertThatThrownBy(() -> PackRegime.create(SamplePacks.load(), REPORT, EXECUTOR, alternative))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("rulings.tsv")
+        .hasMessageContaining("Rulings.load()");
+
+    PackRegime committed = PackRegime.create(SamplePacks.load(), REPORT, EXECUTOR, Rulings.load());
+    assertThat(committed.decisionContext())
+        .isEqualTo(create(SamplePacks.load(), REPORT).decisionContext());
+  }
+
+  @Test
   void decisionContextPinsTheDigestBuildAndExecutor() {
     LoadedPack pack = SamplePacks.load();
 

@@ -12,9 +12,11 @@ import dev.regpack.ports.expr.Value.IntValue;
 import dev.regpack.ports.expr.Value.StringValue;
 import dev.regpack.ports.expr.ValueType;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -146,6 +148,54 @@ class ParserTest {
     assertParseError("startsWith(s, 'a')");
     assertParseError("s.upper()");
     assertParseError("now()");
+  }
+
+  @Test
+  void everyLibraryFunctionIsRefusedInItsWrongCallForm() {
+    // The grammar surface is pinned here, function by function: a new function must be added to
+    // one of these sets (the last assertion fails otherwise).
+    Set<String> globalOnly =
+        Set.of(
+            "dec",
+            "round",
+            "string",
+            "int",
+            "timestamp",
+            "date",
+            "isoMicros",
+            "dayOfWeek",
+            "upper",
+            "lower",
+            "size");
+    Set<String> methodOnly = Set.of("startsWith", "endsWith");
+    Set<String> both = Set.of("contains");
+    for (Library fn : Library.values()) {
+      String name = fn.label();
+      String args = String.join(", ", Collections.nCopies(fn.arity(), "s"));
+      String rest = String.join(", ", Collections.nCopies(fn.arity() - 1, "s"));
+      String global = name + "(" + args + ")";
+      String method = "s." + name + "(" + rest + ")";
+      if (globalOnly.contains(name)) {
+        assertParseError(method);
+        assertThat(Library.global(name)).as(name).contains(fn);
+        assertThat(Library.method(name)).as(name).isEmpty();
+      } else if (methodOnly.contains(name)) {
+        assertParseError(global);
+        assertThat(Library.global(name)).as(name).isEmpty();
+        assertThat(Library.method(name)).as(name).contains(fn);
+      } else {
+        assertThat(both).as(name + " is in no call-form set").contains(name);
+        assertThat(Library.global(name)).as(name).contains(fn);
+        assertThat(Library.method(name)).as(name).contains(fn);
+      }
+    }
+    assertThat(globalOnly.size() + methodOnly.size() + both.size())
+        .isEqualTo(Library.values().length);
+    // the accepted forms really parse
+    assertThat(tree("s.startsWith('a')")).isEqualTo("(startsWith s 'a')");
+    assertThat(tree("s.endsWith('a')")).isEqualTo("(endsWith s 'a')");
+    assertThat(tree("contains(l, x)")).isEqualTo("(contains l x)");
+    assertThat(tree("upper(s)")).isEqualTo("(upper s)");
   }
 
   @Test

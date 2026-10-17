@@ -54,8 +54,6 @@ public final class PackRegime implements RegimeProvider {
   private static final ReasonCode EXEC_BUDGET = new ReasonCode("EXEC_BUDGET");
   private static final ReasonCode EXEC_ERROR = new ReasonCode("EXEC_ERROR");
   private static final ReasonCode EXEC_CIRCUIT_OPEN = new ReasonCode("EXEC_CIRCUIT_OPEN");
-  private static final String CIRCUIT_OPEN_CLASS =
-      PackProgram.CircuitOpenException.class.getSimpleName();
   private static final int MAX_PROBLEMS_SHOWN = 8;
 
   private final CompiledPack compiled;
@@ -90,9 +88,15 @@ public final class PackRegime implements RegimeProvider {
   /**
    * Creates the provider of one report.
    *
-   * @throws IllegalArgumentException listing the problems when the pack does not compile, its
-   *     canonical input is not one this engine build binds, or this build does not satisfy its
-   *     {@code engine_min} (the pack never runs on another major or library version)
+   * @param rulings must equal {@link Rulings#load()}: the decision context pins the engine build
+   *     and not the rulings, so the committed {@code rulings.tsv} is part of what the build means
+   *     and any other switch value would put different semantics under one {@code
+   *     decision_context_id} (I3). The per-record budget is not in the context either; a decision
+   *     that ran out of budget records its limit in its flags.
+   * @throws IllegalArgumentException when the rulings differ from the committed ones, or listing
+   *     the problems when the pack does not compile, its canonical input is not one this engine
+   *     build binds, or this build does not satisfy its {@code engine_min} (the pack never runs on
+   *     another major or library version)
    */
   public static PackRegime create(
       LoadedPack pack, String reportId, Executor executor, Rulings rulings) {
@@ -117,6 +121,11 @@ public final class PackRegime implements RegimeProvider {
     Objects.requireNonNull(reportId, "reportId");
     Objects.requireNonNull(executor, "executor");
     Objects.requireNonNull(rulings, "rulings");
+    if (!rulings.equals(Rulings.load())) {
+      throw new IllegalArgumentException(
+          "the rulings differ from the committed rulings.tsv; the decision context pins the engine"
+              + " build but not the rulings, so only Rulings.load() may be used with a pack regime");
+    }
     List<PackProblem> problems = new ArrayList<>();
     if (!EngineInfo.BUILD.satisfies(pack.manifest().engineMin())) {
       problems.add(
@@ -276,10 +285,10 @@ public final class PackRegime implements RegimeProvider {
                   context,
                   asAt,
                   Outcome.UNDETERMINED,
-                  isCircuitOpen(failed)
+                  program.circuitOpenRule().isPresent()
                       ? List.of("rule_id=" + failed.ruleId(), "circuit=open")
                       : failureFlags(failed, program),
-                  isCircuitOpen(failed) ? EXEC_CIRCUIT_OPEN : EXEC_ERROR,
+                  program.circuitOpenRule().isPresent() ? EXEC_CIRCUIT_OPEN : EXEC_ERROR,
                   NODE_EXEC,
                   List.of(),
                   failed.path(),
@@ -330,15 +339,6 @@ public final class PackRegime implements RegimeProvider {
 
   private static String bounded(String text) {
     return text.length() <= 64 ? text : text.substring(0, 64) + "...";
-  }
-
-  /**
-   * Whether the evaluation stopped at a rule whose circuit is open. Only {@link PackProgram} throws
-   * that class, so the error class is a sufficient mark; any other failure stays {@code
-   * EXEC_ERROR}.
-   */
-  private static boolean isCircuitOpen(Failed<PackProgram.Decision> failed) {
-    return failed.errorClass().equals(CIRCUIT_OPEN_CLASS);
   }
 
   /** Rule, error class, the kind when known, cost units: never a value of the record (7.3). */

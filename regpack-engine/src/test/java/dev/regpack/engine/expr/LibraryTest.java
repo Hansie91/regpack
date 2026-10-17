@@ -183,6 +183,26 @@ class LibraryTest {
   }
 
   @Test
+  void timestampRefusesAnInstantThatIsoMicrosCouldNotRender() {
+    // pre-release amendment of library version 1: the normalised UTC instant must lie in the
+    // years 0000 to 9999, the range isoMicros and string write
+    assertError(ErrorKind.RANGE, "timestamp('0000-01-01T00:00:00+01:00')");
+    assertError(ErrorKind.RANGE, "timestamp('9999-12-31T23:59:59-01:00')");
+    assertError(ErrorKind.RANGE, "isoMicros(timestamp('0000-01-01T00:00:00+01:00'))");
+    // the bounds themselves, reached through an offset, still work and render
+    assertThat(instant("timestamp('0000-01-01T01:00:00+01:00')"))
+        .isEqualTo(Instant.parse("0000-01-01T00:00:00Z"));
+    assertThat(instant("timestamp('9999-12-31T23:59:59Z')"))
+        .isEqualTo(Instant.parse("9999-12-31T23:59:59Z"));
+    assertThat(instant("timestamp('9999-12-31T22:59:59-01:00')"))
+        .isEqualTo(Instant.parse("9999-12-31T23:59:59Z"));
+    assertThat(eval("isoMicros(timestamp('0000-01-01T00:00:00Z'))"))
+        .isEqualTo(new StringValue("0000-01-01T00:00:00.000000Z"));
+    assertThat(eval("string(timestamp('9999-12-31T23:59:59Z'))"))
+        .isEqualTo(new StringValue("9999-12-31T23:59:59.000000Z"));
+  }
+
+  @Test
   void dateForms() {
     assertThat(eval("date('2026-03-01')")).isEqualTo(new DateValue(LocalDate.of(2026, 3, 1)));
     assertThat(eval("date('2024-02-29')")).isEqualTo(new DateValue(LocalDate.of(2024, 2, 29)));

@@ -13,6 +13,7 @@ import dev.regpack.ports.exec.CostBudget;
 import dev.regpack.ports.exec.CostMeter;
 import dev.regpack.ports.expr.Value;
 import dev.regpack.ports.expr.Value.ListValue;
+import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -22,7 +23,8 @@ import org.junit.jupiter.api.Test;
  * where the budget stops the allocation; the meter cannot tell "charged, then allocated" from
  * "allocated, then charged" when the work succeeds. So {@link
  * #concatenationOverTheBudgetFailsFastWithBudgetExceeded} uses strings whose full chain would be 20
- * MB, and the order inside {@code Evaluator.add} is held by that structure and by code review.
+ * MB, and {@link #anAmplificationIsChargedBeforeItIsAllocated} measures the bytes the evaluating
+ * thread allocates (a count, not a duration) around a join that the budget refuses.
  */
 class AmplificationTest {
   @Test
@@ -68,6 +70,48 @@ class AmplificationTest {
         .isInstanceOfSatisfying(
             ExprException.class, e -> assertThat(e.kind()).isEqualTo(ErrorKind.RANGE));
     assertThat(listMeter.used()).isEqualTo(3 + 400);
+  }
+
+  /**
+   * Bytes the current thread allocated while {@code work} ran (the JVM's exact per-thread count).
+   */
+  private static long allocatedBy(Runnable work) {
+    com.sun.management.ThreadMXBean threads =
+        (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+    long id = Thread.currentThread().threadId();
+    long before = threads.getThreadAllocatedBytes(id);
+    work.run();
+    return threads.getThreadAllocatedBytes(id) - before;
+  }
+
+  @Test
+  void anAmplificationIsChargedBeforeItIsAllocated() {
+    // Operands of 100,000 characters (100 KB as Latin-1) joined into 200,000 characters, with a
+    // budget that refuses the charge. Charge first: nothing of the result is ever built, so the
+    // evaluation allocates far less than one operand. Allocate first: at least 200 KB.
+    InHouseExpression layer = new InHouseExpression(new Limits(512, 8_192, 1_000_000));
+    Recording strings = bind("s", text("x".repeat(100_000)));
+    InHouseExpression.Compiled joinedText = ExprTestSupport.compile(layer, "s + s", strings);
+    List<Value> items = new ArrayList<>();
+    for (int i = 0; i < 4_000; i++) {
+      items.add(integer(i));
+    }
+    Recording lists = bind("a", new ListValue(items));
+    InHouseExpression.Compiled joinedList = ExprTestSupport.compile(layer, "a + a", lists);
+
+    Runnable text = () -> refused(joinedText, strings);
+    Runnable list = () -> refused(joinedList, lists);
+    // warm up once so that class loading and first-use costs are not measured
+    text.run();
+    list.run();
+    assertThat(allocatedBy(text)).as("string join").isLessThan(50_000L);
+    assertThat(allocatedBy(list)).as("list join").isLessThan(16_000L);
+  }
+
+  private static void refused(InHouseExpression.Compiled compiled, Recording bindings) {
+    CostMeter meter = new CostMeter(new CostBudget(100));
+    assertThatThrownBy(() -> compiled.evaluate(bindings, meter))
+        .isInstanceOf(BudgetExceededException.class);
   }
 
   @Test

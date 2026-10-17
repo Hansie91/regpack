@@ -1,11 +1,14 @@
 package dev.regpack.engine.pack;
 
+import static dev.regpack.ports.ledger.DecisionLedger.CommitStatus.INSERTED;
+import static dev.regpack.ports.ledger.DecisionLedger.CommitStatus.NOOP_REDELIVERY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 
 import dev.regpack.engine.exec.MeteredExecutor;
 import dev.regpack.engine.expr.Rulings;
 import dev.regpack.engine.packci.PackExplainer;
+import dev.regpack.inmemory.InMemoryLedgerStore;
 import dev.regpack.model.Citation;
 import dev.regpack.model.CitationRole;
 import dev.regpack.model.IngestKey;
@@ -23,7 +26,12 @@ import dev.regpack.model.decision.PathStep;
 import dev.regpack.pack.model.LoadedPack;
 import dev.regpack.pack.source.PackSource;
 import dev.regpack.ports.exec.CostBudget;
+import dev.regpack.ports.exec.ExecutionResult;
+import dev.regpack.ports.exec.Executor;
+import dev.regpack.ports.exec.RuleProgram;
+import dev.regpack.ports.ledger.DecisionLedger;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
+import dev.regpack.testkit.clock.ManualClock;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -557,6 +565,103 @@ class PackScopeEngineTest {
     decide(provider, failing, 100);
     decide(provider, failing, 100);
     assertThat(circuit.openRules()).containsExactly("R-MIXED");
+  }
+
+  @Test
+  void anOpenCircuitIsRecognisedWhateverNameTheExecutorGivesTheErrorClass() {
+    // The Executor port does not define how an executor names an error class: a second executor
+    // may report the fully qualified class name. The mapping must not depend on the simple name.
+    Executor qualified =
+        new Executor() {
+          private final MeteredExecutor inner = new MeteredExecutor();
+
+          @Override
+          public String id() {
+            return inner.id();
+          }
+
+          @Override
+          public <I, O> ExecutionResult<O> execute(
+              RuleProgram<I, O> program, I input, CostBudget budget) {
+            ExecutionResult<O> result = inner.execute(program, input, budget);
+            if (result instanceof ExecutionResult.Failed<O> failed) {
+              return new ExecutionResult.Failed<>(
+                  failed.ruleId(),
+                  "dev.regpack.somewhere." + failed.errorClass(),
+                  failed.costUnits(),
+                  failed.path());
+            }
+            return result;
+          }
+        };
+    RuleCircuit circuit = new RuleCircuit(1, 1);
+    PackRegime provider =
+        PackRegime.create(
+            PackBuilder.sample().scope(PackBuilder.Rule.of("R-FAIL", "1 / 0 == 1")).load(),
+            "sample.s0",
+            qualified,
+            Rulings.provisional(),
+            Optional.of(circuit));
+
+    DecisionBody failing = decide(provider, equityOnVenue(), 100);
+    DecisionBody open = decide(provider, equityOnVenue(), 100);
+
+    assertThat(failing.reasonCode()).isEqualTo(new ReasonCode("EXEC_ERROR"));
+    assertThat(open.reasonCode()).isEqualTo(new ReasonCode("EXEC_CIRCUIT_OPEN"));
+    assertThat(open.flags()).containsExactly("rule_id=R-FAIL", "circuit=open");
+  }
+
+  @Test
+  void aReEvaluationAfterCloseHasTheSameContextAndDigestSoTheLedgerTreatsItAsARedelivery() {
+    // P3 must resolve this deliberately (circuit epoch in the context or an ordinal in the key);
+    // see docs/pack-format/p2a-format-notes.md hand-offs. This test pins the model as built: it
+    // does NOT supersede a decision made under an open circuit.
+    RuleCircuit circuit = new RuleCircuit(1, 50);
+    PackRegime provider =
+        regimeOf(
+            PackBuilder.sample()
+                .scope(
+                    PackBuilder.Rule.of(
+                            "R-MIXED",
+                            "event.kind == 'NEW' ? 1 / 0 == 1 : event.kind == 'NOVATION'")
+                        .outcome("N03", "DO_NOT_REPORT", "SAMPLE.N03.EXCLUDED"))
+                .load(),
+            circuit);
+    CanonicalExecution poison = equityOnVenue();
+    CanonicalExecution innocent =
+        execution(LifecycleKind.NOVATION, AssetClass.EQUITY, true, PartyKind.LEGAL_ENTITY);
+    assertThat(decide(provider, poison, 100).reasonCode()).isEqualTo(new ReasonCode("EXEC_ERROR"));
+    assertThat(circuit.isOpen("R-MIXED")).isTrue();
+
+    DecisionBody underOpenCircuit = decide(provider, innocent, 100);
+    assertThat(underOpenCircuit.reasonCode()).isEqualTo(new ReasonCode("EXEC_CIRCUIT_OPEN"));
+    InMemoryLedgerStore ledger =
+        new InMemoryLedgerStore(new ManualClock(Instant.parse("2026-10-09T08:00:00Z")));
+    List<DecisionLedger.Committed> first =
+        ledger.commitDecisions(
+            new DecisionLedger.BatchCommit(
+                List.of(new DecisionLedger.NewDecision(underOpenCircuit, 0)), Optional.empty()));
+    assertThat(first).extracting(DecisionLedger.Committed::status).containsExactly(INSERTED);
+
+    circuit.close("R-MIXED");
+    DecisionBody afterClose = decide(provider, innocent, 100);
+    assertThat(afterClose.reasonCode()).isEqualTo(new ReasonCode("SAMPLE.N03.EXCLUDED"));
+
+    // nothing that the ledger keys on changed between the two decisions
+    assertThat(afterClose.decisionContextId()).isEqualTo(underOpenCircuit.decisionContextId());
+    assertThat(afterClose.inputDigest()).isEqualTo(underOpenCircuit.inputDigest());
+    List<DecisionLedger.Committed> second =
+        ledger.commitDecisions(
+            new DecisionLedger.BatchCommit(
+                List.of(new DecisionLedger.NewDecision(afterClose, 1)), Optional.empty()));
+    assertThat(second)
+        .extracting(DecisionLedger.Committed::status)
+        .containsExactly(NOOP_REDELIVERY);
+    assertThat(ledger.currentDecision(provider.regime(), innocent.eventIdentity()))
+        .hasValueSatisfying(
+            current ->
+                assertThat(current.body().reasonCode())
+                    .isEqualTo(new ReasonCode("EXEC_CIRCUIT_OPEN")));
   }
 
   @Test

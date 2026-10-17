@@ -88,7 +88,14 @@ public record DecisionBody(
     citations = List.copyOf(citations);
     legs = List.copyOf(legs);
     Objects.requireNonNull(inputDigest, "inputDigest");
-    attributes = Collections.unmodifiableMap(new TreeMap<>(attributes));
+    Objects.requireNonNull(attributes, "attributes");
+    Map<String, String> sorted = new TreeMap<>();
+    for (Map.Entry<String, String> entry : attributes.entrySet()) {
+      sorted.put(
+          Objects.requireNonNull(entry.getKey(), "attribute key"),
+          Objects.requireNonNull(entry.getValue(), "attribute value"));
+    }
+    attributes = Collections.unmodifiableMap(sorted);
   }
 
   /** The SHA-256 of the canonical JSON without evaluatedAt (I3). */

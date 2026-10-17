@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -33,6 +34,9 @@ public final class CanonicalBindings implements Bindings {
   private static final String LIFECYCLE_KIND = "LifecycleKind";
   private static final String PARTY_KIND = "PartyKind";
   private static final String ASSET_CLASS = "AssetClass";
+
+  /** The paths that can be absent in this engine build; every other path is always present. */
+  private static final Set<String> OPTIONAL_PATHS = Set.of("client.lei");
 
   /** The paths this class binds, with their types, in path order. */
   public static final Map<String, ValueType> VARIABLES;
@@ -95,7 +99,9 @@ public final class CanonicalBindings implements Bindings {
   /**
    * Checks that a pack's canonical input declaration is one this class can bind. Problems, sorted:
    * {@code INPUT_PATH_UNSUPPORTED} (a path this class does not bind, or a ledger-state input) and
-   * {@code INPUT_TYPE_MISMATCH} (another type, or another enumeration for an ENUM path).
+   * {@code INPUT_TYPE_MISMATCH} (another type, or another enumeration for an ENUM path) and {@code
+   * INPUT_OPTIONAL_MISMATCH} (an {@code optional} flag that contradicts the binding: only {@code
+   * client.lei} can be absent).
    */
   public static List<PackProblem> checkSupported(CanonicalInputSpec spec) {
     Objects.requireNonNull(spec, "spec");
@@ -130,6 +136,18 @@ public final class CanonicalBindings implements Bindings {
                     + "' is the enumeration "
                     + ENUM_TYPES.get(path)
                     + " in this engine build"));
+      } else if (variable.optional() != OPTIONAL_PATHS.contains(path)) {
+        problems.add(
+            new PackProblem(
+                "INPUT_OPTIONAL_MISMATCH",
+                FILE,
+                0,
+                "'"
+                    + PackProblem.excerpt(path)
+                    + (OPTIONAL_PATHS.contains(path)
+                        ? "' can be absent in this engine build and must be declared optional"
+                        : "' is never absent in this engine build and must not be declared"
+                            + " optional")));
       }
     }
     Collections.sort(problems);

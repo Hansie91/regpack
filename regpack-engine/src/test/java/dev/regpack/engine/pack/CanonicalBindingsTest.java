@@ -154,6 +154,35 @@ class CanonicalBindingsTest {
   }
 
   @Test
+  void checkSupportedFlagsAnOptionalFlagThatContradictsTheBinding() {
+    // client.lei is the only path that can be absent in this engine build
+    Map<String, Variable> declaration = new HashMap<>();
+    declaration.put(
+        "client.lei", new Variable(ValueType.STRING, Optional.empty(), Source.EVENT, false));
+    declaration.put(
+        "trade.currency", new Variable(ValueType.STRING, Optional.empty(), Source.EVENT, true));
+    declaration.put(
+        "venue.mic", new Variable(ValueType.STRING, Optional.empty(), Source.EVENT, false));
+    List<PackProblem> problems =
+        CanonicalBindings.checkSupported(new CanonicalInputSpec(declaration));
+    assertThat(codes(problems))
+        .containsExactly("INPUT_OPTIONAL_MISMATCH", "INPUT_OPTIONAL_MISMATCH");
+    assertThat(problems)
+        .extracting(PackProblem::message)
+        .anyMatch(m -> m.contains("client.lei") && m.contains("optional"))
+        .anyMatch(m -> m.contains("trade.currency") && m.contains("never absent"))
+        .noneMatch(m -> m.contains("venue.mic"));
+
+    // the declaration that matches the binding is accepted
+    Map<String, Variable> matching =
+        Map.of(
+            "client.lei", new Variable(ValueType.STRING, Optional.empty(), Source.EVENT, true),
+            "trade.currency",
+                new Variable(ValueType.STRING, Optional.empty(), Source.EVENT, false));
+    assertThat(CanonicalBindings.checkSupported(new CanonicalInputSpec(matching))).isEmpty();
+  }
+
+  @Test
   void catalogueEqualsTheSamplePackInput() {
     CanonicalInputSpec sample = SamplePacks.load().input();
     Map<String, ValueType> declared = new TreeMap<>();

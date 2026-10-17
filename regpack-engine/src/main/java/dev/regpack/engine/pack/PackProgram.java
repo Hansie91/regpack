@@ -73,9 +73,10 @@ public final class PackProgram implements RuleProgram<Bindings, PackProgram.Deci
 
   /**
    * Thrown, wrapped in a {@link RuleEvaluationException}, when a record reaches a row whose poison
-   * circuit is open (spec 7.3). The executor reports it as a failed evaluation of the row with the
-   * error class {@code CircuitOpenException}, which {@link PackRegime} maps to {@code
-   * EXEC_CIRCUIT_OPEN}. It carries no stack trace: a poisoned rule meets every record.
+   * circuit is open (spec 7.3). The executor reports it as a failed evaluation of the row, and
+   * {@link PackRegime} maps it to {@code EXEC_CIRCUIT_OPEN} through {@link #circuitOpenRule()}, not
+   * through the name of the error class. It carries no stack trace: a poisoned rule meets every
+   * record.
    */
   public static final class CircuitOpenException extends RuntimeException {
     private static final long serialVersionUID = 1L;
@@ -102,6 +103,7 @@ public final class PackProgram implements RuleProgram<Bindings, PackProgram.Deci
   private final Optional<RuleCircuit> circuit;
   private final List<RowTrace> rowTraces = new ArrayList<>();
   private Optional<ErrorKind> lastErrorKind = Optional.empty();
+  private Optional<String> circuitOpenRule = Optional.empty();
 
   /** A program without a poison circuit. */
   public PackProgram(CompiledPack pack, boolean fullTrace) {
@@ -162,6 +164,11 @@ public final class PackProgram implements RuleProgram<Bindings, PackProgram.Deci
     return lastErrorKind;
   }
 
+  /** The row at which this evaluation stopped because its circuit is open, if it did. */
+  public Optional<String> circuitOpenRule() {
+    return circuitOpenRule;
+  }
+
   /** The rows evaluated so far, in order; empty unless the program was built with a full trace. */
   public List<RowTrace> rowTraces() {
     return List.copyOf(rowTraces);
@@ -195,6 +202,7 @@ public final class PackProgram implements RuleProgram<Bindings, PackProgram.Deci
     meter.enter(row.id());
     if (circuit.isPresent() && circuit.get().isOpen(row.id())) {
       // no charge and no path step: the executor names this row, not the previous one
+      circuitOpenRule = Optional.of(row.id());
       throw new RuleEvaluationException(row.id(), new CircuitOpenException(row.id()));
     }
     long before = meter.used();

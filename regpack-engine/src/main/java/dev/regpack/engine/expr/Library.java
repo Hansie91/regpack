@@ -341,7 +341,8 @@ public enum Library {
   /**
    * RFC 3339 read by hand: {@code yyyy-MM-ddTHH:mm:ss[.f+](Z|+HH:mm|-HH:mm)}, ASCII digits, the
    * seconds and the zone mandatory, a leap second refused. A fraction finer than a microsecond is
-   * RANGE (zeros beyond the sixth digit are not finer).
+   * RANGE (zeros beyond the sixth digit are not finer), and so is a UTC instant outside the years
+   * 0000 to 9999 (the range {@link #isoMicros} writes).
    */
   private static Value timestamp(String s) {
     int n = s.length();
@@ -396,6 +397,11 @@ public enum Library {
     }
     if (finer) {
       throw Evaluator.error(ErrorKind.RANGE, "finer than a microsecond");
+    }
+    // the UTC instant must be one that isoMicros and string can write
+    if (instant.getEpochSecond() < MIN_EPOCH_SECOND
+        || instant.getEpochSecond() > MAX_EPOCH_SECOND) {
+      throw Evaluator.error(ErrorKind.RANGE, "year outside 0000 to 9999");
     }
     return new TimestampValue(instant);
   }

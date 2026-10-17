@@ -326,6 +326,25 @@ class DecisionTypesTest {
   }
 
   @Test
+  void attributesRejectNullKeysAndValuesAtConstruction() {
+    DecisionBody base =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of());
+    Map<String, String> nullValue = new LinkedHashMap<>();
+    nullValue.put("action", null);
+    assertThatThrownBy(() -> withAttributes(base, nullValue))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("attribute value");
+    Map<String, String> nullKey = new LinkedHashMap<>();
+    nullKey.put(null, "NEWT");
+    assertThatThrownBy(() -> withAttributes(base, nullKey))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("attribute key");
+    assertThatThrownBy(() -> withAttributes(base, null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("attributes");
+  }
+
+  @Test
   void pathStepRejectsBlankRuleIdAndNegativeCost() {
     assertThatThrownBy(() -> new PathStep("", true, 0))
         .isInstanceOf(IllegalArgumentException.class);
