@@ -1,0 +1,13 @@
+# The prefix and the node are declared by the pack (BRK-11). Placeholder owner: gate G1 is open.
+prefix: EMIR
+nodes: [ACT]
+reasons:
+  - {code: EMIR.ACT.NEWT, label: NEWT, category: INCLUSION, default_outcome: REPORT, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.MODI, label: MODI, category: INCLUSION, default_outcome: REPORT, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.TERM, label: TERM, category: INCLUSION, default_outcome: REPORT, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.EROR, label: EROR, category: INCLUSION, default_outcome: REPORT, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.REVI, label: REVI, category: INCLUSION, default_outcome: REPORT, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.VALU, label: VALU, category: INCLUSION, default_outcome: REPORT, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.VALU_NOT_OUTSTANDING, label: VALU_NOT_OUTSTANDING, category: EXCLUSION, default_outcome: DO_NOT_REPORT, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.DUPLICATE_NEW, label: DUPLICATE_NEW, category: DATA_QUALITY, default_outcome: UNDETERMINED, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}
+  - {code: EMIR.ACT.NO_MATCH, label: NO_MATCH, category: DEFAULT, default_outcome: UNDETERMINED, owner: agent.p2a-fixture, valid: {from: 2000-01-01}}

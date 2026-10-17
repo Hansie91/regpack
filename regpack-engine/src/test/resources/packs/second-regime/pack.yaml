@@ -1,0 +1,15 @@
+# Synthetic second-regime fixture (plan P2a, task T23): no regulatory text and no third-party artefact.
+# Written by hand from the SP-G paper exercise (docs/spikes/sp-g/emir-pack/derive/action-type.yaml); the
+# citations name the synthetic source fixture-law. Every case is consistency-only while gate G1 is open.
+id: emir.eu
+semver: 0.1.0
+regime: emir.eu
+jurisdiction: EU
+valid: {legal: {from: 2000-01-01}}
+as_at_field: event.occurredAt
+engine_min: 1.0.0+lib1
+input_schema: 752801d1101cb30157940ca0101f0e3ae43e4db81ab656246a7f29bc6a55a391
+reports:
+  - id: emir.eu
+    input: model/canonical-input.yaml
+    scope_tables: [scope/action-type.yaml]

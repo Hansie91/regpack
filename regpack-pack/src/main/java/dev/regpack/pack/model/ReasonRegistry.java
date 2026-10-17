@@ -13,7 +13,7 @@ import java.util.TreeSet;
  * iterate in sorted order, whatever the order of the file, so that everything derived from them
  * (problems, the canonical IR) is deterministic.
  *
- * @param prefix the reason-code prefix of the regime, for example {@code MIFIR}
+ * @param prefix the reason-code prefix of the regime, for example {@code SAMPLE}
  * @param nodes the declared nodes of the regime's decision tree
  * @param entries the declared reasons, keyed by code
  */

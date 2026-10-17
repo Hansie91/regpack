@@ -1,0 +1,104 @@
+# One decision table: (source event kind, derivative status) to an action type, hit policy FIRST,
+# explicit priority, mandatory catch-all. The action type is a value, so each REPORT row stores it in
+# set (BRK-10). The rows follow the SP-G paper exercise; the ids D-ACT-01 to D-ACT-08 and D-ACT-99 are
+# kept so that the exercise and the fixture can be read side by side. Synthetic: no regulatory text.
+table: {id: emir.eu.action-type, hit_policy: FIRST, priority: explicit, inputs: [event.kind, state.status], catch_all: D-ACT-99}
+rows:
+  - id: D-ACT-01
+    node: ACT
+    priority: 100
+    when: "event.kind == 'NEW' && state.status == 'NOT_REPORTED'"
+    outcome: REPORT
+    reason: EMIR.ACT.NEWT
+    rule_ref: RULE-0001
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action_type: NEWT}
+  - id: D-ACT-02
+    node: ACT
+    priority: 110
+    when: "event.kind == 'AMEND' && state.status == 'OUTSTANDING'"
+    outcome: REPORT
+    reason: EMIR.ACT.MODI
+    rule_ref: RULE-0002
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action_type: MODI}
+  - id: D-ACT-03
+    node: ACT
+    priority: 120
+    when: "event.kind == 'TERMINATE' && state.status == 'OUTSTANDING'"
+    outcome: REPORT
+    reason: EMIR.ACT.TERM
+    rule_ref: RULE-0003
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action_type: TERM}
+  - id: D-ACT-04
+    node: ACT
+    priority: 130
+    when: "event.kind == 'CANCEL' && state.status in ['OUTSTANDING', 'TERMINATED']"
+    outcome: REPORT
+    reason: EMIR.ACT.EROR
+    rule_ref: RULE-0004
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action_type: EROR}
+  - id: D-ACT-05
+    node: ACT
+    priority: 140
+    when: "event.kind == 'REVIVE' && state.status in ['ERRORED', 'TERMINATED']"
+    outcome: REPORT
+    reason: EMIR.ACT.REVI
+    rule_ref: RULE-0005
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action_type: REVI}
+  - id: D-ACT-06
+    node: ACT
+    priority: 150
+    when: "event.kind == 'VALUATION' && state.status == 'OUTSTANDING'"
+    outcome: REPORT
+    reason: EMIR.ACT.VALU
+    rule_ref: RULE-0006
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action_type: VALU}
+  # A negative is still a decision with a reason (I5), never a silent drop.
+  - id: D-ACT-07
+    node: ACT
+    priority: 200
+    when: "event.kind == 'VALUATION' && state.status != 'OUTSTANDING'"
+    outcome: DO_NOT_REPORT
+    reason: EMIR.ACT.VALU_NOT_OUTSTANDING
+    rule_ref: RULE-0007
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+  # A second NEW for a known derivative is a data-quality question, never a DO_NOT_REPORT (I5).
+  - id: D-ACT-08
+    node: ACT
+    priority: 210
+    when: "event.kind == 'NEW' && state.status != 'NOT_REPORTED'"
+    outcome: UNDETERMINED
+    reason: EMIR.ACT.DUPLICATE_NEW
+    rule_ref: RULE-0008
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+  # The mandatory catch-all: any combination not listed above is UNDETERMINED with a reason.
+  - id: D-ACT-99
+    node: ACT
+    priority: 9999
+    when: "true"
+    outcome: UNDETERMINED
+    reason: EMIR.ACT.NO_MATCH
+    rule_ref: RULE-0099
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
