@@ -1,0 +1,14 @@
+# Synthetic sample pack S0 (plan P2a, task T10): no regulatory text and no third-party artefact.
+id: sample.s0
+semver: 0.1.0
+regime: sample.s0
+jurisdiction: EU
+valid: {legal: {from: 2018-01-03}}
+# The as-at field is a Legal decision (spec 6.4); the value only shows the shape.
+as_at_field: event.tradedAt
+engine_min: 1.0.0+lib1
+input_schema: 7aec7261b0a6d6e229c759bc99d7cbae2e2f221cb3ec5d1f029493f150bced46
+reports:
+  - id: sample.s0
+    input: model/canonical-input.yaml
+    scope_tables: [scope/sample-scope.yaml]

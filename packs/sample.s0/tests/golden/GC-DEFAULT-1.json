@@ -1,0 +1,27 @@
+{
+  "id": "GC-DEFAULT-1",
+  "node": "DEFAULT",
+  "description": "No rule matches a debt instrument so the catch-all gives undetermined (consistency-only, synthetic).",
+  "author": "agent:golden-author",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "LEI-FIRM-0001",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-4",
+    "eventKind": "NEW",
+    "tradedAt": "2026-10-09T09:30:00.123456Z",
+    "assetClass": "DEBT",
+    "isin": "ZZ0000000001",
+    "tradedOnVenue": true,
+    "clientKind": "LEGAL_ENTITY",
+    "clientLei": "LEI-CLIENT-0001",
+    "quantity": 100,
+    "price": 12.25,
+    "currency": "EUR"
+  },
+  "expected": {
+    "outcome": "UNDETERMINED",
+    "reasonCode": "SAMPLE.DEFAULT.NO_RULE_HIT",
+    "ruleIdsHit": ["S-DEFAULT-catch-all"]
+  }
+}

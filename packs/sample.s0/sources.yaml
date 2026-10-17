@@ -1,0 +1,23 @@
+sources:
+  - source_id: sample-law
+    version: sample-1
+    retrieved_at: 2026-10-16
+    content_sha256: 7f08ab71bf91cba156e8d2dac7d06f80c5aa2580cad34969d94e9aeeec83295d
+    provisions:
+      - path: sample/1
+        role: BASIS
+        status: IN_FORCE
+        quote: "SYNTHETIC SAMPLE TEXT 1, not law"
+        quote_sha256: ef008e0c36ec6f5e6a2866208eb972bc5dbfc6ccb6bd891c06e3fa61da07efef
+      - path: sample/2
+        role: BASIS
+        status: IN_FORCE
+        quote: "SYNTHETIC SAMPLE TEXT 2, not law"
+        quote_sha256: dc7fa46ae2464af8d2a91fdabe7ab26aae6fb28d79cb2e1218462e8cd3225741
+  - source_id: regpack-spec
+    version: 2026-10-08-draft-3
+    retrieved_at: 2026-10-16
+    content_sha256: 278d4c989886dc2fee5160a9a30dd19acb296ccbf2dfa82b6ab246b3e4bd8dec
+    provisions:
+      - {path: D14, role: INTERPRETATION, status: IN_FORCE}
+      - {path: I5, role: GUIDANCE, status: IN_FORCE}

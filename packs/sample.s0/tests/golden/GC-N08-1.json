@@ -1,0 +1,27 @@
+{
+  "id": "GC-N08-1",
+  "node": "N08",
+  "description": "An equity traded on a venue is reportable (consistency-only, synthetic).",
+  "author": "agent:golden-author",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "LEI-FIRM-0001",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-3",
+    "eventKind": "NEW",
+    "tradedAt": "2026-10-09T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000001",
+    "tradedOnVenue": true,
+    "clientKind": "LEGAL_ENTITY",
+    "clientLei": "LEI-CLIENT-0001",
+    "quantity": 100,
+    "price": 12.25,
+    "currency": "EUR"
+  },
+  "expected": {
+    "outcome": "REPORT",
+    "reasonCode": "SAMPLE.N08.IN_SCOPE",
+    "ruleIdsHit": ["S-N08-equity-on-venue"]
+  }
+}
