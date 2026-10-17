@@ -64,4 +64,9 @@ public final class ReviewerRegistry {
   public boolean contains(String reviewerId) {
     return byId.containsKey(reviewerId);
   }
+
+  /** The number of registered reviewers (the {@code pack test} audit line prints it). */
+  public int size() {
+    return byId.size();
+  }
 }
