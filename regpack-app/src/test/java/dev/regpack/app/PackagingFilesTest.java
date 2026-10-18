@@ -199,6 +199,7 @@ class PackagingFilesTest {
             "determinism-compare",
             "spikes",
             "ledger-pg",
+            "ledger-capacity",
             "smoke-linux",
             "smoke-windows",
             "smoke-kubernetes");
@@ -293,6 +294,119 @@ class PackagingFilesTest {
                             + " jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres"));
     // the report artefact is not the distribution
     assertThat(job).anyMatch(l -> l.strip().equals("name: ledger-pg-reports"));
+  }
+
+  /**
+   * T21 and AP-3, AP-6, AP-8: the capacity job runs only on a manual dispatch that sets both
+   * inputs, on a GitHub-hosted runner, pulls the one digest-pinned image of the real-store job (the
+   * same digest), publishes its port on the loopback only, holds no secret and no password, runs
+   * only the docker commands that restart and inspect its own service container (never a pull, run
+   * or login), bounds the job and every step by a timeout, and keeps its sampler files as an
+   * artefact.
+   */
+  @Test
+  void ledgerCapacityJobIsGuardedPinnedBoundedAndFreeOfCredentials() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    List<String> job = jobLines(ci, "ledger-capacity");
+    String pinned =
+        "postgres:18.6-trixie@sha256:"
+            + "74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336";
+
+    // a manual dispatch has a concurrency group of its own: a push to the branch during the long
+    // capacity run cannot cancel it, and the dispatch cannot cancel a run of the push
+    assertThat(ci)
+        .contains(
+            "group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name =="
+                + " 'workflow_dispatch' && 'manual' || 'auto' }}");
+
+    // the dispatch inputs exist and default to false
+    assertThat(ci)
+        .contains("  workflow_dispatch:\n    inputs:\n      capacity:")
+        .contains("      confirm_downloads:");
+    assertThat(job)
+        .contains(
+            "    if: github.event_name == 'workflow_dispatch' && inputs.capacity"
+                + " && inputs.confirm_downloads");
+    assertThat(job).contains("    runs-on: ubuntu-24.04");
+    assertThat(job).anyMatch(l -> l.matches("    timeout-minutes: [0-9]+"));
+
+    // the one pinned image of AP-6, the same as the real-store job, and the loopback port
+    List<String> images = job.stream().filter(l -> l.strip().startsWith("image:")).toList();
+    assertThat(images).containsExactly("        image: " + pinned);
+    assertThat(job).contains("      PG_IMAGE: " + pinned);
+    assertThat(jobLines(ci, "ledger-pg")).contains("        image: " + pinned);
+    assertThat(job).contains("          - 127.0.0.1:5432:5432");
+    assertThat(job).contains("      REGPACK_PG_REQUIRED: 'true'");
+    assertThat(job).contains("          POSTGRES_HOST_AUTH_METHOD: trust");
+
+    // no secret, no token, no password; the job reads nothing from the secret store
+    assertThat(job).noneMatch(l -> l.contains("secrets."));
+    assertThat(job).noneMatch(l -> l.toLowerCase(java.util.Locale.ROOT).contains("password"));
+    assertThat(job).noneMatch(l -> l.contains("GITHUB_TOKEN"));
+
+    // docker is used only to find, restart and inspect the job's own service container: an allow
+    // list of verbs, so that a pull, run, login, build, stop, create, cp, network or volume (or a
+    // verb behind an option) fails the test
+    java.util.regex.Matcher docker =
+        java.util.regex.Pattern.compile("\\bdocker\\b\\s*(\\S*)").matcher(String.join("\n", job));
+    int dockerCalls = 0;
+    while (docker.find()) {
+      dockerCalls++;
+      assertThat(docker.group(1))
+          .as("docker verb in: " + docker.group())
+          .isIn("ps", "exec", "restart", "inspect");
+    }
+    assertThat(dockerCalls).isGreaterThanOrEqualTo(4);
+    assertThat(job).anyMatch(l -> l.contains("docker restart \"$cid\""));
+    // the server settings are read with current_setting (the raw setting of pg_settings is in
+    // server units: shared_buffers of 340MB would print as 435208kB)
+    assertThat(job).anyMatch(l -> l.contains("current_setting(name)"));
+    assertThat(job).noneMatch(l -> l.contains("coalesce(unit"));
+    assertThat(job).anyMatch(l -> l.contains("ALTER SYSTEM SET shared_buffers"));
+    assertThat(job).noneMatch(l -> l.contains("sudo"));
+
+    // the variants of the plan: A no limit, B the SP-L memory and ratio, C as B without waiting
+    assertThat(job)
+        .contains(
+            "          - variant: A",
+            "          - variant: B",
+            "          - variant: C",
+            "            shared_buffers: 2GB",
+            "            shared_buffers: 340MB",
+            "            synchronous_commit: 'off'");
+    assertThat(job.stream().filter(l -> l.contains("--memory=1363m")).count()).isEqualTo(2);
+
+    // the probe is the capacity group of one class, with an explicit override of the exclusion
+    assertThat(job)
+        .anyMatch(
+            l ->
+                l.contains("-Dgroups=capacity")
+                    && l.contains("-DexcludedGroups=none")
+                    && l.contains("-Dit.test=LedgerBurstProbeIT"));
+
+    // every step is bounded by a timeout (a step starts at six spaces and a dash)
+    int stepsAt = job.indexOf("    steps:");
+    assertThat(stepsAt).as("steps: line").isNotNegative();
+    List<List<String>> steps = new java.util.ArrayList<>();
+    for (String line : job.subList(stepsAt + 1, job.size())) {
+      if (line.startsWith("      - ")) {
+        steps.add(new java.util.ArrayList<>());
+      }
+      steps.get(steps.size() - 1).add(line);
+    }
+    assertThat(steps).hasSizeGreaterThanOrEqualTo(7);
+    for (List<String> step : steps) {
+      assertThat(step)
+          .as("step starting at: " + step.get(0))
+          .anyMatch(l -> l.matches(" {8}timeout-minutes: [0-9]+"));
+    }
+
+    // the read-out and the sampler files are kept: as annotations and as an artefact
+    assertThat(job).contains("          name: ledger-capacity-${{ matrix.variant }}");
+    assertThat(job).contains("            regpack-postgres/target/capacity/");
+    assertThat(job).anyMatch(l -> l.contains("::notice title=capacity"));
+    assertThat(job).anyMatch(l -> l.contains("head -n 5"));
+    assertThat(ci).containsOnlyOnce("name: regpack-dist\n          path: |");
   }
 
   @Test
