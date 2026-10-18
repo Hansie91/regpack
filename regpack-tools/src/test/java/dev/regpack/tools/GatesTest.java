@@ -121,6 +121,8 @@ class GatesTest {
             "::notice title=tally::class=a.B run=2 failed=1 errors=0 skipped=0",
             "::notice title=tally-total::classes=1 run=2 failed=1 errors=0 skipped=0",
             "::error title=a.B#f::boom");
+    assertThat(outcome.out().lines().findFirst().orElseThrow())
+        .startsWith("::notice title=tally-total::");
     assertThat(run("annotate").rc()).isEqualTo(2);
     assertThat(run("annotate", "--scan").rc()).isEqualTo(2);
     assertThat(run("annotate", "--bogus", "x").rc()).isEqualTo(2);

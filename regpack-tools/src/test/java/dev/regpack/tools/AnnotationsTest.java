@@ -74,8 +74,8 @@ class AnnotationsTest {
     List<String> lines = render();
     assertThat(lines)
         .containsExactly(
-            "::notice title=tally::class=a.B run=4 failed=1 errors=1 skipped=1",
             "::notice title=tally-total::classes=1 run=4 failed=1 errors=1 skipped=1",
+            "::notice title=tally::class=a.B run=4 failed=1 errors=1 skipped=1",
             "::warning title=skipped::skipped=1 a.B#s",
             "::error title=a.B#f::expected 1 but was 2",
             "::error title=a.B#e::NPE here");
@@ -183,10 +183,11 @@ class AnnotationsTest {
         .containsExactly("::warning title=skipped::skipped=3 a.B#s1, a.B#s2, c.D#s3");
     assertThat(withPrefix(lines, "::error")).isEmpty();
     assertThat(lines)
-        .contains(
+        .containsExactly(
+            "::notice title=tally-total::classes=2 run=4 failed=0 errors=0 skipped=3",
             "::notice title=tally::class=a.B run=3 failed=0 errors=0 skipped=2",
             "::notice title=tally::class=c.D run=1 failed=0 errors=0 skipped=1",
-            "::notice title=tally-total::classes=2 run=4 failed=0 errors=0 skipped=3");
+            "::warning title=skipped::skipped=3 a.B#s1, a.B#s2, c.D#s3");
   }
 
   @Test
@@ -195,9 +196,28 @@ class AnnotationsTest {
     report("c.D", pass("c.D", "p"));
     assertThat(render())
         .containsExactly(
+            "::notice title=tally-total::classes=2 run=3 failed=0 errors=0 skipped=0",
             "::notice title=tally::class=a.B run=2 failed=0 errors=0 skipped=0",
-            "::notice title=tally::class=c.D run=1 failed=0 errors=0 skipped=0",
-            "::notice title=tally-total::classes=2 run=3 failed=0 errors=0 skipped=0");
+            "::notice title=tally::class=c.D run=1 failed=0 errors=0 skipped=0");
+  }
+
+  @Test
+  void theTotalIsTheFirstNoticeSoTheCutOfLongListsKeepsIt() throws IOException {
+    for (int i = 1; i <= 12; i++) {
+      String cls = "k.C" + (i < 10 ? "0" : "") + i;
+      report(cls, pass(cls, "m"), skip(cls, "s"));
+    }
+    report("z.F", fail("z.F", "f", "boom"));
+    List<String> lines = render();
+    List<String> notices = withPrefix(lines, "::notice");
+    assertThat(notices).hasSize(14);
+    assertThat(notices.get(0))
+        .isEqualTo("::notice title=tally-total::classes=13 run=25 failed=1 errors=0 skipped=12");
+    assertThat(notices.subList(1, notices.size()))
+        .allSatisfy(n -> assertThat(n).startsWith("::notice title=tally::class="));
+    assertThat(lines.get(0)).startsWith("::notice title=tally-total::");
+    assertThat(lines.indexOf(withPrefix(lines, "::warning").get(0)))
+        .isGreaterThan(lines.indexOf(notices.get(13)));
   }
 
   @Test
@@ -259,9 +279,9 @@ class AnnotationsTest {
     List<String> lines = Annotations.render(List.of(dir, dir.resolve("zmod"), dir));
     assertThat(lines)
         .containsExactly(
+            "::notice title=tally-total::classes=2 run=2 failed=0 errors=0 skipped=0",
             "::notice title=tally::class=a.B run=1 failed=0 errors=0 skipped=0",
-            "::notice title=tally::class=a.BIT run=1 failed=0 errors=0 skipped=0",
-            "::notice title=tally-total::classes=2 run=2 failed=0 errors=0 skipped=0");
+            "::notice title=tally::class=a.BIT run=1 failed=0 errors=0 skipped=0");
   }
 
   @Test

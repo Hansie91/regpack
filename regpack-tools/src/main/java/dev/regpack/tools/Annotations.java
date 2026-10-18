@@ -23,10 +23,11 @@ import org.w3c.dom.NodeList;
  * Turns the {@code TEST-*.xml} reports of surefire and failsafe into GitHub workflow commands, so
  * that the counts and the failures of a run can be read from the unauthenticated check-run
  * annotation listing without downloading an artefact or reading a log (P3a plan, D-L6). The output
- * holds one {@code tally} notice per test class, one {@code tally-total} notice, one {@code
- * skipped} warning for all skipped cases, at most ten error annotations (the first failed case of
- * each distinct class first, then the rest in report order) and, when more cases failed, one final
- * notice with the names of the rest.
+ * holds one {@code tally-total} notice first (GitHub keeps only about ten notices per level and
+ * step, so the total must not be the one that is cut), then one {@code tally} notice per test
+ * class, one {@code skipped} warning for all skipped cases, at most ten error annotations (the
+ * first failed case of each distinct class first, then the rest in report order) and, when more
+ * cases failed, one final notice with the names of the rest.
  *
  * <p>Only the first line of a failure message is used. Credentials are redacted before the message
  * is cut to 300 characters. Titles and messages are escaped as workflow command data, so a test
@@ -85,7 +86,7 @@ public final class Annotations {
    * Renders the workflow commands for the reports found under the scan roots. A report that cannot
    * be read or parsed contributes nothing; a root listed twice (or nested in another) is read once.
    *
-   * @return the command lines, in the order tallies, total, warning, errors, final notice
+   * @return the command lines, in the order total, tallies, warning, errors, final notice
    */
   public static List<String> render(List<Path> scanRoots) {
     List<Case> cases = new ArrayList<>();
@@ -99,12 +100,14 @@ public final class Annotations {
       total.add(c.outcome());
     }
     List<String> lines = new ArrayList<>();
+    // The total comes first: GitHub keeps only about ten notices per level and step, and a job
+    // with more test classes than that would otherwise lose the total.
+    lines.add("::notice title=tally-total::classes=" + perClass.size() + " " + total.counts());
     perClass.forEach(
         (className, tally) ->
             lines.add(
                 "::notice title=tally::"
                     + escapeMessage("class=" + className + " " + tally.counts())));
-    lines.add("::notice title=tally-total::classes=" + perClass.size() + " " + total.counts());
     List<Case> skipped = cases.stream().filter(c -> c.outcome() == Outcome.SKIPPED).toList();
     if (!skipped.isEmpty()) {
       String names = String.join(", ", skipped.stream().map(Case::id).toList());
