@@ -3,6 +3,8 @@ package dev.regpack.inmemory;
 import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.DecisionLedgerContract;
+import dev.regpack.testkit.contract.ExitFixturesContract;
+import dev.regpack.testkit.contract.FencingScenarioContract;
 import dev.regpack.testkit.contract.IngestLedgerContract;
 import dev.regpack.testkit.contract.LeaseDeliveryLedgerContract;
 import dev.regpack.testkit.contract.ReportLedgerContract;
@@ -14,7 +16,9 @@ public abstract class AbstractLedgerContractTest
     implements IngestLedgerContract,
         DecisionLedgerContract,
         LeaseDeliveryLedgerContract,
-        ReportLedgerContract {
+        ReportLedgerContract,
+        ExitFixturesContract,
+        FencingScenarioContract {
   private ManualClock clock;
   private LedgerStore ledger;
 
