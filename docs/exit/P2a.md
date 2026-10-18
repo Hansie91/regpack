@@ -124,4 +124,7 @@ Worksheet for P2a-2 and every later plan (the owner fills the blanks): task-coun
 - [ ] circuit-close supersession decision recorded for P3 (open item 1)
 - [ ] calibration read-out done and the P3 re-estimate decision recorded (spec 15)
 
+
+Owner statement in chat, 2026-10-17 (recorded by the agent, who has ticked no box): "I cant seem to tick them but I accept all of them." The boxes above stay unticked until the owner ticks them or says in chat which of them the agent may tick on the owner's behalf. Acceptance alone does not complete these items: the merge and the tag (AP-4) are actions, `exited_plans` needs a file edit and also P1a, the circuit-close supersession (open item 1) needs a chosen option for P3, and the calibration read-out needs the owner's time figures and the P3 re-estimate decision. The `Signed:` line is the owner's.
+
 Signed: <owner>, <date>
