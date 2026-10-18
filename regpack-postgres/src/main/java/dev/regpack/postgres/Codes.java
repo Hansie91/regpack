@@ -3,6 +3,7 @@ package dev.regpack.postgres;
 import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
+import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
 import dev.regpack.ports.ledger.ReportLedger.VersionOrigin;
@@ -32,6 +33,15 @@ public final class Codes {
 
   private static final Table<Leg> LEG =
       new Table<>("leg", Leg.class).put(Leg.MARKET, 1).put(Leg.CLIENT, 2).put(Leg.ALLOCATION, 3);
+
+  /** Stored inside {@code ingest_batch.result} (IngestResultCodec), one byte per entry. */
+  private static final Table<Disposition> DISPOSITION =
+      new Table<>("ingest disposition", Disposition.class)
+          .put(Disposition.NEW_VERSION, 1)
+          .put(Disposition.NOOP_SAME_VERSION_SAME_HASH, 2)
+          .put(Disposition.STALE, 3)
+          .put(Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH, 4)
+          .put(Disposition.SOURCE_CONFLICT, 5);
 
   private static final Table<DeliveryState> DELIVERY_STATE =
       new Table<>("delivery state", DeliveryState.class)
@@ -84,6 +94,14 @@ public final class Codes {
 
   public static Leg leg(short code) {
     return LEG.constant(code);
+  }
+
+  public static short of(Disposition disposition) {
+    return DISPOSITION.code(disposition);
+  }
+
+  public static Disposition disposition(short code) {
+    return DISPOSITION.constant(code);
   }
 
   public static short of(DeliveryState state) {

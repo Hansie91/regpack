@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
+import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
 import dev.regpack.ports.ledger.ReportLedger.VersionOrigin;
@@ -40,6 +41,16 @@ class CodesTest {
         "outcome",
         codes("REPORT", "DO_NOT_REPORT", "REPORT_BY_OTHER", "UNDETERMINED")),
     new Family(Leg.class, "leg", codes("MARKET", "CLIENT", "ALLOCATION")),
+    // stored inside ingest_batch.result (IngestResultCodec), not in a smallint column
+    new Family(
+        Disposition.class,
+        "disposition",
+        codes(
+            "NEW_VERSION",
+            "NOOP_SAME_VERSION_SAME_HASH",
+            "STALE",
+            "CONFLICT_SAME_VERSION_DIFFERENT_HASH",
+            "SOURCE_CONFLICT")),
     new Family(
         DeliveryState.class,
         "deliveryState",
