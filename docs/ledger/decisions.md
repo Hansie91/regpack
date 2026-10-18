@@ -11,7 +11,7 @@ Branch `p3a/ledger-core` from `main` at `e685b7f` (P0, P1a and P2a merged; tag `
 | Id | What | Date | Name | State |
 |---|---|---|---|---|
 | AP-1 | The plan, the departures, the split into P3a to P3d, the port and model changes, the schema decisions D-S1 to D-S17 as starting positions, A1 to A13 | 2026-10-18 | hans | given in chat ("Approve the plan (Recommended)") in answer to the controller's summary of the plan; the schema questions OI-4 to OI-8 are decided at the T2 stop with their defaults until then |
-| AP-2 | Every push of `p3a/ledger-core` and every CI run waited on (CP-1 to CP-4) | | | asked at each push |
+| AP-2 | Every push of `p3a/ledger-core` and every CI run waited on (CP-1 to CP-4) | 2026-10-18 | hans | asked at each push. Given for the CP-1 push (answer "Yes, push now (Recommended)" after the exact `ledger-pg` job text was shown; this also re-confirms AP-3 for that text); covers that push and the read-only wait for its run, nothing later |
 | AP-3 | Every edit of `.github/workflows/ci.yml` (branch filter `p3a/**`; jobs `ledger-pg` and `ledger-capacity`) and of `scripts/check-gates.sh` | 2026-10-18 | hans | given in chat ("Approve AP-3, AP-5 and AP-6 (Recommended)"); the exact text of `ledger-pg` is shown again at T13 and the exact YAML of `ledger-capacity` at T21 before its code commit |
 | AP-4 | Merge, tag `p3a-ledger-core` and the sign-offs in `docs/exit/P3a.md` | | | owner only (T23) |
 | AP-5 | The new dependencies `org.postgresql:postgresql:42.7.14` (BSD-2-Clause) and `org.checkerframework:checker-qual:3.55.1` (MIT) in `regpack-postgres` only; no pool, no migration tool | 2026-10-18 | hans | given in chat together with AP-3 and AP-6 |
