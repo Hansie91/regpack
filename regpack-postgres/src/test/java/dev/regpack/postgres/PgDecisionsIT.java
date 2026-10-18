@@ -432,7 +432,13 @@ class PgDecisionsIT extends AbstractPgStoreTest {
     commitOne(body("D1", "d1", DAY1), 0);
     try (Connection connection = raw();
         Statement statement = connection.createStatement()) {
-      statement.execute("DROP TABLE decision_p20261009");
+      // The way an operator removes a daily piece: report_version_decision_fk references the
+      // partitioned table, so PostgreSQL keeps one dependent constraint object per partition and
+      // refuses a plain DROP TABLE of a partition ("other objects depend on it", CP-2 run
+      // 39155154276). Detach the piece first (allowed: nothing references its rows), then drop the
+      // now standalone table; CASCADE removes only constraint objects of this throwaway schema.
+      statement.execute("ALTER TABLE decision DETACH PARTITION decision_p20261009");
+      statement.execute("DROP TABLE decision_p20261009 CASCADE");
     }
     DecisionBody next = body("D2", "d1", DAY1);
     assertThatThrownBy(() -> commitOne(next, 0))

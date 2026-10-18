@@ -15,6 +15,7 @@ import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.DecisionCodec;
 import dev.regpack.model.decision.PathStep;
 import dev.regpack.model.json.Json;
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -23,6 +24,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.zip.Deflater;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -166,6 +168,43 @@ class DecisionBodyCodecTest {
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> DecisionBodyCodec.decode(storedFormOf("{\"outcome\":\"REPORT\"}")))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void aPlainZlibStreamWithoutTheFixedDictionaryIsRejected() {
+    // the canonical JSON of a real body, framed with version 1 but deflated without the preset
+    // dictionary: without the dictionary check this would decode to the body
+    byte[] json =
+        Json.canonical(DecisionCodec.bodyToMap(fixedBody(), true)).getBytes(StandardCharsets.UTF_8);
+    Deflater deflater = new Deflater(6);
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    out.write(DecisionBodyCodec.VERSION);
+    try {
+      deflater.setInput(json);
+      deflater.finish();
+      byte[] buffer = new byte[1024];
+      while (!deflater.finished()) {
+        int n = deflater.deflate(buffer);
+        out.write(buffer, 0, n);
+      }
+    } finally {
+      deflater.end();
+    }
+    byte[] plain = out.toByteArray();
+    assertThatThrownBy(() -> DecisionBodyCodec.decode(plain))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not use the dictionary");
+  }
+
+  @Test
+  void aStreamThatInflatesBeyondSixteenMiBIsRejectedBeforeItIsParsed() {
+    // 17 MiB of zero bytes deflate to a few tens of KiB: a decompression bomb in miniature. Without
+    // the limit this would be refused only later, as "not JSON"; the message pins the limit.
+    byte[] bomb = DecisionBodyCodec.compress(new byte[17 * 1024 * 1024]);
+    assertThat(bomb.length).isLessThan(1024 * 1024);
+    assertThatThrownBy(() -> DecisionBodyCodec.decode(bomb))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("beyond the limit");
   }
 
   /** Builds a version-1 stored value around arbitrary text, with the same dictionary. */
