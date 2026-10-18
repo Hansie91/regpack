@@ -13,7 +13,7 @@ Branch `p2a/rule-pack-core` from `p1a/spikes`; plan committed as `110db05`. `./m
 | AP-1 | The plan, its companion contracts file, the departures table, the beyond-6.1 format elements, the split decision, "Contract and layout changes", "Existing tests that change", D-P6 and A1 to A6 | 2026-10-16 | hans | given in chat as "ok approved lets continue", in answer to the controller's message that started P2a on the working assumptions A1 to A5 (it followed "ok let's continue development. make your own decision how to continue"). The plan text was written and reviewed after that message; the controller summarised it to the owner before executing and proceeds on this approval. **The owner has not read the plan text as far as this record knows**; the owner can stop or amend at any time. |
 | AP-2 | Every push of `p2a/rule-pack-core` and every CI run waited on | 2026-10-17 | hans | asked at each push. Given for the push of the CI checkpoint after T16 (OI-10), answer "Yes, push now (Recommended)" in chat; covers that push and the read-only wait for its run, nothing later. Given again on 2026-10-17 for the push of the final head at T27 step 4 (answer "Yes, push now (Recommended)"; 22 commits from 589b768 when asked, 23 with the commit that records this approval, pushed head 1d747ce), covering that push and the read-only wait for its run. |
 | AP-3 | The two edits of the pinned workflow `ci.yml` (T2 branch filter, T24 second digest) | 2026-10-17 | hans | the T2 branch filter `p2a/**` (b6bb562) approved with the CI-checkpoint push; the T24 second digest (upload of `pack-toy-digest.txt` and the compare of both digests, with an empty-value check) approved on 2026-10-17 with the T27 push, answer "Yes, push now (Recommended)" |
-| AP-4 | Merge, tag and the sign-offs in `docs/exit/P2a.md` | | | owner only (T27) |
+| AP-4 | Merge, tag and the sign-offs in `docs/exit/P2a.md` | 2026-10-17 | hans | merge and tag instructed in chat ("merge and tag"); done locally by the agent on that instruction; pushing main and the tag needs the owner's separate approval; the sign-off boxes are not ticked |
 
 ## Owner inputs
 
@@ -32,7 +32,7 @@ All answered as "default accepted" on 2026-10-16 by the owner's delegation ("mak
 | OI-9 | Accept the split and add a row P2a-2 to the spec 16 table | the notes of the Deferral section stand in until the owner edits the spec | default accepted; the spec is not edited |
 | OI-10 | Optional CI checkpoint: push after T16 and wait for the run | recommended | asked at the time (AP-2) |
 
-Owner reading and deciding time for the effort ledger (Convention 8): not provided.
+Owner reading and deciding time for the effort ledger (Convention 8): not provided at T1. Estimate given by the owner in chat on 2026-10-17: about 3 hours so far plus about 1.5 hours for the exit record (4.5 hours in all). P3 re-estimate decision (spec 15): "continue", no cut order.
 
 ## Pins created
 
