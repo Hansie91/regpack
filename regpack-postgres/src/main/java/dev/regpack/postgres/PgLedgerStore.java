@@ -95,6 +95,8 @@ public final class PgLedgerStore implements LedgerStore {
   private final PgOutbox outbox;
   private final PgContexts contexts;
   private final PgDecisions decisions;
+  private final PgLeases leases;
+  private final PgDeliveries deliveries;
 
   public PgLedgerStore(DataSource dataSource, Clock clock, Config config) {
     Objects.requireNonNull(dataSource, "dataSource");
@@ -104,6 +106,8 @@ public final class PgLedgerStore implements LedgerStore {
     this.outbox = new PgOutbox(dataSource, config);
     this.contexts = new PgContexts(dataSource, config);
     this.decisions = new PgDecisions(dataSource, config);
+    this.leases = new PgLeases(dataSource, clock, config);
+    this.deliveries = new PgDeliveries(dataSource, clock, config);
   }
 
   // IngestLedger (T15)
@@ -168,70 +172,70 @@ public final class PgLedgerStore implements LedgerStore {
 
   @Override
   public LeaseResult acquire(EndpointKey endpoint, String holder, Duration ttl) {
-    throw new UnsupportedOperationException("T17");
+    return leases.acquire(endpoint, holder, ttl);
   }
 
   @Override
   public boolean renew(EndpointKey endpoint, LeaseToken token, Duration ttl) {
-    throw new UnsupportedOperationException("T17");
+    return leases.renew(endpoint, token, ttl);
   }
 
   @Override
   public void release(EndpointKey endpoint, LeaseToken token) {
-    throw new UnsupportedOperationException("T17");
+    leases.release(endpoint, token);
   }
 
   @Override
   public Optional<LeaseGrant> currentLease(EndpointKey endpoint) {
-    throw new UnsupportedOperationException("T17");
+    return leases.currentLease(endpoint);
   }
 
   @Override
   public long restoreEpoch() {
-    throw new UnsupportedOperationException("T17");
+    return leases.restoreEpoch();
   }
 
   @Override
   public void declareRestoreEpoch(long epoch) {
-    throw new UnsupportedOperationException("T17");
+    leases.declareRestoreEpoch(epoch);
   }
 
   // DeliveryLedger (T17)
 
   @Override
   public DeliveryId createDelivery(NewDelivery delivery) {
-    throw new UnsupportedOperationException("T17");
+    return deliveries.createDelivery(delivery);
   }
 
   @Override
   public Optional<Delivery> delivery(DeliveryId id) {
-    throw new UnsupportedOperationException("T17");
+    return deliveries.delivery(id);
   }
 
   @Override
   public TransitionStatus transition(DeliveryId id, DeliveryState expectedFrom, DeliveryState to) {
-    throw new UnsupportedOperationException("T17");
+    return deliveries.transition(id, expectedFrom, to);
   }
 
   @Override
   public AttemptId allocateAttemptId() {
-    throw new UnsupportedOperationException("T17");
+    return deliveries.allocateAttemptId();
   }
 
   @Override
   public SendingResult beginSending(
       DeliveryId id, AttemptId attemptId, LeaseToken token, AttemptIntent intent) {
-    throw new UnsupportedOperationException("T17");
+    return deliveries.beginSending(id, attemptId, token, intent);
   }
 
   @Override
   public boolean markCommitIssued(AttemptId attempt, LeaseToken token) {
-    throw new UnsupportedOperationException("T17");
+    return deliveries.markCommitIssued(attempt, token);
   }
 
   @Override
   public Optional<Attempt> attempt(AttemptId id) {
-    throw new UnsupportedOperationException("T17");
+    return deliveries.attempt(id);
   }
 
   // ReportLedger (T18)
