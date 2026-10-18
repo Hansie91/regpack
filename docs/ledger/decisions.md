@@ -47,6 +47,9 @@ approved-schema-sha256: 5ed500918349603304a7552fbc00ab4ef3ce6adc3ac442e028b5e684
 
 | Name | Value | Task | Reason |
 |---|---|---|---|
+| V001__core.sql | 1fa65ca834cf60c72c0609cbc5f932dd5a41191621a880dab63a121869975769 | T11 | the applied script is never edited; a change is a new script |
+| schema-design.md (approved) | 5ed500918349603304a7552fbc00ab4ef3ce6adc3ac442e028b5e68488ea1792 | T11 | the document is frozen after AP-7 |
+| state codes inside V001 | delivery.state SENDING 4, AWAITING_ACK 5, IN_DOUBT 11; outbox.state PENDING 1 | T11 | the partial-index predicates of delivery_in_flight, delivery_sending_idx and outbox_pending_idx use these numbers; T14 Codes and CodesTest must use the same (DeliveryState 1-based in declaration order, so PREPARED 1 to WRITTEN_OFF 16; OutboxState PENDING 1, DONE 2) |
 
 ## Owner decisions at the schema stop (T2, 2026-10-18)
 
