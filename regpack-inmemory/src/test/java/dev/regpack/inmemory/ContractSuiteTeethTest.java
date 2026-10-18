@@ -9,10 +9,18 @@ import dev.regpack.inmemory.mutants.IgnoreLeaseTokenLedgerContractTest;
 import dev.regpack.inmemory.mutants.IgnoreRestoreEpochLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoInFlightGuardLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoTakeoverInDoubtLedgerContractTest;
+import dev.regpack.inmemory.mutants.NoWithdrawalGuardLedgerContractTest;
 import dev.regpack.inmemory.mutants.NonAtomicDecisionsLedgerContractTest;
+import dev.regpack.inmemory.mutants.NonAtomicReportableLedgerContractTest;
 import dev.regpack.inmemory.mutants.OverwriteOnDuplicateEvidenceContractTest;
+import dev.regpack.inmemory.mutants.PageUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.RedeliveryReingestsLedgerContractTest;
 import dev.regpack.inmemory.mutants.ShortenRetentionEvidenceContractTest;
+import dev.regpack.inmemory.mutants.SubjectNotRegimeScopedLedgerContractTest;
+import dev.regpack.inmemory.mutants.SuppressAgainstAnyVersionLedgerContractTest;
+import dev.regpack.inmemory.mutants.TakeoverTouchesOtherEndpointsLedgerContractTest;
+import dev.regpack.inmemory.mutants.TrnNotUniquePerLeiLedgerContractTest;
+import dev.regpack.inmemory.mutants.TrnReassignedPerVersionLedgerContractTest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,7 +50,14 @@ class ContractSuiteTeethTest {
         Set.of(
             "beginSendingRequiresCurrentLeaseAndQueuedState",
             "markCommitIssuedIsFencedCompareAndSet",
-            "takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder"));
+            "takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder",
+            // The two scenarios the plan names here (takeover during the upload, stall after the
+            // token check) are not caught by this flaw: the takeover moves the SENDING delivery to
+            // IN_DOUBT, so the marker fails on the state alone. They are caught by
+            // NO_TAKEOVER_IN_DOUBT below. These three scenarios do catch a missing token fence.
+            "aSenderThatLostItsLeaseBeforeBeginSendingSendsNothing",
+            "twoConcurrentSendersOnlyOneReachesTheDestination",
+            "restoreThenZombieSenderIsFencedAtTheGate"));
     expected.put(
         NoInFlightGuardLedgerContractTest.class,
         Set.of(
@@ -56,14 +71,45 @@ class ContractSuiteTeethTest {
         Set.of("redeliveredBatchIsNoopAndReturnsOriginalResult"));
     expected.put(
         NoTakeoverInDoubtLedgerContractTest.class,
-        Set.of("takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder"));
+        Set.of(
+            "takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder",
+            "takeoverDuringAnInProgressUploadAbortsTheOldSenderAtTheGate",
+            "stallAfterTokenCheckResumesAfterTakeoverAndTheMarkerCasFails"));
     expected.put(AbaAsNoopLedgerContractTest.class, Set.of("abaProducesThreeVersions"));
     expected.put(
         IgnoreRestoreEpochLedgerContractTest.class,
-        Set.of("restoreThenZombieStaleTokenIsFencedEvenBeforeExpiry"));
+        Set.of(
+            "restoreThenZombieStaleTokenIsFencedEvenBeforeExpiry",
+            "restoreThenZombieSenderIsFencedAtTheGate"));
     expected.put(
         IdempotencyIgnoresContextLedgerContractTest.class,
         Set.of("sameEventSameDigestNewContextSupersedes"));
+    // the flaws of the P3a suites (ReportLedger, exit fixtures, fencing scenarios, page limit)
+    expected.put(
+        TrnNotUniquePerLeiLedgerContractTest.class,
+        Set.of("aSecondSubjectWithTheSameTrnAndLeiIsRejectedAtomically"));
+    expected.put(
+        TrnReassignedPerVersionLedgerContractTest.class,
+        Set.of("trnIsAssignedOnceAndSharedByNewtCancAndRenewt"));
+    expected.put(
+        SuppressAgainstAnyVersionLedgerContractTest.class,
+        Set.of(
+            "logicalHashSuppressionComparesOnlyWithTheLatestNonRejectedVersion",
+            "abaEndToEndThirdDecisionIsANewRowWhoseVersionReflectsA"));
+    expected.put(
+        NonAtomicReportableLedgerContractTest.class, Set.of("decisionAndVersionsCommitInOneUnit"));
+    expected.put(
+        SubjectNotRegimeScopedLedgerContractTest.class, Set.of("subjectKeyIsScopedByRegime"));
+    expected.put(
+        NoWithdrawalGuardLedgerContractTest.class,
+        Set.of(
+            "aSupersedingNonReportDecisionFailsClosedWhileVersionsExist",
+            "aSupersedingNonReportDecisionFailsClosedThroughCommitDecisionsToo"));
+    expected.put(
+        TakeoverTouchesOtherEndpointsLedgerContractTest.class,
+        Set.of("takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder"));
+    expected.put(
+        PageUnboundedLedgerContractTest.class, Set.of("pendingOutboxReturnsAtMostPageLimitItems"));
 
     List<String> misses = new ArrayList<>();
     expected.forEach(

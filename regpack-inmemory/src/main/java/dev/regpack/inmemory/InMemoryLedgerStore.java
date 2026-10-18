@@ -103,11 +103,30 @@ public final class InMemoryLedgerStore implements LedgerStore {
     NO_TAKEOVER_IN_DOUBT,
     ABA_AS_NOOP,
     IGNORE_RESTORE_EPOCH,
-    IDEMPOTENCY_KEY_IGNORES_CONTEXT
+    IDEMPOTENCY_KEY_IGNORES_CONTEXT,
+    /** A second subject may take a (executing LEI, TRN) pair that is already assigned. */
+    TRN_NOT_UNIQUE_PER_LEI,
+    /** Every version with a proposal overwrites the key id of the stored TRN. */
+    TRN_REASSIGNED_PER_VERSION,
+    /** Suppression compares with any live version of the subject, not only the latest. */
+    SUPPRESS_AGAINST_ANY_VERSION,
+    /** A reportable unit that throws leaves the decisions and subjects staged so far. */
+    NON_ATOMIC_REPORTABLE,
+    /** The subject key ignores the regime. */
+    SUBJECT_NOT_REGIME_SCOPED,
+    /** A superseding non-REPORT decision is accepted while versions exist. */
+    NO_WITHDRAWAL_GUARD,
+    /** A takeover moves the SENDING deliveries of every endpoint, not only its own. */
+    TAKEOVER_TOUCHES_OTHER_ENDPOINTS,
+    /** The outbox page limit is not applied. */
+    PAGE_UNBOUNDED
   }
 
   /** Constant stand-in for the decision context id under IDEMPOTENCY_KEY_IGNORES_CONTEXT. */
   private static final Sha256 NO_CONTEXT = new Sha256("0".repeat(64));
+
+  /** Constant stand-in for the regime under SUBJECT_NOT_REGIME_SCOPED. */
+  private static final Regime NO_REGIME = new Regime("noregime");
 
   private final Clock clock;
   private final Flaw flaw;
@@ -279,7 +298,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
       throw new IllegalArgumentException("max must be >= 0");
     }
     synchronized (lock) {
-      int limit = Math.min(max, PAGE_LIMIT);
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      int limit = flaw == Flaw.PAGE_UNBOUNDED ? max : Math.min(max, PAGE_LIMIT);
       List<OutboxItem> pending = new ArrayList<>();
       for (OutboxItem item : outbox.values()) {
         if (pending.size() >= limit) {
@@ -401,8 +421,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
    * that leg has report versions; the withdrawal transaction belongs to the delivery state machine.
    */
   private void requireNoWithdrawal(DecisionBody body) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (flaw == Flaw.NO_WITHDRAWAL_GUARD) {
+      return;
+    }
     for (Leg leg : Leg.values()) {
-      SubjectRow subject = subjects.get(new SubjectKey(body.regime(), body.eventIdentity(), leg));
+      SubjectRow subject =
+          subjects.get(indexKey(new SubjectKey(body.regime(), body.eventIdentity(), leg)));
       if (subject != null
           && !subject.versions.isEmpty()
           && (body.outcome() != Outcome.REPORT || !body.legs().contains(leg))) {
@@ -447,7 +472,12 @@ public final class InMemoryLedgerStore implements LedgerStore {
           results.add(new ReportableCommitted(committed, versionResults));
         }
       } catch (RuntimeException e) {
-        log.rollBack();
+        // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
+        if (flaw == Flaw.NON_ATOMIC_REPORTABLE) {
+          stage.publish();
+        } else {
+          log.rollBack();
+        }
         throw e;
       }
       stage.publish();
@@ -507,7 +537,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private VersionResult applyVersion(
       DecisionStage stage, Committed committed, NewVersion version, UnitLog log) {
     DecisionRecord decision = committed.record();
-    SubjectRow subject = subjects.get(version.subject());
+    SubjectRow subject = subjects.get(indexKey(version.subject()));
     if (committed.status() == CommitStatus.NOOP_REDELIVERY) {
       // rule 3
       VersionRow existing =
@@ -531,11 +561,11 @@ public final class InMemoryLedgerStore implements LedgerStore {
     }
     if (subject == null) {
       SubjectRow created = new SubjectRow(new SubjectId(nextSubjectId++), version.subject());
-      subjects.put(created.key, created);
+      subjects.put(indexKey(created.key), created);
       subjectsById.put(created.id, created);
       log.onRollBack(
           () -> {
-            subjects.remove(created.key);
+            subjects.remove(indexKey(created.key));
             subjectsById.remove(created.id);
           });
       subject = created;
@@ -556,7 +586,10 @@ public final class InMemoryLedgerStore implements LedgerStore {
             VersionStatus.SUPPRESSED_UNCHANGED,
             Optional.empty());
       }
-      break;
+      // test double only: deliberate flaw for ContractSuiteTeethTest (looks at older versions too)
+      if (flaw != Flaw.SUPPRESS_AGAINST_ANY_VERSION) {
+        break;
+      }
     }
     // rules 4 and 6
     long seq = subject.versions.size() + 1L;
@@ -602,12 +635,21 @@ public final class InMemoryLedgerStore implements LedgerStore {
       if (version.trn().isPresent() && !version.trn().get().trn().equals(stored.trn())) {
         throw new IllegalArgumentException("a stored TRN cannot be replaced");
       }
+      // test double only: deliberate flaw for ContractSuiteTeethTest (the TRN is assigned again)
+      if (flaw == Flaw.TRN_REASSIGNED_PER_VERSION && version.trn().isPresent()) {
+        Trn again =
+            new Trn(stored.executingLei(), stored.trn(), version.trn().get().keyId(), clock.now());
+        subject.trn = Optional.of(again);
+        log.onRollBack(() -> subject.trn = Optional.of(stored));
+        return again;
+      }
       return stored;
     }
     TrnProposal proposal =
         version.trn().orElseThrow(() -> new IllegalArgumentException("a new subject needs a TRN"));
     TrnKey trnKey = new TrnKey(version.executingLei(), proposal.trn());
-    if (subjectsByTrn.containsKey(trnKey)) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest (no uniqueness)
+    if (flaw != Flaw.TRN_NOT_UNIQUE_PER_LEI && subjectsByTrn.containsKey(trnKey)) {
       throw new TrnConflictException(version.executingLei(), proposal.trn());
     }
     Trn assigned = new Trn(version.executingLei(), proposal.trn(), proposal.keyId(), clock.now());
@@ -636,7 +678,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
   public Optional<Subject> subject(SubjectKey key) {
     Objects.requireNonNull(key, "key");
     synchronized (lock) {
-      return Optional.ofNullable(subjects.get(key)).map(InMemoryLedgerStore::view);
+      return Optional.ofNullable(subjects.get(indexKey(key))).map(InMemoryLedgerStore::view);
     }
   }
 
@@ -683,6 +725,14 @@ public final class InMemoryLedgerStore implements LedgerStore {
       }
       return List.copyOf(stored);
     }
+  }
+
+  /** The key under which a subject is indexed: the regime is dropped under the flaw. */
+  private SubjectKey indexKey(SubjectKey key) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    return flaw == Flaw.SUBJECT_NOT_REGIME_SCOPED
+        ? new SubjectKey(NO_REGIME, key.eventIdentity(), key.leg())
+        : key;
   }
 
   private DecisionKey decisionKey(DecisionBody body) {
@@ -771,7 +821,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
       if (flaw != Flaw.NO_TAKEOVER_IN_DOUBT) {
         deliveries.replaceAll(
             (id, delivery) ->
-                delivery.key().endpoint().equals(endpoint)
+                (delivery.key().endpoint().equals(endpoint)
+                            || flaw == Flaw.TAKEOVER_TOUCHES_OTHER_ENDPOINTS)
                         && delivery.state() == DeliveryState.SENDING
                     ? new Delivery(id, delivery.key(), DeliveryState.IN_DOUBT)
                     : delivery);
