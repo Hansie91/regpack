@@ -23,7 +23,10 @@ import javax.sql.DataSource;
  * schema (I2, D-L3); every unit of work starts through {@link Unit#begin} (Convention 11).
  *
  * <p>Built in tasks: T15 ingest, outbox and context reads; T16 decisions and partitions; T17 leases
- * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work).
+ * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work). No
+ * method is left unbuilt ({@code NoStubsLeftTest}). The integrity queries of T19 are not part of
+ * the {@link LedgerStore} port: {@link LedgerIntegrity} reads the same schema through a {@link
+ * DataSource} and the schema name of the {@link Config}.
  */
 public final class PgLedgerStore implements LedgerStore {
   /**

@@ -83,7 +83,12 @@ final class Unit {
     return duration.toMillis() + "ms";
   }
 
-  private static void release(Connection connection, boolean committed) {
+  /**
+   * Ends the use of a connection: after a commit the auto-commit mode is restored, otherwise the
+   * transaction is rolled back and auto-commit is left alone; the connection is closed either way.
+   * Also used by the read-only snapshot of {@link LedgerIntegrity}.
+   */
+  static void release(Connection connection, boolean committed) {
     if (connection == null) {
       return;
     }
