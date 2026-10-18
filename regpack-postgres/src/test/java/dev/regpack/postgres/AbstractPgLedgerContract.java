@@ -13,9 +13,10 @@ import dev.regpack.testkit.contract.ReportLedgerContract;
  * gets a fresh, migrated schema (see {@link AbstractPgStoreTest}) and the contract interfaces of
  * the testkit are implemented here as their tasks land (T15: ingest and outbox; T16: decisions and
  * contexts; T17: leases, deliveries and the fencing scenarios; T18: the report suites and the exit
- * fixtures). Without a server every test of a subclass is skipped by an assumption.
+ * fixtures). Without a server every test of a subclass is skipped by an assumption. The class is
+ * public so that the schema mutants of T20 (package {@code mutants}) can bind the same suites.
  */
-abstract class AbstractPgLedgerContract extends AbstractPgStoreTest
+public abstract class AbstractPgLedgerContract extends AbstractPgStoreTest
     implements IngestLedgerContract,
         DecisionLedgerContract,
         LeaseDeliveryLedgerContract,

@@ -19,9 +19,10 @@ import org.junit.jupiter.api.BeforeEach;
  * The base of every real-store test that works through the adapter (Convention 4): a fresh schema,
  * migrated to the current version and dropped afterwards, a {@link ManualClock} and a {@link
  * PgLedgerStore} over them. Without a server (or with an unreachable one) every test of a subclass
- * is skipped by the assumption in {@link PgTestDatabase#dataSource()}.
+ * is skipped by the assumption in {@link PgTestDatabase#dataSource()}. The class is public so that
+ * the schema mutants of T20 (package {@code mutants}) can extend it.
  */
-abstract class AbstractPgStoreTest {
+public abstract class AbstractPgStoreTest {
   private DataSource dataSource;
   private String schema;
   private ManualClock clock;

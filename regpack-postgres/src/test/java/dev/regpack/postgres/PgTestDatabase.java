@@ -123,7 +123,11 @@ public final class PgTestDatabase {
         "t" + ProcessHandle.current().pid() + "_" + COUNTER.incrementAndGet());
   }
 
-  /** Drops a schema made by {@link #freshSchema()} and everything in it; refuses any other name. */
+  /**
+   * Drops a schema made by {@link #freshSchema()} and everything in it; refuses any other name. The
+   * wait for the table locks is bounded (30 seconds), so a connection that a failed test left in an
+   * open transaction fails the cleanup instead of hanging the run.
+   */
   public static void dropSchema(String schema) {
     String identifier = SqlIdentifier.require(schema);
     if (!FRESH_SCHEMA.matcher(identifier).matches()) {
@@ -131,6 +135,7 @@ public final class PgTestDatabase {
     }
     try (Connection connection = dataSource().getConnection();
         Statement statement = connection.createStatement()) {
+      statement.execute("SET lock_timeout = '30s'");
       statement.execute("DROP SCHEMA IF EXISTS " + identifier + " CASCADE");
     } catch (SQLException e) {
       throw new IllegalStateException(
