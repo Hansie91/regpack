@@ -259,6 +259,188 @@ class TraceabilityCheckTest {
     assertThat(absent.problems()).contains("ARTEFACT_MISSING:I5:GC-Z");
   }
 
+  private TraceabilityCheck.Result check(Table table, TraceabilityCheck.Mode mode) {
+    return TraceabilityCheck.check(table.render(), repo, List.of(repo), mode);
+  }
+
+  private static String realStore(String id, String ref) {
+    return Table.line(id, "P3", "TEST", ref, "REALSTORE", "BUILD");
+  }
+
+  private static String inMemory(String id, String ref) {
+    return Table.line(id, "P3", "TEST", ref, "INMEMORY", "BUILD");
+  }
+
+  @Test
+  void realStoreSkipIgnoresRealStoreLines() throws IOException {
+    // the real-store test was never run on this machine: no report, so mode ALL reports it missing
+    var all = check(new Table().exited("P3").set("I2", realStore("I2", "a.B#it")));
+    assertThat(all.problems()).contains("ARTEFACT_MISSING:I2:a.B#it", "ROW_WITHOUT_EVIDENCE:I2");
+    assertThat(all.deferred()).isEmpty();
+
+    var skip =
+        check(
+            new Table().exited("P3").set("I2", realStore("I2", "a.B#it")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(skip.problems()).isEmpty();
+    assertThat(skip.ok()).isTrue();
+    assertThat(skip.deferred()).containsExactly("REALSTORE_DEFERRED:I2");
+    assertThat(skip.closed()).isZero();
+    assertThat(skip.open()).isEqualTo(24);
+
+    // a passing in-memory line is interim for I2 and does not close it; a failing real-store test
+    // is not looked at in this mode
+    report(
+        "<testcase classname=\"a.B\" name=\"m()\"/>"
+            + "<testcase classname=\"a.B\" name=\"it\"><failure/></testcase>");
+    var interim =
+        check(
+            new Table().exited("P3").set("I2", inMemory("I2", "a.B#m"), realStore("I2", "a.B#it")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(interim.problems()).isEmpty();
+    assertThat(interim.deferred()).containsExactly("REALSTORE_DEFERRED:I2");
+
+    // a row that is not due defers nothing
+    var notDue =
+        check(
+            new Table().set("I2", realStore("I2", "a.B#it")).exited("none"),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(notDue.problems()).isEmpty();
+    assertThat(notDue.deferred()).isEmpty();
+  }
+
+  @Test
+  void realStoreSkipStillFailsADueRowWithNoEvidenceAtAll() throws IOException {
+    var none =
+        check(
+            new Table().exited("P3").set("I1", Table.line("I1", "P3", "NONE", "-", "NA", "NA")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(none.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I1");
+    assertThat(none.deferred()).isEmpty();
+
+    report("<testcase classname=\"a.B\" name=\"m()\"/>");
+    var onlyInMemory =
+        check(
+            new Table().exited("P3").set("I9", inMemory("I9", "a.B#m")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(onlyInMemory.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I9");
+    assertThat(onlyInMemory.deferred()).isEmpty();
+
+    // a row that never needs the real store does not defer: its real-store line is not evidence
+    var r12 =
+        check(
+            new Table().exited("P3").set("R12", realStore("R12", "a.B#it")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(r12.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:R12");
+    assertThat(r12.deferred()).isEmpty();
+
+    // a counting line next to the real-store line closes an ordinary row
+    var counted =
+        check(
+            new Table()
+                .exited("P3")
+                .set("R12", realStore("R12", "a.B#it"), inMemory("R12", "a.B#m")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(counted.problems()).isEmpty();
+    assertThat(counted.closed()).isEqualTo(1);
+  }
+
+  @Test
+  void realStoreOnlyRequiresPassedTests() throws IOException {
+    report(
+        "<testcase classname=\"a.B\" name=\"it()\"/>"
+            + "<testcase classname=\"a.B\" name=\"bad\"><failure/></testcase>");
+    var passed =
+        check(
+            new Table().exited("P3").set("I2", realStore("I2", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(passed.problems()).isEmpty();
+    assertThat(passed.closed()).isEqualTo(1);
+    assertThat(passed.deferred()).isEmpty();
+
+    var failed =
+        check(
+            new Table().exited("P3").set("I2", realStore("I2", "a.B#bad")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(failed.problems()).contains("NOT_PASSING:I2:a.B#bad", "ROW_WITHOUT_EVIDENCE:I2");
+
+    var missing =
+        check(
+            new Table().exited("P3").set("I2", realStore("I2", "a.B#gone")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(missing.problems())
+        .contains("ARTEFACT_MISSING:I2:a.B#gone", "ROW_WITHOUT_EVIDENCE:I2");
+
+    // a due real-store-only row with no real-store line at all needs one
+    var noLine =
+        check(
+            new Table().exited("P3").set("I10", inMemory("I10", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(noLine.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I10");
+  }
+
+  @Test
+  void skippedRealStoreTestNeverCounts() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"><skipped message=\"no server\"/></testcase>");
+    var only =
+        check(
+            new Table().exited("P3").set("I2", realStore("I2", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(only.problems()).contains("NOT_PASSING:I2:a.B#it", "ROW_WITHOUT_EVIDENCE:I2");
+    assertThat(only.closed()).isZero();
+    // a skipped test in mode ALL never counts either
+    var all = check(new Table().exited("P3").set("I2", realStore("I2", "a.B#it")));
+    assertThat(all.problems()).contains("NOT_PASSING:I2:a.B#it", "ROW_WITHOUT_EVIDENCE:I2");
+  }
+
+  @Test
+  void realStoreOnlyIgnoresInMemoryLines() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    // the in-memory line cites a test that does not exist: only mode does not look at it
+    var result =
+        check(
+            new Table()
+                .exited("P3")
+                .set("I2", inMemory("I2", "x.Y#nowhere"), realStore("I2", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(result.problems()).isEmpty();
+    assertThat(result.closed()).isEqualTo(1);
+
+    // a due row that has no real-store line and does not need one is not evaluated
+    var ordinary =
+        check(
+            new Table().exited("P3").set("R12", inMemory("R12", "x.Y#nowhere")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(ordinary.problems()).isEmpty();
+    assertThat(ordinary.closed()).isZero();
+  }
+
+  @Test
+  void planPatternAcceptsP3aToP3d() {
+    String line = Table.line("R1", "P3a,P3d", "NONE", "-", "NA", "NA");
+    var accepted = check(new Table().exited("P3a,P3b,P3c,P3d,P2a,P1a").set("R1", line));
+    assertThat(accepted.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:R1");
+    var open = check(new Table().exited("P3a").set("R1", line));
+    assertThat(open.problems()).isEmpty();
+    var bad =
+        check(
+            new Table().exited("P3e").set("R1", Table.line("R1", "P3e", "NONE", "-", "NA", "NA")));
+    assertThat(bad.problems()).contains("BAD_PLAN:exited_plans:P3e", "BAD_PLAN:R1:P3e");
+  }
+
+  @Test
+  void defaultModeIsUnchanged() throws IOException {
+    Table table = new Table().exited("P3").set("I2", realStore("I2", "a.B#it"));
+    var implicit = TraceabilityCheck.check(table.render(), repo, List.of(repo));
+    var explicit = check(table, TraceabilityCheck.Mode.ALL);
+    assertThat(implicit).isEqualTo(explicit);
+    assertThat(implicit.problems())
+        .contains("ARTEFACT_MISSING:I2:a.B#it", "ROW_WITHOUT_EVIDENCE:I2");
+    assertThat(implicit.deferred()).isEmpty();
+    var fourArguments = new TraceabilityCheck.Result(List.of("p"), 1, 2, 3);
+    assertThat(fourArguments.deferred()).isEmpty();
+  }
+
   @Test
   void reviewFileNeedsOwnerAndPassStatus() throws IOException {
     String review = Table.line("R14", "P0", "REVIEW", "docs/r14.md", "NA", "NA");

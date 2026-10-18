@@ -33,6 +33,11 @@ public final class PinCheck {
   private static final Pattern PULL_REQUEST_TARGET = Pattern.compile("\\bpull_request_target\\b");
   private static final Pattern RUNS_ON = Pattern.compile("^(\\s*(?:-\\s+)?)runs-on:\\s*(.*)$");
   private static final Pattern COMMENT_START = Pattern.compile("(^|\\s)#");
+  private static final Pattern IMAGE_KEY = Pattern.compile("^\\s*(?:-\\s+)?image:\\s*(.*)$");
+  private static final Pattern CONTAINER_KEY =
+      Pattern.compile("^\\s*(?:-\\s+)?container:\\s*(\\S.*)$");
+  private static final Pattern FLOW_IMAGE = Pattern.compile("[{,]\\s*image:\\s*([^,}]*)");
+  private static final Pattern IMAGE_DIGEST = Pattern.compile("@sha256:[0-9a-f]{64}$");
 
   private PinCheck() {}
 
@@ -105,6 +110,7 @@ public final class PinCheck {
         continue;
       }
       String code = withoutComment(line);
+      addUnpinnedImages(problems, where, code);
       if (WRITE_ALL.matcher(code).find()) {
         problems.add(where + "WRITE_ALL");
       }
@@ -179,6 +185,36 @@ public final class PinCheck {
         return;
       }
       addLatestRunners(problems, name + ":" + (j + 1) + ": ", next);
+    }
+  }
+
+  /**
+   * Flags every container image of a workflow line that is not pinned by digest: the {@code image:}
+   * key of a service container or a {@code container:} map (block or flow form) and the scalar
+   * value of {@code container:}. A value that is not a plain reference with a lower-case SHA-256
+   * digest at its end (including an expression or a block scalar indicator) is unverifiable and
+   * flagged too.
+   */
+  private static void addUnpinnedImages(List<String> problems, String where, String code) {
+    List<String> images = new ArrayList<>();
+    Matcher image = IMAGE_KEY.matcher(code);
+    Matcher container = CONTAINER_KEY.matcher(code);
+    if (image.matches()) {
+      images.add(image.group(1));
+    } else if (container.matches() && !container.group(1).strip().startsWith("{")) {
+      images.add(container.group(1));
+    }
+    if (code.indexOf('{') >= 0) {
+      Matcher flow = FLOW_IMAGE.matcher(code);
+      while (flow.find()) {
+        images.add(flow.group(1));
+      }
+    }
+    for (String raw : images) {
+      String value = unquote(raw.strip());
+      if (!IMAGE_DIGEST.matcher(value).find()) {
+        problems.add(where + "UNPINNED_IMAGE " + value);
+      }
     }
   }
 

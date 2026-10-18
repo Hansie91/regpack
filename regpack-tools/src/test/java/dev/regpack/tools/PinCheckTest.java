@@ -190,6 +190,85 @@ class PinCheckTest {
     }
   }
 
+  private static String withServiceImage(String image) {
+    return "name: ci\non: push\npermissions:\n  contents: read\njobs:\n  b:\n"
+        + "    runs-on: ubuntu-24.04\n    services:\n      pg:\n        image: "
+        + image
+        + "\n        ports:\n          - 127.0.0.1:5432:5432\n    steps:\n      - run: true\n";
+  }
+
+  @Test
+  void serviceImageWithoutDigestIsFlagged() {
+    for (String image : List.of("postgres:18.6-trixie", "postgres", "\"postgres:18\"")) {
+      List<String> problems = PinCheck.checkWorkflow("ci.yml", withServiceImage(image));
+      assertThat(problems).as(image).hasSize(1);
+      assertThat(problems.get(0)).contains("ci.yml:10: ").contains("UNPINNED_IMAGE ");
+    }
+    assertThat(PinCheck.checkWorkflow("ci.yml", withServiceImage("postgres:18")))
+        .containsExactly("ci.yml:10: UNPINNED_IMAGE postgres:18");
+    // a short, long, upper-case or sha512 digest is not a digest
+    for (String digest :
+        List.of(
+            "sha256:" + "a".repeat(63),
+            "sha256:" + "a".repeat(65),
+            "sha256:" + "A".repeat(64),
+            "sha512:" + "a".repeat(64))) {
+      assertThat(PinCheck.checkWorkflow("ci.yml", withServiceImage("postgres:18@" + digest)))
+          .as(digest)
+          .hasSize(1)
+          .allMatch(p -> p.contains("UNPINNED_IMAGE "));
+    }
+  }
+
+  @Test
+  void serviceImageWithDigestPasses() {
+    assertThat(PinCheck.checkWorkflow("ci.yml", withServiceImage("postgres@" + DIGEST))).isEmpty();
+    assertThat(PinCheck.checkWorkflow("ci.yml", withServiceImage("'postgres@" + DIGEST + "'")))
+        .isEmpty();
+  }
+
+  @Test
+  void containerImageWithoutDigestIsFlagged() {
+    String scalar =
+        "name: ci\non: push\npermissions:\n  contents: read\njobs:\n  b:\n"
+            + "    runs-on: ubuntu-24.04\n    container: node:22\n    steps:\n      - run: true\n";
+    assertThat(PinCheck.checkWorkflow("ci.yml", scalar))
+        .containsExactly("ci.yml:8: UNPINNED_IMAGE node:22");
+    String map =
+        "name: ci\non: push\npermissions:\n  contents: read\njobs:\n  b:\n"
+            + "    runs-on: ubuntu-24.04\n    container:\n      image: node:22\n"
+            + "    steps:\n      - run: true\n";
+    assertThat(PinCheck.checkWorkflow("ci.yml", map))
+        .containsExactly("ci.yml:9: UNPINNED_IMAGE node:22");
+    String flow =
+        "name: ci\non: push\npermissions:\n  contents: read\njobs:\n  b:\n"
+            + "    runs-on: ubuntu-24.04\n    container: { image: node:22, options: --init }\n"
+            + "    steps:\n      - run: true\n";
+    assertThat(PinCheck.checkWorkflow("ci.yml", flow))
+        .containsExactly("ci.yml:8: UNPINNED_IMAGE node:22");
+    String pinned = scalar.replace("node:22", "node:22@" + DIGEST);
+    assertThat(PinCheck.checkWorkflow("ci.yml", pinned)).isEmpty();
+  }
+
+  @Test
+  void aFloatingTagWithDigestStillPasses() {
+    assertThat(PinCheck.checkWorkflow("ci.yml", withServiceImage("postgres:latest@" + DIGEST)))
+        .isEmpty();
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml", withServiceImage("postgres:18.6-trixie@" + DIGEST + " # 18.6")))
+        .isEmpty();
+  }
+
+  @Test
+  void imageInAYamlCommentIsIgnored() {
+    String content =
+        withServiceImage("postgres@" + DIGEST)
+            .replace("    steps:", "    # image: postgres:18\n    steps:")
+            .replace("      - run: true", "      - run: true # image: node:22");
+    assertThat(PinCheck.checkWorkflow("ci.yml", content)).isEmpty();
+  }
+
   @Test
   void variableImageIsUnverifiable() {
     assertThat(PinCheck.checkDockerfile("Dockerfile", "ARG BASE\nFROM ${BASE}\n"))

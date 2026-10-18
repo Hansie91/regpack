@@ -51,22 +51,59 @@ public final class Gates {
         case "entry" -> {
           return entry(rest, out, err);
         }
+        case "annotate" -> {
+          return annotate(rest, out, err);
+        }
         default -> {
           // falls through to the usage message
         }
       }
     }
-    err.println("usage: Gates <traceability|pins|eol|g3|isolation|entry>");
+    err.println("usage: Gates <traceability|pins|eol|g3|isolation|entry|annotate>");
+    return 2;
+  }
+
+  /**
+   * The {@code annotate} command: {@code --scan <dir> [--scan <dir> ...]}. Prints the workflow
+   * commands for the test reports found under the directories (see {@link Annotations}).
+   */
+  private static int annotate(List<String> args, PrintStream out, PrintStream err) {
+    List<Path> scans = new ArrayList<>();
+    for (int i = 0; i < args.size(); i += 2) {
+      if (i + 1 >= args.size() || !args.get(i).equals("--scan")) {
+        return annotateUsage(err);
+      }
+      scans.add(Path.of(args.get(i + 1)));
+    }
+    if (scans.isEmpty()) {
+      return annotateUsage(err);
+    }
+    for (Path scan : scans) {
+      if (!Files.isDirectory(scan)) {
+        err.println("annotate: scan directory not found: " + scan);
+        return 2;
+      }
+    }
+    Annotations.render(scans).forEach(out::println);
+    return 0;
+  }
+
+  private static int annotateUsage(PrintStream err) {
+    err.println("usage: Gates annotate --scan <dir> [--scan <dir> ...]");
     return 2;
   }
 
   /**
    * The {@code traceability} gate: {@code --file <file> [--root <dir>] --scan <dir> [--scan <dir>
-   * ...]}. A relative file or scan directory is resolved against the root.
+   * ...] [--realstore all|skip|only]}. A relative file or scan directory is resolved against the
+   * root. The mode (default {@code all}) is described at {@link TraceabilityCheck.Mode}; with
+   * {@code skip} the deferred rows are printed as information and the OK line gains {@code
+   * deferred=<n>}.
    */
   private static int traceability(List<String> args, PrintStream out, PrintStream err) {
     String file = null;
     String root = ".";
+    TraceabilityCheck.Mode mode = TraceabilityCheck.Mode.ALL;
     List<String> scans = new ArrayList<>();
     for (int i = 0; i < args.size(); i += 2) {
       if (i + 1 >= args.size()) {
@@ -77,6 +114,16 @@ public final class Gates {
         case "--file" -> file = value;
         case "--root" -> root = value;
         case "--scan" -> scans.add(value);
+        case "--realstore" -> {
+          switch (value) {
+            case "all" -> mode = TraceabilityCheck.Mode.ALL;
+            case "skip" -> mode = TraceabilityCheck.Mode.SKIP;
+            case "only" -> mode = TraceabilityCheck.Mode.ONLY;
+            default -> {
+              return traceabilityUsage(err);
+            }
+          }
+        }
         default -> {
           return traceabilityUsage(err);
         }
@@ -100,7 +147,9 @@ public final class Gates {
       return 2;
     }
     TraceabilityCheck.Result result =
-        TraceabilityCheck.check(markdown, repoRoot, scans.stream().map(repoRoot::resolve).toList());
+        TraceabilityCheck.check(
+            markdown, repoRoot, scans.stream().map(repoRoot::resolve).toList(), mode);
+    result.deferred().forEach(d -> out.println("traceability: INFO " + d));
     if (result.ok()) {
       out.println(
           "traceability: OK rows="
@@ -108,7 +157,10 @@ public final class Gates {
               + " closed="
               + result.closed()
               + " open="
-              + result.open());
+              + result.open()
+              + (mode == TraceabilityCheck.Mode.SKIP
+                  ? " deferred=" + result.deferred().size()
+                  : ""));
       return 0;
     }
     result.problems().forEach(p -> out.println("traceability: PROBLEM " + p));
@@ -117,7 +169,8 @@ public final class Gates {
 
   private static int traceabilityUsage(PrintStream err) {
     err.println(
-        "usage: Gates traceability --file <file> [--root <dir>] --scan <dir> [--scan <dir> ...]");
+        "usage: Gates traceability --file <file> [--root <dir>] --scan <dir> [--scan <dir> ...]"
+            + " [--realstore all|skip|only]");
     return 2;
   }
 

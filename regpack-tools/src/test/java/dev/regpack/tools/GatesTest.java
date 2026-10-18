@@ -9,6 +9,7 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -46,7 +47,86 @@ class GatesTest {
   void noArgumentsPrintsUsageAndExitsWithTwo() {
     var outcome = run();
     assertThat(outcome.rc()).isEqualTo(2);
-    assertThat(outcome.err()).contains("usage: Gates <traceability|pins|eol|g3|isolation|entry>");
+    assertThat(outcome.err())
+        .contains("usage: Gates <traceability|pins|eol|g3|isolation|entry|annotate>");
+  }
+
+  @Test
+  void realStoreFlagIsParsed() throws IOException {
+    String file = table(true);
+    String[] base = {"traceability", "--file", file, "--root", repo.toString(), "--scan", "."};
+    var all = run(base);
+    assertThat(all.out().strip()).isEqualTo("traceability: OK rows=24 closed=0 open=24");
+    assertThat(run(append(base, "--realstore", "all")).out()).isEqualTo(all.out());
+
+    var skip = run(append(base, "--realstore", "skip"));
+    assertThat(skip.rc()).isZero();
+    assertThat(skip.out().strip())
+        .isEqualTo("traceability: OK rows=24 closed=0 open=24 deferred=0");
+    var only = run(append(base, "--realstore", "only"));
+    assertThat(only.rc()).isZero();
+    assertThat(only.out().strip()).isEqualTo("traceability: OK rows=24 closed=0 open=24");
+
+    var bogus = run(append(base, "--realstore", "sometimes"));
+    assertThat(bogus.rc()).isEqualTo(2);
+    assertThat(bogus.err()).contains("usage: Gates traceability");
+    assertThat(run(append(base, "--realstore")).rc()).isEqualTo(2);
+  }
+
+  @Test
+  void realStoreSkipPrintsDeferredRowsAndExitsWithZero() throws IOException {
+    Path file = repo.resolve("traceability.md");
+    StringBuilder md = new StringBuilder("exited_plans: P3\n\n");
+    for (int i = 1; i <= 24; i++) {
+      String id = i <= 14 ? "R" + i : "I" + (i - 14);
+      if (id.equals("I2")) {
+        md.append("| I2 | P3 | TEST | a.B#it | REALSTORE | BUILD | n |\n");
+      } else {
+        md.append("| ").append(id).append(" | P9 | NONE | - | NA | NA | n |\n");
+      }
+    }
+    Files.writeString(file, md.toString(), StandardCharsets.UTF_8);
+    String[] base = {"traceability", "--file", "traceability.md", "--root", repo.toString()};
+    var all = run(append(base, "--scan", "."));
+    assertThat(all.rc()).isEqualTo(1);
+    assertThat(all.out()).contains("traceability: PROBLEM ARTEFACT_MISSING:I2:a.B#it");
+    var skip = run(append(base, "--scan", ".", "--realstore", "skip"));
+    assertThat(skip.rc()).isZero();
+    assertThat(skip.out().lines().toList())
+        .containsExactly(
+            "traceability: INFO REALSTORE_DEFERRED:I2",
+            "traceability: OK rows=24 closed=0 open=24 deferred=1");
+  }
+
+  private static String[] append(String[] args, String... more) {
+    String[] all = Arrays.copyOf(args, args.length + more.length);
+    System.arraycopy(more, 0, all, args.length, more.length);
+    return all;
+  }
+
+  @Test
+  void annotatePrintsTheTallyOfTheScannedReports() throws IOException {
+    Path reports = repo.resolve("target/surefire-reports");
+    Files.createDirectories(reports);
+    Files.writeString(
+        reports.resolve("TEST-a.B.xml"),
+        "<testsuite name=\"a.B\"><testcase classname=\"a.B\" name=\"m()\"/>"
+            + "<testcase classname=\"a.B\" name=\"f()\"><failure message=\"boom\"/></testcase>"
+            + "</testsuite>",
+        StandardCharsets.UTF_8);
+    var outcome = run("annotate", "--scan", repo.toString());
+    assertThat(outcome.rc()).isZero();
+    assertThat(outcome.out().lines().toList())
+        .contains(
+            "::notice title=tally::class=a.B run=2 failed=1 errors=0 skipped=0",
+            "::notice title=tally-total::classes=1 run=2 failed=1 errors=0 skipped=0",
+            "::error title=a.B#f::boom");
+    assertThat(run("annotate").rc()).isEqualTo(2);
+    assertThat(run("annotate", "--scan").rc()).isEqualTo(2);
+    assertThat(run("annotate", "--bogus", "x").rc()).isEqualTo(2);
+    var missing = run("annotate", "--scan", repo.resolve("no-such-dir").toString());
+    assertThat(missing.rc()).isEqualTo(2);
+    assertThat(missing.err()).contains("scan directory not found");
   }
 
   private static Outcome runWithInput(String input, String... args) {
