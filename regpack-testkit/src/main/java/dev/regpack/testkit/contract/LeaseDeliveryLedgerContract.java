@@ -84,6 +84,30 @@ public interface LeaseDeliveryLedgerContract {
     assertThat(ledger().currentLease(E1)).contains(grant);
   }
 
+  /** M48: a blank holder and a ttl that is not positive whole microseconds are errors. */
+  @Test
+  default void acquireRejectsBlankHolderAndBadTtl() {
+    for (String blank : new String[] {"", " ", "\t"}) {
+      assertThatThrownBy(() -> ledger().acquire(E1, blank, TTL))
+          .as("holder '" + blank + "'")
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    for (Duration bad :
+        new Duration[] {
+          Duration.ZERO, Duration.ofSeconds(-1), Duration.ofNanos(1_500), Duration.ofNanos(1)
+        }) {
+      assertThatThrownBy(() -> ledger().acquire(E1, "A", bad))
+          .as("ttl " + bad)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    // nothing was granted by a rejected call: the first real acquire still gets counter 1
+    assertThat(ledger().currentLease(E1)).isEmpty();
+    assertThat(acquire(E1, "A")).isEqualTo(new LeaseToken(0, 1));
+    // the smallest legal ttl is one microsecond
+    assertThat(granted(ledger().acquire(E2, "A", Duration.of(1, ChronoUnit.MICROS))).token())
+        .isEqualTo(new LeaseToken(0, 1));
+  }
+
   @Test
   default void secondAcquireWhileHeldIsRefused() {
     Instant start = clock().now();
@@ -198,6 +222,80 @@ public interface LeaseDeliveryLedgerContract {
     DeliveryId second = ledger().createDelivery(new NewDelivery(E1, 1, "bk", 2));
     assertThat(second).isNotEqualTo(id);
     assertThat(stateOf(second)).isEqualTo(DeliveryState.PREPARED);
+  }
+
+  /** M49: a blank business key is an error, and no delivery is created. */
+  @Test
+  default void createDeliveryRejectsBlankBusinessKey() {
+    for (String blank : new String[] {"", " ", "\t"}) {
+      assertThatThrownBy(() -> ledger().createDelivery(new NewDelivery(E1, 1, blank, 1)))
+          .as("business key '" + blank + "'")
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    // nothing was created by a rejected call: the first real delivery is not a duplicate
+    DeliveryId id = ledger().createDelivery(new NewDelivery(E1, 1, "bk", 1));
+    assertThat(stateOf(id)).isEqualTo(DeliveryState.PREPARED);
+  }
+
+  /** M52: an unknown delivery is an error for transition and beginSending, not a status. */
+  @Test
+  default void unknownDeliveryIsRejectedByTransitionAndBeginSending() {
+    LeaseToken t1 = acquire(E1, "A");
+    DeliveryId unknown = new DeliveryId(987_654);
+    assertThat(ledger().delivery(unknown)).isEmpty();
+    assertThatThrownBy(
+            () -> ledger().transition(unknown, DeliveryState.PREPARED, DeliveryState.QUEUED))
+        .isInstanceOf(IllegalArgumentException.class);
+    AttemptId attemptId = ledger().allocateAttemptId();
+    assertThatThrownBy(() -> ledger().beginSending(unknown, attemptId, t1, attemptIntent()))
+        .isInstanceOf(IllegalArgumentException.class);
+    // the rejected call consumed nothing: the allocated id is still usable
+    assertThat(ledger().attempt(attemptId)).isEmpty();
+    DeliveryId real = queuedDelivery(ledger(), E1, "bk", 1);
+    assertThat(applied(ledger().beginSending(real, attemptId, t1, attemptIntent())))
+        .isEqualTo(attemptId);
+  }
+
+  /** M52: marking an attempt that does not exist is false, not an error. */
+  @Test
+  default void markCommitIssuedOfAnUnknownAttemptIsFalse() {
+    LeaseToken t1 = acquire(E1, "A");
+    assertThat(ledger().markCommitIssued(new AttemptId(987_654), t1)).isFalse();
+    AttemptId allocatedButUnused = ledger().allocateAttemptId();
+    assertThat(ledger().markCommitIssued(allocatedButUnused, t1)).isFalse();
+    assertThat(ledger().attempt(allocatedButUnused)).isEmpty();
+  }
+
+  /**
+   * M50 and M51: the fence compares the token with the latest unreleased grant and has no expiry
+   * predicate. That is safe because every acquisition moves the SENDING deliveries of the endpoint
+   * to IN_DOUBT in the same unit, so an expired holder that has not been taken over can only
+   * continue what it already owns.
+   */
+  @Test
+  default void anExpiredButUntakenLeaseStillFencesItsOwnTokenAndNothingElse() {
+    LeaseToken t1 = acquire(E1, "A");
+    DeliveryId d1 = queuedDelivery(ledger(), E1, "bk1", 1);
+    DeliveryId d2 = queuedDelivery(ledger(), E1, "bk2", 1);
+    clock().advance(TTL.plus(Duration.of(1, ChronoUnit.MICROS)));
+    assertThat(ledger().currentLease(E1).orElseThrow().token()).isEqualTo(t1);
+    // expired but not taken over: its own token is still current for the intent ...
+    AttemptId a1 = applied(begin(ledger(), d1, t1));
+    // ... but it can no longer be renewed
+    assertThat(ledger().renew(E1, t1, TTL)).isFalse();
+    // a token that is not the latest grant is fenced even before any takeover
+    assertThat(begin(ledger(), d2, new LeaseToken(0, 7)).status())
+        .isEqualTo(SendingStatus.STALE_LEASE);
+    assertThat(begin(ledger(), d2, new LeaseToken(1, 1)).status())
+        .isEqualTo(SendingStatus.STALE_LEASE);
+    // the takeover grants counter + 1 and fences the old token
+    LeaseGrant second = granted(ledger().acquire(E1, "B", TTL));
+    assertThat(second.token()).isEqualTo(new LeaseToken(0, 2));
+    assertThat(begin(ledger(), d2, t1).status()).isEqualTo(SendingStatus.STALE_LEASE);
+    assertThat(ledger().markCommitIssued(a1, t1)).isFalse();
+    assertThat(stateOf(d1)).isEqualTo(DeliveryState.IN_DOUBT);
+    assertThat(stateOf(d2)).isEqualTo(DeliveryState.QUEUED);
+    assertThat(applied(begin(ledger(), d2, second.token()))).isNotNull();
   }
 
   @Test

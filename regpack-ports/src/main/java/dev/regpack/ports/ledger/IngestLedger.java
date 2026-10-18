@@ -44,8 +44,16 @@ public interface IngestLedger {
 
   /**
    * Atomic and idempotent by batch id (spec 7.2 step 2): a second commit of the same batch id
-   * writes nothing and returns the stored result with {@code redelivery = true}. Duplicate keys
-   * inside one commit throw {@link IllegalArgumentException} before anything is written.
+   * writes nothing and returns the stored result with {@code redelivery = true}.
+   *
+   * <p>Throws {@link IllegalArgumentException} before anything is written (nothing is stored, not
+   * even the batch id) for: duplicate keys inside one commit; an entry whose source differs from
+   * {@code sourceId} (M35); a blank {@code sourceId} (M39).
+   *
+   * <p>An entry whose (event identity, source, source version) exists under another record id is
+   * the same version of the event and is decided by the content hash (spec 10 {@code
+   * ingest_event_version_key}): an equal hash is {@code NOOP_SAME_VERSION_SAME_HASH}, a different
+   * hash is {@code CONFLICT_SAME_VERSION_DIFFERENT_HASH}, and nothing is stored for it.
    */
   Result commitIngest(Commit commit);
 

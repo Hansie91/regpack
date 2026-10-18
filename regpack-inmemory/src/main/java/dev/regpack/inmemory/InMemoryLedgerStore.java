@@ -34,6 +34,9 @@ import java.util.Set;
 public final class InMemoryLedgerStore implements LedgerStore {
   private record SourceEvent(EventIdentity eventIdentity, String sourceId) {}
 
+  /** The spec 10 {@code ingest_event_version_key}: (event identity, source, source version). */
+  private record EventVersion(EventIdentity eventIdentity, String sourceId, long sourceVersion) {}
+
   private record StreamKey(String sourceId, String stream) {}
 
   private record ChainKey(Regime regime, EventIdentity eventIdentity) {}
@@ -65,6 +68,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private final Flaw flaw;
   private final Object lock = new Object();
   private final Map<IngestKey, StoredIngest> ingests = new HashMap<>();
+  private final Map<EventVersion, StoredIngest> ingestsByEventVersion = new HashMap<>();
   private final Map<SourceEvent, Long> highestVersion = new HashMap<>();
   private final Map<EventIdentity, String> owningSource = new HashMap<>();
   private final Map<BatchId, Result> results = new HashMap<>();
@@ -146,6 +150,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
           ? Disposition.NOOP_SAME_VERSION_SAME_HASH
           : Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH;
     }
+    // spec 10 ingest_event_version_key: the same event, source and version under another record
+    // id is the same version, decided by the content hash; nothing is stored for it
+    StoredIngest sameVersion =
+        ingestsByEventVersion.get(
+            new EventVersion(
+                entry.eventIdentity(), commit.sourceId(), entry.key().sourceVersion()));
+    if (sameVersion != null) {
+      return sameVersion.contentHash().equals(entry.contentHash())
+          ? Disposition.NOOP_SAME_VERSION_SAME_HASH
+          : Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH;
+    }
     String owner = owningSource.get(entry.eventIdentity());
     if (owner != null && !owner.equals(commit.sourceId())) {
       return Disposition.SOURCE_CONFLICT;
@@ -159,10 +174,12 @@ public final class InMemoryLedgerStore implements LedgerStore {
     if (flaw == Flaw.ABA_AS_NOOP && equalsEarlierVersion(commit, entry)) {
       return Disposition.NOOP_SAME_VERSION_SAME_HASH;
     }
-    ingests.put(
-        entry.key(),
-        new StoredIngest(
-            entry.key(), entry.eventIdentity(), entry.contentHash(), commit.batchId()));
+    StoredIngest stored =
+        new StoredIngest(entry.key(), entry.eventIdentity(), entry.contentHash(), commit.batchId());
+    ingests.put(entry.key(), stored);
+    ingestsByEventVersion.put(
+        new EventVersion(entry.eventIdentity(), commit.sourceId(), entry.key().sourceVersion()),
+        stored);
     highestVersion.put(sourceEvent, entry.key().sourceVersion());
     owningSource.put(entry.eventIdentity(), commit.sourceId());
     return Disposition.NEW_VERSION;
@@ -211,9 +228,10 @@ public final class InMemoryLedgerStore implements LedgerStore {
       throw new IllegalArgumentException("max must be >= 0");
     }
     synchronized (lock) {
+      int limit = Math.min(max, PAGE_LIMIT);
       List<OutboxItem> pending = new ArrayList<>();
       for (OutboxItem item : outbox.values()) {
-        if (pending.size() >= max) {
+        if (pending.size() >= limit) {
           break;
         }
         if (item.kind() == kind && item.state() == OutboxState.PENDING) {

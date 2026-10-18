@@ -3,6 +3,7 @@ package dev.regpack.model;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.Locale;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -22,6 +23,18 @@ class ValueTypesTest {
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> EventIdentity.of("a", (String) null))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void eventIdentityRejectsEmptyAndBlankParts() {
+    // M12: a row decoder that builds an identity from a stored value cannot make "a||b"
+    for (String bad : new String[] {"a||b", "|a", "a|", " |a", "a| ", "a| |b", "|"}) {
+      assertThatThrownBy(() -> new EventIdentity(bad))
+          .as(bad)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    assertThat(new EventIdentity("a").value()).isEqualTo("a");
+    assertThat(new EventIdentity("LEI1|XPAR|EX-1").value()).isEqualTo("LEI1|XPAR|EX-1");
   }
 
   @Test
@@ -52,6 +65,45 @@ class ValueTypesTest {
         .isEqualTo("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad:3");
     assertThatThrownBy(() -> BatchId.of(Sha256.ofUtf8("abc"), -1))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void batchIdAccessorsParseTheStructuredForm() {
+    Sha256 digest = Sha256.ofUtf8("abc");
+    BatchId id = BatchId.of(digest, 3);
+    assertThat(id.landingDigest()).isEqualTo(digest);
+    assertThat(id.slice()).isEqualTo(3);
+    assertThat(BatchId.of(digest, 0).slice()).isZero();
+    assertThat(BatchId.of(digest, Integer.MAX_VALUE).slice()).isEqualTo(Integer.MAX_VALUE);
+  }
+
+  @Test
+  void batchIdAccessorsRejectOtherValues() {
+    String hex = Sha256.ofUtf8("abc").hex();
+    // the constructor stays permissive (an outbox subject id is any non-blank text); the
+    // accessors are strict
+    for (String bad :
+        new String[] {
+          "B1",
+          hex,
+          hex + ":",
+          ":3",
+          hex + ":-1",
+          hex + ":x",
+          hex + ":3:4",
+          hex.toUpperCase(Locale.ROOT) + ":3",
+          hex.substring(1) + ":3",
+          hex + ": 3",
+          hex + ":03"
+        }) {
+      BatchId id = new BatchId(bad);
+      assertThatThrownBy(id::landingDigest).as(bad).isInstanceOf(IllegalArgumentException.class);
+      assertThatThrownBy(id::slice).as(bad).isInstanceOf(IllegalArgumentException.class);
+    }
+    // a slice beyond int is a bad slice, though the digest part is fine
+    BatchId huge = new BatchId(hex + ":99999999999");
+    assertThat(huge.landingDigest().hex()).isEqualTo(hex);
+    assertThatThrownBy(huge::slice).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

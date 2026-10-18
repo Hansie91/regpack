@@ -38,7 +38,9 @@ public interface LeaseLedger {
   /**
    * Grants the lease when there is none, it was released, or {@code now >= expiresAt}; the counter
    * of the endpoint is incremented per acquisition, and every {@code SENDING} delivery of the
-   * endpoint moves to {@code IN_DOUBT} in the same unit (the takeover rule).
+   * endpoint moves to {@code IN_DOUBT} in the same unit (the takeover rule). A blank {@code
+   * holder}, and a {@code ttl} that is not positive whole microseconds, throw {@link
+   * IllegalArgumentException} (M48) and grant nothing.
    */
   LeaseResult acquire(EndpointKey endpoint, String holder, Duration ttl);
 
@@ -52,7 +54,10 @@ public interface LeaseLedger {
    * The current lease: the latest grant of the endpoint unless it was released or voided by a
    * restore epoch. It stays current after its expiry until a takeover or release, so the caller
    * compares {@code expiresAt} with its clock; a token is fenced only by a newer grant, a release
-   * or a restore epoch.
+   * or a restore epoch. The fence has no expiry predicate (M50, M51): that is safe because every
+   * acquisition moves the {@code SENDING} deliveries of the endpoint to {@code IN_DOUBT} in the
+   * same unit, so an expired holder that has not been taken over can only continue what it owns,
+   * and {@link #renew} is the only call that refuses on expiry.
    */
   Optional<LeaseGrant> currentLease(EndpointKey endpoint);
 
