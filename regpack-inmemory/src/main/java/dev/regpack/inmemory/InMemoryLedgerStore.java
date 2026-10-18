@@ -4,6 +4,8 @@ import dev.regpack.model.BatchId;
 import dev.regpack.model.Checkpoint;
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.IngestKey;
+import dev.regpack.model.Leg;
+import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionBody;
@@ -15,6 +17,8 @@ import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DuplicateKeyException;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.TrnConflictException;
+import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -45,6 +49,45 @@ public final class InMemoryLedgerStore implements LedgerStore {
   /** Spec 10 scopes the decision key by regime: (regime, event identity, context, input). */
   private record DecisionKey(
       Regime regime, EventIdentity eventIdentity, Sha256 decisionContextId, Sha256 inputDigest) {}
+
+  /** (executing LEI, TRN): the spec 10 {@code UNIQUE (executing LEI, TRN)} of the assignment. */
+  private record TrnKey(String executingLei, String trn) {}
+
+  /** The TRN of a subject, assigned once with its first version and never changed. */
+  private record Trn(String executingLei, String trn, String keyId, Instant assignedAt) {}
+
+  /** At most one version of a subject per decision. */
+  private record DecisionSubject(DecisionId decision, SubjectId subject) {}
+
+  private static final class SubjectRow {
+    private final SubjectId id;
+    private final SubjectKey key;
+    private Optional<Trn> trn = Optional.empty();
+    private final List<VersionRow> versions = new ArrayList<>();
+
+    private SubjectRow(SubjectId id, SubjectKey key) {
+      this.id = id;
+      this.key = key;
+    }
+  }
+
+  private record VersionRow(
+      SubjectId subject,
+      long seq,
+      DecisionId decision,
+      String action,
+      Sha256 logicalHash,
+      byte[] body,
+      VersionOrigin origin,
+      DeliveryId delivery) {}
+
+  /** Deliveries whose version is not live: a later equal version is not suppressed against them. */
+  private static final Set<DeliveryState> DEAD =
+      EnumSet.of(
+          DeliveryState.REJECTED,
+          DeliveryState.IN_REPAIR,
+          DeliveryState.WITHDRAWN,
+          DeliveryState.WRITTEN_OFF);
 
   /** States in which at most one delivery per (endpoint, business key) may be (spec 11.2). */
   private static final Set<DeliveryState> IN_FLIGHT =
@@ -81,6 +124,11 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private final Map<DecisionKey, DecisionRecord> decisionsByKey = new HashMap<>();
   private final Map<Sha256, DecisionContext> contexts = new HashMap<>();
   private long nextDecisionId = 1;
+  private final Map<SubjectKey, SubjectRow> subjects = new HashMap<>();
+  private final Map<SubjectId, SubjectRow> subjectsById = new HashMap<>();
+  private final Map<TrnKey, SubjectRow> subjectsByTrn = new HashMap<>();
+  private final Map<DecisionSubject, VersionRow> versionsByDecisionSubject = new HashMap<>();
+  private long nextSubjectId = 1;
   private final Map<EndpointKey, LeaseGrant> leases = new HashMap<>();
   private final Map<EndpointKey, Long> leaseCounters = new HashMap<>();
   private long restoreEpoch = 0;
@@ -258,70 +306,383 @@ public final class InMemoryLedgerStore implements LedgerStore {
     Objects.requireNonNull(commit, "commit");
     synchronized (lock) {
       validate(commit);
-      // Work on copies; real state is touched only after every decision has been accepted.
-      Map<ChainKey, List<DecisionRecord>> appended = new LinkedHashMap<>();
-      Map<DecisionKey, DecisionRecord> inserted = new LinkedHashMap<>();
-      Map<Sha256, DecisionContext> newContexts = new LinkedHashMap<>();
-      long nextId = nextDecisionId;
+      // Work on staged copies; real state is touched only after every decision has been accepted.
+      DecisionStage stage = new DecisionStage();
       List<Committed> committed = new ArrayList<>();
       for (NewDecision decision : commit.decisions()) {
-        DecisionBody body = decision.body();
-        // a context travels with a redelivery too: storing it is idempotent
-        decision.context().ifPresent(c -> newContexts.put(c.id(), c));
-        DecisionKey decisionKey = decisionKey(body);
-        DecisionRecord known = inserted.get(decisionKey);
-        if (known == null) {
-          known = decisionsByKey.get(decisionKey);
+        Committed c = stage.stage(decision);
+        if (c.status() == CommitStatus.INSERTED) {
+          requireNoWithdrawal(decision.body());
         }
-        if (known != null) {
-          committed.add(new Committed(CommitStatus.NOOP_REDELIVERY, known));
-          continue;
-        }
-        ChainKey chainKey = new ChainKey(body.regime(), body.eventIdentity());
-        List<DecisionRecord> chain = chains.getOrDefault(chainKey, List.of());
-        List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
-        long headSeq = chain.size() + added.size();
-        if (decision.expectedHeadSeq() != headSeq) {
-          // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
-          if (flaw == Flaw.NON_ATOMIC_DECISIONS) {
-            publish(appended, inserted, nextId);
-          }
-          throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
-        }
-        Optional<DecisionId> supersedes = Optional.empty();
-        if (!added.isEmpty()) {
-          supersedes = Optional.of(added.get(added.size() - 1).decisionId());
-        } else if (!chain.isEmpty()) {
-          supersedes = Optional.of(chain.get(chain.size() - 1).decisionId());
-        }
-        DecisionRecord record =
-            new DecisionRecord(new DecisionId(nextId++), headSeq + 1, supersedes, body);
-        added.add(record);
-        inserted.put(decisionKey, record);
-        committed.add(new Committed(CommitStatus.INSERTED, record));
+        committed.add(c);
       }
-      publish(appended, inserted, nextId);
-      contexts.putAll(newContexts);
-      commit
-          .completesOutbox()
-          .ifPresent(
-              id -> {
-                OutboxItem item = outbox.get(id);
-                outbox.put(id, new OutboxItem(id, item.kind(), item.subjectId(), OutboxState.DONE));
-              });
+      stage.publish();
+      completeOutbox(commit.completesOutbox());
       return List.copyOf(committed);
     }
   }
 
-  private void publish(
-      Map<ChainKey, List<DecisionRecord>> appended,
-      Map<DecisionKey, DecisionRecord> inserted,
-      long nextId) {
-    appended.forEach(
-        (chainKey, added) ->
-            chains.computeIfAbsent(chainKey, k -> new ArrayList<>()).addAll(added));
-    decisionsByKey.putAll(inserted);
-    nextDecisionId = nextId;
+  /**
+   * The decisions of one unit, staged: nothing is visible until {@link #publish()}, so a unit that
+   * throws leaves no trace.
+   */
+  private final class DecisionStage {
+    private final Map<ChainKey, List<DecisionRecord>> appended = new LinkedHashMap<>();
+    private final Map<DecisionKey, DecisionRecord> inserted = new LinkedHashMap<>();
+    private final Map<Sha256, DecisionContext> newContexts = new LinkedHashMap<>();
+    private long nextId = nextDecisionId;
+
+    Committed stage(NewDecision decision) {
+      DecisionBody body = decision.body();
+      // a context travels with a redelivery too: storing it is idempotent
+      decision.context().ifPresent(c -> newContexts.put(c.id(), c));
+      DecisionKey decisionKey = decisionKey(body);
+      DecisionRecord known = inserted.get(decisionKey);
+      if (known == null) {
+        known = decisionsByKey.get(decisionKey);
+      }
+      if (known != null) {
+        return new Committed(CommitStatus.NOOP_REDELIVERY, known);
+      }
+      ChainKey chainKey = new ChainKey(body.regime(), body.eventIdentity());
+      List<DecisionRecord> chain = chains.getOrDefault(chainKey, List.of());
+      List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
+      long headSeq = chain.size() + added.size();
+      if (decision.expectedHeadSeq() != headSeq) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
+        if (flaw == Flaw.NON_ATOMIC_DECISIONS) {
+          publishDecisions();
+        }
+        throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
+      }
+      Optional<DecisionId> supersedes = Optional.empty();
+      if (!added.isEmpty()) {
+        supersedes = Optional.of(added.get(added.size() - 1).decisionId());
+      } else if (!chain.isEmpty()) {
+        supersedes = Optional.of(chain.get(chain.size() - 1).decisionId());
+      }
+      DecisionRecord record =
+          new DecisionRecord(new DecisionId(nextId++), headSeq + 1, supersedes, body);
+      added.add(record);
+      inserted.put(decisionKey, record);
+      return new Committed(CommitStatus.INSERTED, record);
+    }
+
+    /** The head sequence of a chain including the decisions staged so far. */
+    long headSeq(ChainKey chainKey) {
+      return chains.getOrDefault(chainKey, List.of()).size()
+          + appended.getOrDefault(chainKey, List.of()).size();
+    }
+
+    void publish() {
+      publishDecisions();
+      contexts.putAll(newContexts);
+    }
+
+    private void publishDecisions() {
+      appended.forEach(
+          (chainKey, added) ->
+              chains.computeIfAbsent(chainKey, k -> new ArrayList<>()).addAll(added));
+      decisionsByKey.putAll(inserted);
+      nextDecisionId = nextId;
+    }
+  }
+
+  private void completeOutbox(Optional<OutboxId> completes) {
+    completes.ifPresent(
+        id -> {
+          OutboxItem item = outbox.get(id);
+          outbox.put(id, new OutboxItem(id, item.kind(), item.subjectId(), OutboxState.DONE));
+        });
+  }
+
+  /**
+   * Rule 8 (D-L4): an inserted decision that is not REPORT, or that omits a leg, fails closed while
+   * that leg has report versions; the withdrawal transaction belongs to the delivery state machine.
+   */
+  private void requireNoWithdrawal(DecisionBody body) {
+    for (Leg leg : Leg.values()) {
+      SubjectRow subject = subjects.get(new SubjectKey(body.regime(), body.eventIdentity(), leg));
+      if (subject != null
+          && !subject.versions.isEmpty()
+          && (body.outcome() != Outcome.REPORT || !body.legs().contains(leg))) {
+        throw new WithdrawalRequiredException(
+            "the "
+                + leg
+                + " leg of "
+                + body.eventIdentity().value()
+                + " has report versions and the superseding decision does not report it");
+      }
+    }
+  }
+
+  @Override
+  public List<ReportableCommitted> commitReportable(ReportableCommit commit) {
+    Objects.requireNonNull(commit, "commit");
+    synchronized (lock) {
+      List<NewDecision> decisions = new ArrayList<>();
+      for (ReportableDecision reportable : commit.decisions()) {
+        decisions.add(reportable.decision());
+      }
+      validate(new BatchCommit(decisions, commit.completesOutbox()));
+      for (ReportableDecision reportable : commit.decisions()) {
+        validateVersions(reportable);
+      }
+      UnitLog log = new UnitLog();
+      DecisionStage stage = new DecisionStage();
+      List<ReportableCommitted> results = new ArrayList<>();
+      boolean anyCreated = false;
+      try {
+        for (ReportableDecision reportable : commit.decisions()) {
+          Committed committed = stage.stage(reportable.decision());
+          if (committed.status() == CommitStatus.INSERTED) {
+            requireNoWithdrawal(reportable.decision().body());
+          }
+          List<VersionResult> versionResults = new ArrayList<>();
+          for (NewVersion version : reportable.versions()) {
+            VersionResult result = applyVersion(stage, committed, version, log);
+            anyCreated |= result.status() == VersionStatus.CREATED;
+            versionResults.add(result);
+          }
+          results.add(new ReportableCommitted(committed, versionResults));
+        }
+      } catch (RuntimeException e) {
+        log.rollBack();
+        throw e;
+      }
+      stage.publish();
+      completeOutbox(commit.completesOutbox());
+      if (anyCreated) {
+        commit.sequenceBatch().ifPresent(this::ensureSequenceItem);
+      }
+      return List.copyOf(results);
+    }
+  }
+
+  /** Rule 2: checked for the whole unit before anything is written. */
+  private static void validateVersions(ReportableDecision reportable) {
+    DecisionBody body = reportable.decision().body();
+    Set<Leg> seen = EnumSet.noneOf(Leg.class);
+    for (NewVersion version : reportable.versions()) {
+      SubjectKey subject = version.subject();
+      if (body.outcome() != Outcome.REPORT) {
+        throw new IllegalArgumentException("a version needs a REPORT decision: " + body.outcome());
+      }
+      if (!body.legs().contains(subject.leg())) {
+        throw new IllegalArgumentException(
+            "the leg " + subject.leg() + " is not a leg of the decision");
+      }
+      if (!seen.add(subject.leg())) {
+        throw new IllegalArgumentException("two versions for the leg " + subject.leg());
+      }
+      if (!subject.regime().equals(body.regime())
+          || !subject.eventIdentity().equals(body.eventIdentity())) {
+        throw new IllegalArgumentException("the subject names another regime or event");
+      }
+    }
+  }
+
+  /**
+   * Undo log of one reportable unit: the report state is changed in place and a unit that throws is
+   * rolled back in reverse order, including the counters.
+   */
+  private final class UnitLog {
+    private final List<Runnable> undo = new ArrayList<>();
+    private final long subjectMark = nextSubjectId;
+    private final long deliveryMark = nextDeliveryId;
+
+    void onRollBack(Runnable action) {
+      undo.add(action);
+    }
+
+    void rollBack() {
+      for (int i = undo.size() - 1; i >= 0; i--) {
+        undo.get(i).run();
+      }
+      nextSubjectId = subjectMark;
+      nextDeliveryId = deliveryMark;
+    }
+  }
+
+  private VersionResult applyVersion(
+      DecisionStage stage, Committed committed, NewVersion version, UnitLog log) {
+    DecisionRecord decision = committed.record();
+    SubjectRow subject = subjects.get(version.subject());
+    if (committed.status() == CommitStatus.NOOP_REDELIVERY) {
+      // rule 3
+      VersionRow existing =
+          subject == null
+              ? null
+              : versionsByDecisionSubject.get(
+                  new DecisionSubject(decision.decisionId(), subject.id));
+      if (existing != null) {
+        return new VersionResult(
+            subject.id,
+            subject.trn.orElseThrow().trn(),
+            existing.seq(),
+            VersionStatus.EXISTING,
+            Optional.of(existing.delivery()));
+      }
+      long head =
+          stage.headSeq(new ChainKey(decision.body().regime(), decision.body().eventIdentity()));
+      if (decision.decisionSeq() != head) {
+        throw new DecisionHeadConflictException(decision.body().eventIdentity(), head);
+      }
+    }
+    if (subject == null) {
+      SubjectRow created = new SubjectRow(new SubjectId(nextSubjectId++), version.subject());
+      subjects.put(created.key, created);
+      subjectsById.put(created.id, created);
+      log.onRollBack(
+          () -> {
+            subjects.remove(created.key);
+            subjectsById.remove(created.id);
+          });
+      subject = created;
+    }
+    Trn trn = assignTrn(subject, version, log);
+    // rule 7
+    for (int i = subject.versions.size() - 1; i >= 0; i--) {
+      VersionRow latest = subject.versions.get(i);
+      if (DEAD.contains(deliveries.get(latest.delivery()).state())) {
+        continue;
+      }
+      if (latest.action().equals(version.action())
+          && latest.logicalHash().equals(version.logicalHash())) {
+        return new VersionResult(
+            subject.id,
+            trn.trn(),
+            latest.seq(),
+            VersionStatus.SUPPRESSED_UNCHANGED,
+            Optional.empty());
+      }
+      break;
+    }
+    // rules 4 and 6
+    long seq = subject.versions.size() + 1L;
+    NewDelivery newDelivery =
+        new NewDelivery(
+            version.endpoint(), version.endpointEpoch(), trn.executingLei() + "|" + trn.trn(), seq);
+    DeliveryId deliveryId = createDelivery(newDelivery);
+    log.onRollBack(
+        () -> {
+          deliveries.remove(deliveryId);
+          deliveryKeys.remove(newDelivery);
+        });
+    VersionRow row =
+        new VersionRow(
+            subject.id,
+            seq,
+            decision.decisionId(),
+            version.action(),
+            version.logicalHash(),
+            version.body(),
+            version.origin(),
+            deliveryId);
+    SubjectRow target = subject;
+    DecisionSubject link = new DecisionSubject(decision.decisionId(), subject.id);
+    target.versions.add(row);
+    versionsByDecisionSubject.put(link, row);
+    log.onRollBack(
+        () -> {
+          target.versions.remove(target.versions.size() - 1);
+          versionsByDecisionSubject.remove(link);
+        });
+    return new VersionResult(
+        subject.id, trn.trn(), seq, VersionStatus.CREATED, Optional.of(deliveryId));
+  }
+
+  /** Rule 5: the TRN of a subject is assigned once and then only read. */
+  private Trn assignTrn(SubjectRow subject, NewVersion version, UnitLog log) {
+    if (subject.trn.isPresent()) {
+      Trn stored = subject.trn.get();
+      if (!stored.executingLei().equals(version.executingLei())) {
+        throw new IllegalArgumentException("the executing LEI of a subject cannot change");
+      }
+      if (version.trn().isPresent() && !version.trn().get().trn().equals(stored.trn())) {
+        throw new IllegalArgumentException("a stored TRN cannot be replaced");
+      }
+      return stored;
+    }
+    TrnProposal proposal =
+        version.trn().orElseThrow(() -> new IllegalArgumentException("a new subject needs a TRN"));
+    TrnKey trnKey = new TrnKey(version.executingLei(), proposal.trn());
+    if (subjectsByTrn.containsKey(trnKey)) {
+      throw new TrnConflictException(version.executingLei(), proposal.trn());
+    }
+    Trn assigned = new Trn(version.executingLei(), proposal.trn(), proposal.keyId(), clock.now());
+    subject.trn = Optional.of(assigned);
+    subjectsByTrn.put(trnKey, subject);
+    log.onRollBack(
+        () -> {
+          subject.trn = Optional.empty();
+          subjectsByTrn.remove(trnKey);
+        });
+    return assigned;
+  }
+
+  /** Rule 9: one {@code SEQUENCE} item per batch, unique on kind and subject. */
+  private void ensureSequenceItem(BatchId batch) {
+    for (OutboxItem item : outbox.values()) {
+      if (item.kind() == OutboxKind.SEQUENCE && item.subjectId().equals(batch.value())) {
+        return;
+      }
+    }
+    OutboxId id = new OutboxId(nextOutboxId++);
+    outbox.put(id, new OutboxItem(id, OutboxKind.SEQUENCE, batch.value(), OutboxState.PENDING));
+  }
+
+  @Override
+  public Optional<Subject> subject(SubjectKey key) {
+    Objects.requireNonNull(key, "key");
+    synchronized (lock) {
+      return Optional.ofNullable(subjects.get(key)).map(InMemoryLedgerStore::view);
+    }
+  }
+
+  @Override
+  public Optional<Subject> subjectByTrn(String executingLei, String trn) {
+    Objects.requireNonNull(executingLei, "executingLei");
+    Objects.requireNonNull(trn, "trn");
+    synchronized (lock) {
+      return Optional.ofNullable(subjectsByTrn.get(new TrnKey(executingLei, trn)))
+          .map(InMemoryLedgerStore::view);
+    }
+  }
+
+  private static Subject view(SubjectRow row) {
+    return new Subject(
+        row.id,
+        row.key,
+        row.trn.map(Trn::executingLei),
+        row.trn.map(Trn::trn),
+        row.trn.map(Trn::keyId),
+        row.versions.size());
+  }
+
+  @Override
+  public List<StoredVersion> versions(SubjectId subject) {
+    Objects.requireNonNull(subject, "subject");
+    synchronized (lock) {
+      SubjectRow row = subjectsById.get(subject);
+      if (row == null) {
+        return List.of();
+      }
+      List<StoredVersion> stored = new ArrayList<>();
+      for (VersionRow version : row.versions) {
+        stored.add(
+            new StoredVersion(
+                version.subject(),
+                version.seq(),
+                version.decision(),
+                version.action(),
+                version.logicalHash(),
+                version.body(),
+                version.origin(),
+                Optional.of(version.delivery())));
+      }
+      return List.copyOf(stored);
+    }
   }
 
   private DecisionKey decisionKey(DecisionBody body) {

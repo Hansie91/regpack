@@ -10,4 +10,5 @@ public interface LedgerStore
         DecisionLedger,
         LeaseLedger,
         DeliveryLedger,
-        ContextLedger {}
+        ContextLedger,
+        ReportLedger {}

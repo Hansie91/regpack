@@ -15,7 +15,8 @@ public interface OutboxLedger {
   record OutboxId(long value) {}
 
   enum OutboxKind {
-    DECIDE_BATCH
+    DECIDE_BATCH,
+    SEQUENCE
   }
 
   enum OutboxState {
