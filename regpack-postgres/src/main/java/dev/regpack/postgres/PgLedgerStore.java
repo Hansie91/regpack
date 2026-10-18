@@ -23,8 +23,7 @@ import javax.sql.DataSource;
  * schema (I2, D-L3); every unit of work starts through {@link Unit#begin} (Convention 11).
  *
  * <p>Built in tasks: T15 ingest, outbox and context reads; T16 decisions and partitions; T17 leases
- * and deliveries; T18 reports. A sub-port whose task has not landed throws {@link
- * UnsupportedOperationException} naming the task.
+ * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work).
  */
 public final class PgLedgerStore implements LedgerStore {
   /**
@@ -97,6 +96,7 @@ public final class PgLedgerStore implements LedgerStore {
   private final PgDecisions decisions;
   private final PgLeases leases;
   private final PgDeliveries deliveries;
+  private final PgReports reports;
 
   public PgLedgerStore(DataSource dataSource, Clock clock, Config config) {
     Objects.requireNonNull(dataSource, "dataSource");
@@ -108,6 +108,8 @@ public final class PgLedgerStore implements LedgerStore {
     this.decisions = new PgDecisions(dataSource, config);
     this.leases = new PgLeases(dataSource, clock, config);
     this.deliveries = new PgDeliveries(dataSource, clock, config);
+    // the report unit shares the decision side: its partitions cache and its head conflicts
+    this.reports = new PgReports(dataSource, clock, config, decisions);
   }
 
   // IngestLedger (T15)
@@ -242,21 +244,21 @@ public final class PgLedgerStore implements LedgerStore {
 
   @Override
   public List<ReportableCommitted> commitReportable(ReportableCommit commit) {
-    throw new UnsupportedOperationException("T18");
+    return reports.commitReportable(commit);
   }
 
   @Override
   public Optional<Subject> subject(SubjectKey key) {
-    throw new UnsupportedOperationException("T18");
+    return reports.subject(key);
   }
 
   @Override
   public Optional<Subject> subjectByTrn(String executingLei, String trn) {
-    throw new UnsupportedOperationException("T18");
+    return reports.subjectByTrn(executingLei, trn);
   }
 
   @Override
   public List<StoredVersion> versions(SubjectId subject) {
-    throw new UnsupportedOperationException("T18");
+    return reports.versions(subject);
   }
 }

@@ -1,6 +1,8 @@
 package dev.regpack.postgres;
 
 import dev.regpack.model.EventIdentity;
+import dev.regpack.model.Leg;
+import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
 import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.DecisionCodec;
@@ -16,6 +18,7 @@ import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.LedgerException;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxId;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
+import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import dev.regpack.postgres.DecisionWaves.Chain;
 import dev.regpack.postgres.PgErrors.Violation;
 import dev.regpack.postgres.PgLedgerStore.Config;
@@ -184,6 +187,22 @@ final class PgDecisions {
 
   static final String OUTBOX_DONE_SQL = "UPDATE outbox SET state = ? WHERE outbox_id = ?";
 
+  /**
+   * The withdrawal guard (rule 8): the legs of the superseded chains that have report versions
+   * although the new decision is not REPORT or does not name the leg. Four arrays, one element per
+   * superseding decision of the wave: regime id, event identity, 1 when the outcome is REPORT, and
+   * the bit mask of the reported legs ({@link #legMask}). Returns (position, leg code), lowest
+   * position first. A subject row exists only with at least one version, but the count is checked.
+   */
+  static final String WITHDRAWAL_SQL =
+      "SELECT t.ord, s.leg FROM unnest(?::int8[], ?::text[], ?::int8[], ?::int8[])"
+          + " WITH ORDINALITY AS t(regime_id, event_identity, reports, leg_mask, ord)"
+          + " JOIN report_subject s ON s.regime_id = t.regime_id::smallint"
+          + " AND s.event_identity = t.event_identity"
+          + " WHERE s.last_version_seq > 0"
+          + " AND (t.reports = 0 OR (t.leg_mask & (1::int8 << s.leg::int)) = 0)"
+          + " ORDER BY t.ord, s.leg";
+
   private final DataSource dataSource;
   private final Config config;
   private final Set<LocalDate> knownPartitions = ConcurrentHashMap.newKeySet();
@@ -203,9 +222,20 @@ final class PgDecisions {
 
   List<Committed> commitDecisions(BatchCommit commit) {
     Prepared prepared = prepare(commit);
-    ensurePartitions(prepared.days());
+    return runUnit(prepared.days(), connection -> commitIn(connection, prepared, WaveHook.NONE));
+  }
+
+  /**
+   * Runs one unit whose work includes the decision steps ({@link #commitIn}): the daily partitions
+   * of {@code days} are made first, outside the unit; a lost race for a head, signalled by {@link
+   * HeadMismatch}, becomes the {@link DecisionHeadConflictException} of a head that is read again
+   * after the rollback; the cache of known partitions is forgotten when no partition accepted a
+   * row. The report side of T18 runs its unit through here so that it shares all three.
+   */
+  <T> T runUnit(Collection<LocalDate> days, Unit.Work<T> work) {
+    ensurePartitions(days);
     try {
-      return Unit.inUnit(dataSource, config, connection -> commitIn(connection, prepared));
+      return Unit.inUnit(dataSource, config, work);
     } catch (HeadMismatch mismatch) {
       throw conflict(mismatch);
     } catch (LedgerException e) {
@@ -219,7 +249,7 @@ final class PgDecisions {
    * zero, a context that is not the one the body cites, an asAt outside the supported range and a
    * body without a canonical form are {@link IllegalArgumentException}s with nothing written.
    */
-  private static Prepared prepare(BatchCommit commit) {
+  static Prepared prepare(BatchCommit commit) {
     Objects.requireNonNull(commit, "commit");
     List<NewDecision> decisions = commit.decisions();
     List<Item> items = new ArrayList<>(decisions.size());
@@ -247,7 +277,15 @@ final class PgDecisions {
         List.copyOf(items), Collections.unmodifiableSet(days), commit.completesOutbox());
   }
 
-  private List<Committed> commitIn(Connection connection, Prepared prepared) throws SQLException {
+  /**
+   * The decision steps of a unit, inside a transaction that the caller owns and started with {@link
+   * Unit#begin}: nothing is committed here and the partitions must exist (see {@link #runUnit}).
+   * After each wave the {@code hook} runs in the same transaction, so that the report side can add
+   * the versions of a decision before the next decision of the same chain is written and the
+   * withdrawal guard of that next decision sees them. The outbox item is completed last.
+   */
+  List<Committed> commitIn(Connection connection, Prepared prepared, WaveHook hook)
+      throws SQLException {
     List<Item> items = prepared.items();
     Map<String, Short> regimes = resolveRegimes(connection, items);
     Map<String, Integer> contexts = resolveContexts(connection, items);
@@ -264,7 +302,7 @@ final class PgDecisions {
       for (int position : positions) {
         wave.add(items.get(position));
       }
-      writeWave(connection, wave, results);
+      writeWave(connection, wave, results, hook);
     }
     completeOutbox(connection, prepared.completesOutbox());
     return List.of(results);
@@ -379,7 +417,7 @@ final class PgDecisions {
   // ---------------------------------------------------------------------------------------------
   // one wave: at most one decision per chain
 
-  private void writeWave(Connection connection, List<Item> wave, Committed[] results)
+  private void writeWave(Connection connection, List<Item> wave, Committed[] results, WaveHook hook)
       throws SQLException {
     List<Item> ordered = new ArrayList<>(wave);
     ordered.sort(Comparator.comparing(item -> item.chain, DecisionWaves.CANONICAL));
@@ -398,6 +436,10 @@ final class PgDecisions {
     }
     requireExpectedHeads(created);
     advanceHeads(connection, created);
+    // rule 8 (D-L4) runs only now: the compare-and-set above waits behind the share lock that a
+    // concurrent redelivery takes on the head before it creates a version, so the guard reads that
+    // version once it is committed
+    requireNoWithdrawal(connection, created);
     for (Item item : redelivered) {
       results[item.index] =
           new Committed(CommitStatus.NOOP_REDELIVERY, storedRecord(connection, item));
@@ -405,6 +447,74 @@ final class PgDecisions {
     for (Item item : created) {
       results[item.index] = new Committed(CommitStatus.INSERTED, insertedRecord(item));
     }
+    List<Written> written = new ArrayList<>(ordered.size());
+    for (Item item : ordered) {
+      written.add(new Written(item.index, item.regimeId, item.day, results[item.index]));
+    }
+    hook.afterWave(connection, written);
+  }
+
+  /**
+   * Rule 8 of the report semantics (D-L4): a decision that supersedes another and is not REPORT, or
+   * that omits a leg, fails closed while that leg of the chain has report versions; the withdrawal
+   * transaction of spec 9.3 belongs to the delivery state machine. One query over the wave. A first
+   * decision of a chain supersedes nothing and so has no subject to withdraw.
+   */
+  private static void requireNoWithdrawal(Connection connection, List<Item> created)
+      throws SQLException {
+    List<Item> superseding = new ArrayList<>(created.size());
+    for (Item item : created) {
+      if (item.expected() > 0) {
+        superseding.add(item);
+      }
+    }
+    if (superseding.isEmpty()) {
+      return;
+    }
+    int size = superseding.size();
+    Long[] regimes = new Long[size];
+    String[] events = new String[size];
+    Long[] reports = new Long[size];
+    Long[] masks = new Long[size];
+    for (int i = 0; i < size; i++) {
+      Item item = superseding.get(i);
+      regimes[i] = (long) item.regimeId;
+      events[i] = item.chain.eventIdentity();
+      reports[i] = item.body().outcome() == Outcome.REPORT ? 1L : 0L;
+      masks[i] = legMask(item.body().legs());
+    }
+    try (PreparedStatement statement = connection.prepareStatement(WITHDRAWAL_SQL)) {
+      statement.setArray(1, connection.createArrayOf("int8", regimes));
+      statement.setArray(2, connection.createArrayOf("text", events));
+      statement.setArray(3, connection.createArrayOf("int8", reports));
+      statement.setArray(4, connection.createArrayOf("int8", masks));
+      try (ResultSet rows = statement.executeQuery()) {
+        if (rows.next()) {
+          Item item = superseding.get(rows.getInt(1) - 1);
+          String leg;
+          try {
+            leg = Codes.leg(rows.getShort(2)).name();
+          } catch (IllegalArgumentException e) {
+            throw new LedgerException("a stored report subject has an unknown leg", e);
+          }
+          throw new WithdrawalRequiredException(
+              "the "
+                  + leg
+                  + " leg of "
+                  + item.chain.eventIdentity()
+                  + " has report versions and the superseding decision does not report it");
+        }
+      }
+    }
+  }
+
+  /** One bit per leg, at the position of its stored code: the legs a decision reports. */
+  static long legMask(Collection<Leg> legs) {
+    long mask = 0;
+    for (Leg leg : legs) {
+      mask |= 1L << Codes.of(leg);
+    }
+    return mask;
   }
 
   /** Step 1: the heads of the wave, one plain read; a chain without a row has head 0. */
@@ -619,6 +729,19 @@ final class PgDecisions {
     return e;
   }
 
+  /**
+   * {@link #lostRace} for a statement on the head of one chain that the report side runs (the
+   * shared read of rule 3): a deadlock or serialization failure is the conflict, any other failure
+   * is returned as it is.
+   */
+  static SQLException lostRaceOnHead(SQLException e, String regime, EventIdentity eventIdentity) {
+    Violation violation = PgErrors.classify(e);
+    if (violation == Violation.DEADLOCK || violation == Violation.SERIALIZATION) {
+      throw new HeadMismatch(regime, eventIdentity, e);
+    }
+    return e;
+  }
+
   private static DecisionRecord insertedRecord(Item item) {
     Optional<DecisionId> supersedes =
         item.headDecisionId.isPresent()
@@ -703,16 +826,23 @@ final class PgDecisions {
   }
 
   /** The internal signal that a unit must be rolled back because its head compare-and-set lost. */
-  private static final class HeadMismatch extends RuntimeException {
+  static final class HeadMismatch extends RuntimeException {
     private static final long serialVersionUID = 1L;
 
     private final String regime;
     private final transient EventIdentity eventIdentity;
 
     HeadMismatch(Item item, SQLException cause) {
+      this(item.regime(), item.body().eventIdentity(), cause);
+    }
+
+    /**
+     * The chain is named directly: rule 3 of the report semantics (a redelivery not at the head).
+     */
+    HeadMismatch(String regime, EventIdentity eventIdentity, SQLException cause) {
       super("decision head mismatch", cause);
-      this.regime = item.regime();
-      this.eventIdentity = item.body().eventIdentity();
+      this.regime = Objects.requireNonNull(regime, "regime");
+      this.eventIdentity = Objects.requireNonNull(eventIdentity, "eventIdentity");
     }
   }
 
@@ -886,15 +1016,35 @@ final class PgDecisions {
   // ---------------------------------------------------------------------------------------------
   // the batch in memory
 
-  /** A validated commit: nothing in it has touched the database. */
-  private record Prepared(
-      List<Item> items, Set<LocalDate> days, Optional<OutboxId> completesOutbox) {}
+  /**
+   * A validated commit: nothing in it has touched the database. Opaque to the report side, which
+   * only reads the days whose partitions the unit needs.
+   */
+  record Prepared(List<Item> items, Set<LocalDate> days, Optional<OutboxId> completesOutbox) {}
+
+  /**
+   * One decision of the wave just written, in the canonical order of the wave: the position in the
+   * input, the dictionary id of its regime, the UTC day of its partition and the outcome of the
+   * decision steps.
+   */
+  record Written(int index, short regimeId, LocalDate day, Committed committed) {}
+
+  /**
+   * What runs inside the transaction after each wave of {@link #commitIn}, before the next wave is
+   * written. Anything it throws rolls the whole unit back.
+   */
+  @FunctionalInterface
+  interface WaveHook {
+    WaveHook NONE = (connection, wave) -> {};
+
+    void afterWave(Connection connection, List<Written> wave) throws SQLException;
+  }
 
   /**
    * One decision of a batch with what the unit needs from the outside; the mutable fields are
    * filled by the unit as it runs and belong to the one thread that runs it.
    */
-  private static final class Item {
+  static final class Item {
     private final int index;
     private final NewDecision decision;
     private final LocalDate day;

@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 
 import dev.regpack.model.EventIdentity;
+import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.model.ReasonCode;
 import dev.regpack.model.Regime;
@@ -21,6 +22,11 @@ import dev.regpack.ports.ledger.DecisionLedger.CommitStatus;
 import dev.regpack.ports.ledger.DecisionLedger.Committed;
 import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.LedgerException;
+import dev.regpack.ports.ledger.ReportLedger.ReportableCommit;
+import dev.regpack.ports.ledger.ReportLedger.ReportableCommitted;
+import dev.regpack.ports.ledger.ReportLedger.ReportableDecision;
+import dev.regpack.ports.ledger.ReportLedger.VersionStatus;
+import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import dev.regpack.postgres.PgLedgerStore.Config;
 import dev.regpack.testkit.contract.DecisionLedgerContract;
 import dev.regpack.testkit.contract.LedgerFixtures;
@@ -863,6 +869,89 @@ class PgDecisionsIT extends AbstractPgStoreTest {
     assertThat(count("SELECT count(*) FROM decision")).isZero();
     assertThat(count("SELECT count(*) FROM decision_head")).isZero();
     assertThat(count("SELECT count(*) FROM regime")).isZero();
+  }
+
+  /**
+   * The withdrawal guard (rule 8) runs after the head compare-and-set of its own decision. Unit c1
+   * redelivers decision 1, which has no version yet, and creates the version: it holds the head row
+   * shared (rule 3) and has an uncommitted version. Unit c2 commits decision 2 as DO_NOT_REPORT;
+   * its compare-and-set waits behind the share lock, and only after c1 has committed does the guard
+   * run and see the version, so c2 fails closed. A guard that ran before the compare-and-set would
+   * have seen no version and withdrawn nothing.
+   */
+  @Test
+  void aVersionCreatedByARedeliveryBlocksAConcurrentWithdrawal() throws Exception {
+    Config patientConfig =
+        Config.forSchema(schema()).withLockTimeout(Duration.ofSeconds(WAIT_SECONDS));
+    PgLedgerStore patient = new PgLedgerStore(dataSource(), clock(), patientConfig);
+    NewDecision first = LedgerFixtures.reportDecision(0, "G1", "ctx", "d1", Leg.MARKET);
+    patient.commitDecisions(batch(first));
+    ReportableCommit redelivery =
+        new ReportableCommit(
+            List.of(
+                new ReportableDecision(
+                    first,
+                    List.of(
+                        LedgerFixtures.newVersion(
+                            "G1", Leg.MARKET, "EXEC1", "TRNG1", "NEWT", "h1")))),
+            Optional.empty(),
+            Optional.empty());
+    NewDecision withdrawal =
+        decision(
+            LedgerFixtures.body(
+                "G1", LedgerFixtures.MIFIR_REGIME, "ctx", "d2", Outcome.DO_NOT_REPORT, EVAL),
+            1);
+    Config config = Config.forSchema(schema());
+    PgReports reports =
+        new PgReports(dataSource(), clock(), config, new PgDecisions(dataSource(), config));
+
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection c1 = dataSource().getConnection()) {
+      Unit.begin(c1, config);
+      List<ReportableCommitted> created = reports.commitReportableIn(c1, redelivery);
+      assertThat(created.get(0).decision().status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+      assertThat(created.get(0).versions().get(0).status()).isEqualTo(VersionStatus.CREATED);
+      int pid = backendPid(c1);
+
+      Future<List<Committed>> blocked =
+          pool.submit(() -> patient.commitDecisions(batch(withdrawal)));
+      awaitBackendWaitingFor(pid);
+      assertThat(blocked.isDone()).as("the compare-and-set waits for the share lock").isFalse();
+      c1.commit();
+      assertThatThrownBy(() -> blocked.get(WAIT_SECONDS, TimeUnit.SECONDS))
+          .isInstanceOf(ExecutionException.class)
+          .hasCauseInstanceOf(WithdrawalRequiredException.class);
+    } finally {
+      pool.shutdownNow();
+    }
+    // c2 rolled back: the chain is at 1, the head too, and c1's version is there
+    assertThat(store().decisionChain(new Regime(MIFIR), event("G1"))).hasSize(1);
+    assertThat(count("SELECT count(*) FROM decision_head WHERE decision_seq = 1")).isEqualTo(1);
+    assertThat(count("SELECT count(*) FROM report_version")).isEqualTo(1);
+  }
+
+  private static final long WAIT_SECONDS = 30;
+
+  /** Polls pg_stat_activity until a backend waits for a lock of the given one; fails after 30 s. */
+  private void awaitBackendWaitingFor(int pid) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
+    while (System.nanoTime() < deadline) {
+      try (Connection connection = dataSource().getConnection();
+          PreparedStatement statement =
+              connection.prepareStatement(
+                  "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+                      + " AND ? = ANY (pg_blocking_pids(pid))")) {
+        statement.setInt(1, pid);
+        try (ResultSet rows = statement.executeQuery()) {
+          assertThat(rows.next()).isTrue();
+          if (rows.getLong(1) > 0) {
+            return;
+          }
+        }
+      }
+      Thread.sleep(25);
+    }
+    fail("no backend waited for a lock of backend " + pid + " within " + WAIT_SECONDS + " s");
   }
 
   /** A whole batch delivered twice: every decision is a no-op and nothing is written. */
