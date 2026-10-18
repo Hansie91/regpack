@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <!-- Disposable spike code (P1a). Not a module of the root POM: it never reaches the release build, the SBOM or the distribution. -->
+  <parent>
+    <groupId>dev.regpack</groupId>
+    <artifactId>regpack</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+  <artifactId>regpack-spikes</artifactId>
+  <packaging>pom</packaging>
+  <name>regpack-spikes</name>
+  <description>Aggregator of the disposable P1a spike modules; each spike task adds its module</description>
+
+  <modules>
+    <module>spike-r</module>
+    <module>spike-g</module>
+    <module>spike-x</module>
+    <module>spike-l</module>
+  </modules>
+
+  <properties>
+    <maven-dependency-plugin.version>3.11.0</maven-dependency-plugin.version>
+    <cel-java.version>0.14.0</cel-java.version>
+    <postgresql.version>42.7.14</postgresql.version>
+    <checker-qual.version>3.55.1</checker-qual.version>
+    <!-- set by each spike module: the class that the runner jar starts -->
+    <spike.mainClass></spike.mainClass>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency><groupId>dev.regpack</groupId><artifactId>regpack-bench</artifactId><version>${project.version}</version></dependency>
+      <!-- R2: the cel-java set (approval A-2 covers the two licence spellings below) -->
+      <dependency><groupId>dev.cel</groupId><artifactId>compiler</artifactId><version>${cel-java.version}</version></dependency>
+      <dependency><groupId>dev.cel</groupId><artifactId>runtime</artifactId><version>${cel-java.version}</version></dependency>
+      <dependency><groupId>dev.cel</groupId><artifactId>common</artifactId><version>${cel-java.version}</version></dependency>
+      <dependency><groupId>dev.cel</groupId><artifactId>protobuf</artifactId><version>${cel-java.version}</version></dependency>
+      <!-- L1: the PostgreSQL JDBC driver (BSD-2-Clause) and its annotation dependency (MIT); both on the licence allow-list, no approval needed -->
+      <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
+      <dependency><groupId>org.checkerframework</groupId><artifactId>checker-qual</artifactId><version>${checker-qual.version}</version></dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>license-maven-plugin</artifactId>
+          <configuration>
+            <licenseMerges combine.children="append">
+              <!-- approval A-2 (governance/licence-policy.md, 2026-10-10, hans): spike POM only, never the root POM -->
+              <licenseMerge>BSD-3-Clause|Go License</licenseMerge>
+              <licenseMerge>BSD-3-Clause|BSD 3-clause</licenseMerge>
+            </licenseMerges>
+          </configuration>
+        </plugin>
+        <plugin>
+          <artifactId>maven-dependency-plugin</artifactId>
+          <version>${maven-dependency-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <artifactId>maven-jar-plugin</artifactId>
+          <configuration>
+            <archive>
+              <manifest>
+                <addClasspath>true</addClasspath>
+                <classpathPrefix>lib/</classpathPrefix>
+                <mainClass>${spike.mainClass}</mainClass>
+              </manifest>
+            </archive>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <plugin>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-runtime-dependencies</id>
+            <phase>package</phase>
+            <goals><goal>copy-dependencies</goal></goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+              <includeScope>runtime</includeScope>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>enforce-build-rules</id>
+            <phase>validate</phase>
+            <goals><goal>enforce</goal></goals>
+            <!-- override, not merge: the spike rule differs from the root rule only in the dependency list -->
+            <configuration combine.self="override">
+              <fail>true</fail>
+              <rules>
+                <requireJavaVersion>
+                  <version>[25,26)</version>
+                  <message>regpack builds on Java 25 LTS (spec 5.3)</message>
+                </requireJavaVersion>
+                <requireMavenVersion>
+                  <version>[3.9.16,)</version>
+                </requireMavenVersion>
+                <requirePluginVersions>
+                  <banSnapshots>true</banSnapshots>
+                </requirePluginVersions>
+                <banDuplicatePomDependencyVersions/>
+                <dependencyConvergence/>
+                <bannedDependencies>
+                  <excludes>
+                    <exclude>*:*:*:*:compile</exclude>
+                    <exclude>*:*:*:*:runtime</exclude>
+                  </excludes>
+                  <includes>
+                    <include>dev.regpack</include>
+                    <!-- exact coordinates are added by the task that admits them: R2 the cel-java set, L1 the JDBC driver -->
+                    <!-- R2: the cel-java set, exactly as resolved (P1a plan, task R2) -->
+                    <include>dev.cel:compiler:0.14.0</include>
+                    <include>dev.cel:runtime:0.14.0</include>
+                    <include>dev.cel:common:0.14.0</include>
+                    <include>dev.cel:protobuf:0.14.0</include>
+                    <include>com.google.guava:guava:33.6.0-jre</include>
+                    <include>com.google.guava:failureaccess:1.0.3</include>
+                    <include>com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava</include>
+                    <include>com.google.errorprone:error_prone_annotations:2.47.0</include>
+                    <include>com.google.j2objc:j2objc-annotations:3.1</include>
+                    <include>com.google.protobuf:protobuf-java:4.35.1</include>
+                    <include>com.google.auto.value:auto-value-annotations:1.11.1</include>
+                    <include>org.jspecify:jspecify:1.0.0</include>
+                    <include>org.antlr:antlr4-runtime:4.13.2</include>
+                    <include>com.google.re2j:re2j:1.8</include>
+                    <include>org.threeten:threeten-extra:1.10.0</include>
+                    <!-- L1: the PostgreSQL JDBC driver and checker-qual, exactly as resolved (P1a plan, task L1) -->
+                    <include>org.postgresql:postgresql:42.7.14</include>
+                    <include>org.checkerframework:checker-qual:3.55.1</include>
+                  </includes>
+                  <message>Spike dependencies must be listed here with exact versions (P1a plan, Approvals)</message>
+                </bannedDependencies>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,8 @@
+D01	decEq(decAdd(dec('0.1'), dec('0.2')), dec('0.3'))
+D02	decEq(dec('1.10'), dec('1.1'))
+D03	decEq(round(dec('2.5'), 0, 'HALF_EVEN'), dec('2'))
+D04	decEq(round(dec('2.5'), 0, 'HALF_UP'), dec('3'))
+D05	decEq(round(dec('1.005'), 2, 'HALF_UP'), dec('1.01'))
+D06	decEq(decDiv(dec('1234.5'), dec('100')), dec('12.345'))
+D10	decLt(dec('0.30'), dec('0.4'))
+D13	decEq(decAdd(dec(1), dec('0.5')), dec('1.5'))

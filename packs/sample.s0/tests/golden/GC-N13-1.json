@@ -1,0 +1,26 @@
+{
+  "id": "GC-N13-1",
+  "node": "N13",
+  "description": "A natural-person client is undetermined, never excluded (consistency-only, synthetic).",
+  "author": "agent:golden-author",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "LEI-FIRM-0001",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-2",
+    "eventKind": "NEW",
+    "tradedAt": "2026-10-09T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000001",
+    "tradedOnVenue": true,
+    "clientKind": "NATURAL_PERSON",
+    "quantity": 100,
+    "price": 12.25,
+    "currency": "EUR"
+  },
+  "expected": {
+    "outcome": "UNDETERMINED",
+    "reasonCode": "SAMPLE.N13.NATURAL_PERSON",
+    "ruleIdsHit": ["S-D14-natural-person"]
+  }
+}

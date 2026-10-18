@@ -1,0 +1,27 @@
+{
+  "id": "GC-N03-1",
+  "node": "N03",
+  "description": "A novation is excluded from reporting (consistency-only, synthetic).",
+  "author": "agent:golden-author",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "LEI-FIRM-0001",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-1",
+    "eventKind": "NOVATION",
+    "tradedAt": "2026-10-09T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000001",
+    "tradedOnVenue": true,
+    "clientKind": "LEGAL_ENTITY",
+    "clientLei": "LEI-CLIENT-0001",
+    "quantity": 100,
+    "price": 12.25,
+    "currency": "EUR"
+  },
+  "expected": {
+    "outcome": "DO_NOT_REPORT",
+    "reasonCode": "SAMPLE.N03.EXCLUDED",
+    "ruleIdsHit": ["S-N03-novation"]
+  }
+}

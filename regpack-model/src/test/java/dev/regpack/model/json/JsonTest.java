@@ -214,4 +214,44 @@ class JsonTest {
     assertThrows(IllegalArgumentException.class, () -> Json.canonical(tooLate));
     assertThrows(IllegalArgumentException.class, () -> Json.canonical(tooEarly));
   }
+
+  @Test
+  void aNumberOfMoreThan1100CharactersIsRefusedBeforeAnyDecimalIsBuilt() {
+    // the parse of a long digit string is quadratic: refuse by length, without echoing the literal
+    for (String literal :
+        List.of(
+            "1".repeat(200_000),
+            "0." + "1".repeat(200_000),
+            "1".repeat(1_000_000) + ".5",
+            "-" + "1".repeat(1_000_000),
+            "1." + "1".repeat(1_000_000) + "E+5",
+            "1E+" + "0".repeat(1_000_000),
+            "0." + "1".repeat(1_099))) {
+      JsonException e =
+          assertThrows(JsonException.class, () -> Json.parse("{\"n\":" + literal + "}"));
+      assertTrue(e.getMessage().contains("number too long"), e.getMessage());
+      assertTrue(e.getMessage().length() < 200, "message length " + e.getMessage().length());
+    }
+    // 1,100 characters and fewer still parse
+    String thousand = "0." + "1".repeat(998);
+    assertEquals(new BigDecimal(thousand), Json.parse(thousand));
+    String atBound = "0." + "1".repeat(1_098);
+    assertEquals(1_100, atBound.length());
+    JsonException atBoundError = assertThrows(JsonException.class, () -> Json.parse(atBound));
+    assertTrue(atBoundError.getMessage().contains("out of range"), atBoundError.getMessage());
+    String longInteger = "1".repeat(1_000) + ".0";
+    assertEquals(new BigDecimal(longInteger), Json.parse(longInteger));
+  }
+
+  @Test
+  void aNumberOutOfRangeDoesNotEchoTheWholeLiteral() {
+    String literal = "9".repeat(60);
+    JsonException e = assertThrows(JsonException.class, () -> Json.parse(literal));
+    assertTrue(e.getMessage().contains("number out of range"), e.getMessage());
+    assertTrue(e.getMessage().contains("9".repeat(40)), e.getMessage());
+    assertTrue(!e.getMessage().contains("9".repeat(41)), e.getMessage());
+    JsonException exponent =
+        assertThrows(JsonException.class, () -> Json.parse("1E+" + "9".repeat(60)));
+    assertTrue(!exponent.getMessage().contains("9".repeat(41)), exponent.getMessage());
+  }
 }

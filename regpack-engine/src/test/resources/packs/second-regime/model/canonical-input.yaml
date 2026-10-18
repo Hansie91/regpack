@@ -1,0 +1,5 @@
+# state.status is a read-only ledger-state input (BRK-04): reserved, read through the bindings.
+variables:
+  event.kind: {type: STRING}
+  event.occurredAt: {type: TIMESTAMP}
+  state.status: {type: STRING, source: STATE}

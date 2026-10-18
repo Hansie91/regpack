@@ -35,6 +35,17 @@ class MainTest {
   }
 
   @Test
+  void helpListsThePackCommands() {
+    assertThat(run("help")).isZero();
+    assertThat(stdout())
+        .contains("pack test <dir>")
+        .contains("pack explain <dir>")
+        .contains("pack seal <dir>")
+        .contains("pack table export <dir>")
+        .contains("pack table import <dir>");
+  }
+
+  @Test
   void unknownCommandExitsTwo() {
     assertThat(run("frobnicate")).isEqualTo(2);
     assertThat(errBytes.toString(StandardCharsets.UTF_8)).contains("frobnicate").contains("usage");

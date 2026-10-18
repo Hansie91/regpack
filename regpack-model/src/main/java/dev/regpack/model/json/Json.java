@@ -26,6 +26,16 @@ public final class Json {
   /** Largest absolute decimal scale accepted; keeps the plain-string form of a number small. */
   private static final int MAX_SCALE = 1000;
 
+  /**
+   * Longest numeric literal in characters (1,000 digits of scale plus an integer part, a sign, a
+   * dot and an exponent): a longer one is refused before a decimal is built, because building one
+   * takes quadratic time in the digits.
+   */
+  private static final int MAX_NUMBER_CHARS = 1_100;
+
+  /** Characters of a literal that an error message repeats. */
+  private static final int MAX_ECHO = 40;
+
   private static final char[] HEX = {
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
   };
@@ -451,6 +461,11 @@ public final class Json {
           pos++;
         }
       }
+      if (pos - start > MAX_NUMBER_CHARS) {
+        // before any BigDecimal is built: its construction is quadratic in the digits
+        pos = start;
+        throw error("number too long");
+      }
       String literal = text.substring(start, pos);
       try {
         if (integral) {
@@ -459,13 +474,18 @@ public final class Json {
         BigDecimal decimal = new BigDecimal(literal);
         if (Math.abs((long) decimal.scale()) > MAX_SCALE) {
           pos = start;
-          throw error("number out of range: " + literal);
+          throw error("number out of range: " + excerpt(literal));
         }
         return decimal;
       } catch (NumberFormatException e) {
         pos = start;
-        throw error("number out of range: " + literal);
+        throw error("number out of range: " + excerpt(literal));
       }
+    }
+
+    /** The first 40 characters of a literal, so that a message stays short. */
+    private static String excerpt(String literal) {
+      return literal.length() <= MAX_ECHO ? literal : literal.substring(0, MAX_ECHO) + "...";
     }
 
     private static boolean isDigit(char c) {

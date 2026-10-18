@@ -1,0 +1,8 @@
+# A synthetic source: the text hash below is the hash of the invented label "fixture-law fixture-1".
+sources:
+  - source_id: fixture-law
+    version: fixture-1
+    retrieved_at: 2026-10-17
+    content_sha256: a6ca9c181e85568dd83e59168a90b4d593aa5eda74adaed7c1ac9f65e4d73ede
+    provisions:
+      - {path: fixture/1, role: BASIS, status: IN_FORCE}

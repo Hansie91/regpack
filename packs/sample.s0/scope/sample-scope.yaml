@@ -1,0 +1,38 @@
+table: {id: sample.s0.scope, hit_policy: FIRST, priority: explicit, inputs: [client.kind, event.kind, instrument.assetClass, instrument.tradedOnVenue], catch_all: S-DEFAULT-catch-all}
+rows:
+  - id: S-N03-novation
+    node: N03
+    priority: 300
+    when: "event.kind in ['NOVATION','ASSIGNMENT']"
+    outcome: DO_NOT_REPORT
+    reason: SAMPLE.N03.EXCLUDED
+    cite: [{source_id: sample-law, provision_path: sample/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2018-01-03}}
+  - id: S-D14-natural-person
+    node: N13
+    priority: 400
+    when: "client.kind == 'NATURAL_PERSON'"
+    outcome: UNDETERMINED
+    reason: SAMPLE.N13.NATURAL_PERSON
+    cite: [{source_id: regpack-spec, provision_path: D14, role: INTERPRETATION}]
+    rationale: RAT-0002
+    valid: {legal: {from: 2018-01-03}}
+  - id: S-N08-equity-on-venue
+    node: N08
+    priority: 800
+    when: "instrument.assetClass == 'EQUITY' && instrument.tradedOnVenue"
+    outcome: REPORT
+    reason: SAMPLE.N08.IN_SCOPE
+    cite: [{source_id: sample-law, provision_path: sample/2, role: BASIS}]
+    rationale: RAT-0003
+    valid: {legal: {from: 2018-01-03}}
+    legs: [MARKET]
+  - id: S-DEFAULT-catch-all
+    node: DEFAULT
+    priority: 9999
+    when: "true"
+    outcome: UNDETERMINED
+    reason: SAMPLE.DEFAULT.NO_RULE_HIT
+    cite: [{source_id: regpack-spec, provision_path: I5, role: GUIDANCE}]
+    rationale: RAT-0004

@@ -28,7 +28,7 @@ Owner confirmation: 2026-10-09, hans. The allow-list above is confirmed; EPL-2.0
 
 ## Approvals
 
-None recorded.
+- A-2, 2026-10-10, approved by hans: in the P1a spike POM only (`spikes/`, never a release module), `licenseMerges` may map the licence spelling "Go License" (re2j 1.8, BSD-3-Clause text) and the spelling "BSD 3-clause" (threeten-extra 1.10.0) to BSD-3-Clause. The root `pom.xml` allow-list and its `licenseMerges` are unchanged.
 
 ## Interim vulnerability handling (until P9b)
 

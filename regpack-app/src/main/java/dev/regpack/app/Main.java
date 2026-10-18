@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** Command line entry point: {@code serve}, {@code smoke} and {@code help}. */
+/** Command line entry point: {@code serve}, {@code smoke}, {@code pack} and {@code help}. */
 public final class Main {
   private static final String USAGE =
       """
@@ -14,7 +14,10 @@ public final class Main {
       commands:
         serve   run the selected roles (--roles, --bind, --port)
         smoke   run the walking skeleton end to end [--health-url <base>]
-        help    print this text""";
+        pack    check, explain and seal rule packs; export and import decision tables
+      """
+          + PackCommands.COMMANDS
+          + "  help    print this text";
 
   private Main() {}
 
@@ -33,6 +36,8 @@ public final class Main {
     switch (args[0]) {
       case "smoke":
         return SmokeCommand.run(rest, out, err, new SystemClock());
+      case "pack":
+        return PackCommands.run(rest, out, err);
       case "serve":
         return serve(rest, env, err);
       default:

@@ -1,0 +1,5 @@
+rules:
+  S-N03-novation: "agent:p2a-implementer"
+  S-D14-natural-person: "agent:p2a-implementer"
+  S-N08-equity-on-venue: "agent:p2a-implementer"
+  S-DEFAULT-catch-all: "agent:p2a-implementer"

@@ -1,0 +1,8 @@
+# The owner text names no Compliance owner: gate G1 is open, so every entry here is a placeholder.
+prefix: SAMPLE
+nodes: [N03, N08, N13, DEFAULT]
+reasons:
+  - {code: SAMPLE.N03.EXCLUDED, label: EXCLUDED, category: EXCLUSION, default_outcome: DO_NOT_REPORT, owner: agent.p2a-sample, valid: {from: 2018-01-03}}
+  - {code: SAMPLE.N13.NATURAL_PERSON, label: NATURAL_PERSON, category: OUT_OF_SCOPE, default_outcome: UNDETERMINED, owner: agent.p2a-sample, valid: {from: 2018-01-03}}
+  - {code: SAMPLE.N08.IN_SCOPE, label: IN_SCOPE, category: INCLUSION, default_outcome: REPORT, owner: agent.p2a-sample, valid: {from: 2018-01-03}}
+  - {code: SAMPLE.DEFAULT.NO_RULE_HIT, label: NO_RULE_HIT, category: DEFAULT, default_outcome: UNDETERMINED, owner: agent.p2a-sample, valid: {from: 2018-01-03}}

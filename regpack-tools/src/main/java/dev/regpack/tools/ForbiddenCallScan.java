@@ -26,7 +26,12 @@ public final class ForbiddenCallScan {
   public enum RuleSet {
     WALL_CLOCK,
     RANDOMNESS,
-    LOCALE
+    LOCALE,
+    /**
+     * Platform-dependent defaults other than the locale: the default time zone, the line separator
+     * and the default charset, as the no-charset forms of the text conversions.
+     */
+    PLATFORM_DEFAULT
   }
 
   /** One forbidden reference found in one class. */
@@ -118,6 +123,40 @@ public final class ForbiddenCallScan {
     r.add(new Rule(RuleSet.LOCALE, "java/io/PrintStream", "printf", printStreamDescriptor));
     r.add(new Rule(RuleSet.LOCALE, "java/io/PrintStream", "format", printStreamDescriptor));
     r.add(new Rule(RuleSet.LOCALE, "java/util/Formatter", "<init>", "()V"));
+    // LOCALE: formats and scanners that take the default locale, and the localized styles
+    r.add(new Rule(RuleSet.LOCALE, "java/text/MessageFormat", "<init>", "(" + STR + ")V"));
+    r.add(
+        new Rule(
+            RuleSet.LOCALE, "java/text/MessageFormat", "format", "(" + STR + OBJS + ")" + STR));
+    r.add(new Rule(RuleSet.LOCALE, "java/util/Scanner", "<init>", ""));
+    for (String n : List.of("ofLocalizedDate", "ofLocalizedTime", "ofLocalizedDateTime")) {
+      r.add(new Rule(RuleSet.LOCALE, "java/time/format/DateTimeFormatter", n, ""));
+    }
+    // PLATFORM_DEFAULT: time zone, line separator and charset of the platform
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/time/ZoneId", "systemDefault", ""));
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/util/TimeZone", "getDefault", ""));
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/util/TimeZone", "setDefault", ""));
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/lang/System", "lineSeparator", ""));
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/nio/charset/Charset", "defaultCharset", ""));
+    // the forms of text conversion that use the default charset
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/lang/String", "getBytes", "()[B"));
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/lang/String", "<init>", "([B)V"));
+    r.add(new Rule(RuleSet.PLATFORM_DEFAULT, "java/lang/String", "<init>", "([BII)V"));
+    r.add(
+        new Rule(
+            RuleSet.PLATFORM_DEFAULT, "java/io/ByteArrayOutputStream", "toString", "()" + STR));
+    r.add(
+        new Rule(
+            RuleSet.PLATFORM_DEFAULT,
+            "java/io/InputStreamReader",
+            "<init>",
+            "(Ljava/io/InputStream;)V"));
+    r.add(
+        new Rule(
+            RuleSet.PLATFORM_DEFAULT,
+            "java/io/OutputStreamWriter",
+            "<init>",
+            "(Ljava/io/OutputStream;)V"));
     return List.copyOf(r);
   }
 

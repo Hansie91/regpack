@@ -228,6 +228,122 @@ class DecisionTypesTest {
         .isEqualTo("2c82bc6e73b568970a7152dcfd075c866a01dec5bc6c74d707e950e790a7be84");
   }
 
+  // The two literals below were printed from the unchanged 14-component model (plan T15 step 1a).
+  private static final String PRE_ATTRIBUTES_JSON =
+      "{\"asAt\":\"2026-10-09T09:30:00.000000Z\",\"citations\":[{\"provisionPath\":\"art26\","
+          + "\"quoteSha256\":\"8e35c2cd3bf6641bdb0e2050b76932cbb2e6034a0ddacc1d9bea82a6ba57f7cf\","
+          + "\"role\":\"BASIS\",\"sourceId\":\"mifir\"}],\"decisionContextId\":\""
+          + "2c82bc6e73b568970a7152dcfd075c866a01dec5bc6c74d707e950e790a7be84\","
+          + "\"evaluatedAt\":\"2026-10-09T10:00:00.000000Z\",\"eventIdentity\":\"L|XPAR|EX-1\","
+          + "\"flags\":[],\"inputDigest\":\""
+          + "582967534d0f909d196b97f9e6921342777aea87b46fa52df165389db1fb8ccf\","
+          + "\"legs\":[\"MARKET\"],\"node\":\"n03\",\"outcome\":\"REPORT\","
+          + "\"path\":[{\"costUnits\":1,\"matched\":true,\"ruleId\":\"r1\"}],"
+          + "\"reasonCode\":\"MIFIR.N03.EXCLUDED\",\"regime\":\"mifir.eu.rts22\","
+          + "\"ruleIdsHit\":[\"r1\"]}";
+  private static final String PRE_ATTRIBUTES_REPLAY_DIGEST =
+      "a6188c06f1e6afacb809c22f9fb4067d660f65652411ce8598728725c3f69cbe";
+
+  private static DecisionBody withAttributes(DecisionBody base, Map<String, String> attributes) {
+    return new DecisionBody(
+        base.eventIdentity(),
+        base.regime(),
+        base.decisionContextId(),
+        base.asAt(),
+        base.evaluatedAt(),
+        base.outcome(),
+        base.flags(),
+        base.reasonCode(),
+        base.node(),
+        base.ruleIdsHit(),
+        base.path(),
+        base.citations(),
+        base.legs(),
+        base.inputDigest(),
+        attributes);
+  }
+
+  @Test
+  void oldConstructorGivesEmptyAttributes() {
+    DecisionBody b =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of());
+    assertThat(b.attributes()).isEmpty();
+  }
+
+  @Test
+  void emptyAttributesLeaveEveryExistingDigestUnchanged() {
+    DecisionBody b =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of());
+    assertThat(Json.canonical(DecisionCodec.bodyToMap(b, true))).isEqualTo(PRE_ATTRIBUTES_JSON);
+    assertThat(b.replayDigest().hex()).isEqualTo(PRE_ATTRIBUTES_REPLAY_DIGEST);
+    assertThat(DecisionCodec.bodyToMap(b, true)).doesNotContainKey("attributes");
+    assertThat(DecisionCodec.bodyToMap(withAttributes(b, Map.of()), true))
+        .isEqualTo(DecisionCodec.bodyToMap(b, true));
+  }
+
+  @Test
+  void attributesAreInTheReplayDigest() {
+    Instant t1 = Instant.parse("2026-10-09T10:00:00.000000Z");
+    Instant t2 = Instant.parse("2026-10-09T11:00:00.000000Z");
+    DecisionBody base = body(t1, Outcome.REPORT, 1, List.of());
+    DecisionBody with = withAttributes(base, Map.of("action", "NEWT"));
+    assertThat(with.replayDigest()).isNotEqualTo(base.replayDigest());
+    assertThat(
+            withAttributes(body(t2, Outcome.REPORT, 1, List.of()), Map.of("action", "NEWT"))
+                .replayDigest())
+        .isEqualTo(with.replayDigest());
+    assertThat(withAttributes(base, Map.of("action", "CANC")).replayDigest())
+        .isNotEqualTo(with.replayDigest());
+  }
+
+  @Test
+  void attributesAppearSortedInTheCanonicalJson() {
+    DecisionBody base =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of());
+    Map<String, String> unsorted = new LinkedHashMap<>();
+    unsorted.put("zeta", "1");
+    unsorted.put("action", "NEWT");
+    DecisionBody with = withAttributes(base, unsorted);
+    assertThat(Json.canonical(DecisionCodec.bodyToMap(with, true)))
+        .contains("\"attributes\":{\"action\":\"NEWT\",\"zeta\":\"1\"}");
+    assertThat(with.attributes().keySet()).containsExactly("action", "zeta");
+    assertThat(DecisionCodec.bodyToMap(with, true).get("attributes"))
+        .isEqualTo(Map.of("action", "NEWT", "zeta", "1"));
+  }
+
+  @Test
+  void attributesAreCopiedAndImmutable() {
+    DecisionBody base =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of());
+    Map<String, String> source = new LinkedHashMap<>();
+    source.put("action", "NEWT");
+    DecisionBody with = withAttributes(base, source);
+    source.put("later", "x");
+    assertThat(with.attributes()).containsOnlyKeys("action");
+    assertThatThrownBy(() -> with.attributes().put("x", "y"))
+        .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> withAttributes(base, null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void attributesRejectNullKeysAndValuesAtConstruction() {
+    DecisionBody base =
+        body(Instant.parse("2026-10-09T10:00:00.000000Z"), Outcome.REPORT, 1, List.of());
+    Map<String, String> nullValue = new LinkedHashMap<>();
+    nullValue.put("action", null);
+    assertThatThrownBy(() -> withAttributes(base, nullValue))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("attribute value");
+    Map<String, String> nullKey = new LinkedHashMap<>();
+    nullKey.put(null, "NEWT");
+    assertThatThrownBy(() -> withAttributes(base, nullKey))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("attribute key");
+    assertThatThrownBy(() -> withAttributes(base, null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessageContaining("attributes");
+  }
+
   @Test
   void pathStepRejectsBlankRuleIdAndNegativeCost() {
     assertThatThrownBy(() -> new PathStep("", true, 0))

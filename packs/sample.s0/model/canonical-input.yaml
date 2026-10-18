@@ -1,0 +1,14 @@
+variables:
+  event.kind: {type: ENUM, enum: LifecycleKind}
+  event.tradedAt: {type: TIMESTAMP}
+  venue.mic: {type: STRING}
+  venue.executionId: {type: STRING}
+  firm.lei: {type: STRING}
+  instrument.isin: {type: STRING}
+  instrument.assetClass: {type: ENUM, enum: AssetClass}
+  instrument.tradedOnVenue: {type: BOOL}
+  client.kind: {type: ENUM, enum: PartyKind}
+  client.lei: {type: STRING, optional: true}
+  trade.quantity: {type: DECIMAL}
+  trade.price: {type: DECIMAL}
+  trade.currency: {type: STRING}

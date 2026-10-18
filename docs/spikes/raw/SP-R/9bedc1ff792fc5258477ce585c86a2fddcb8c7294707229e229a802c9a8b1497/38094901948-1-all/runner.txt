@@ -1,0 +1,92 @@
+== uname -a ==
+Linux runnervmmprz5 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+== lscpu ==
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           46 bits physical, 57 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               GenuineIntel
+Model name:                              Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+CPU family:                              6
+Model:                                   106
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+Stepping:                                6
+CPU(s) scaling MHz:                      123%
+CPU max MHz:                             2800.0000
+CPU min MHz:                             800.0000
+BogoMIPS:                                5586.87
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves vnmi avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid fsrm arch_capabilities
+Virtualization:                          VT-x
+Hypervisor vendor:                       Microsoft
+Virtualization type:                     full
+L1d cache:                               96 KiB (2 instances)
+L1i cache:                               64 KiB (2 instances)
+L2 cache:                                2.5 MiB (2 instances)
+L3 cache:                                48 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Mitigation; Aligned branch/return thunks
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Vulnerable: Clear CPU buffers attempted, no microcode; SMT Host state unknown
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Vulnerable
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Vulnerable
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Retpoline
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+== model name ==
+model name	: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+== free -b ==
+               total        used        free      shared  buff/cache   available
+Mem:     16765378560  1222225920 13134041088    47280128  2795307008 15543152640
+Swap:     3221221376           0  3221221376
+== /proc/meminfo (head) ==
+MemTotal:       16372440 kB
+MemFree:        12826212 kB
+MemAvailable:   15178860 kB
+Buffers:           90068 kB
+Cached:          2518192 kB
+== df -B1 -T / /mnt ==
+Filesystem     Type    1B-blocks        Used   Available Use% Mounted on
+/dev/root      ext4 154894188544 62708428800 92168982528  41% /
+/dev/root      ext4 154894188544 62708428800 92168982528  41% /
+== lsblk -b ==
+NAME    MAJ:MIN RM         SIZE RO TYPE MOUNTPOINTS
+sda       8:0    0 161061273600  0 disk 
+├─sda1    8:1    0 159986466304  0 part /
+├─sda14   8:14   0      4194304  0 part 
+├─sda15   8:15   0    111149056  0 part /boot/efi
+└─sda16 259:0    0    957350400  0 part /boot
+== allow-listed variables ==
+ImageOS=ubuntu24
+ImageVersion=20261004.327.1
+RUNNER_OS=Linux
+RUNNER_ARCH=X64
+GITHUB_RUN_ID=38094901948
+GITHUB_RUN_ATTEMPT=1
+GITHUB_SHA=2a6247c52669586a8b1a54152d1e798a7a67b16e
+GITHUB_REPOSITORY=Hansie91/regpack
+GITHUB_WORKFLOW=spikes-run
+GITHUB_REF_NAME=p1a/spikes
+== docker --version ==
+Docker version 28.0.4, build b8034c0
+== java -version ==
+openjdk version "25.0.4.1" 2026-08-18 LTS
+OpenJDK Runtime Environment Temurin-25.0.4.1+1 (build 25.0.4.1+1-LTS)
+OpenJDK 64-Bit Server VM Temurin-25.0.4.1+1 (build 25.0.4.1+1-LTS, mixed mode, sharing)
+== /sys/fs/cgroup/cpu.max ==
+(absent)

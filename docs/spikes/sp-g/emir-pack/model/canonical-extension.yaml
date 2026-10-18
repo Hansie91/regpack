@@ -1,0 +1,90 @@
+# model/canonical-extension.yaml of the spike pack emir.eu (SP-G paper exercise): a SKETCH of the
+# canonical-model extension that EMIR needs beyond the transaction-centric model of spec 7.4 (derivative
+# side, derivative, valuation event, collateral event, position), the reused MiFIR entities, the natural
+# keys, and the event identity of a valuation. Spec 6.1 says model/ holds the "canonical input schema"
+# but gives no syntax for it, so the field notation below is a sketch and carries no marker; only
+# constructs that the spec's model cannot say are marked. Sources: research 3.3, 3.4, 3.10; spec 7.4, 10.
+# Value types are those of spec 6.2: bool, int, scaled decimal, string, UTC timestamp, date, enum, list.
+provenance: consistency-only
+
+# Entities of spec 7.4 that EMIR reuses unchanged. The pack cannot import them from a common pack today.
+extends:                                         # BRK-13 (block)
+  from: "common.parties-and-instruments"
+  reuse: [Party, Instrument, LifecycleEvent]
+  # Instrument natural key: ISIN where there is one, otherwise the UPI (research 3.3).
+
+# Spec 7.4 lists the LifecycleEvent kinds NEW, AMEND, CANCEL and CORRECTION. Assumption A-8: EMIR needs
+# three more, and the source mapping maps a source's own events onto them.
+event_kinds:                                     # BRK-13 (block)
+  base: [NEW, AMEND, CANCEL, CORRECTION]
+  added: [TERMINATE, REVIVE, VALUATION]
+
+entities:
+  - name: DerivativeSide
+    note: one reporting counterparty's side of one derivative at one level (T for trade, P for position)
+    natural_key: [reporting_counterparty_lei, uti, level]
+    fields:
+      reporting_counterparty_lei: {type: string, entity: Party}
+      other_counterparty_lei: {type: string, entity: Party}
+      uti: {type: string, source: SOURCE_ONLY}
+      level: {type: enum, values: [T, P]}
+      instrument: {type: string, entity: Instrument}
+      maturity_date: {type: date}
+      status: {derived: true, from: lifecycle.yaml status_model}
+  - name: Position
+    note: the position that a trade is folded into has a new UTI at level P, linked to the folded trade (research 3.3)
+    natural_key: [reporting_counterparty_lei, position_uti]
+    fields:
+      position_uti: {type: string, source: SOURCE_ONLY}
+      folded_trade_utis: {type: list, of: string}
+      level: {type: enum, values: [P]}
+  - name: ValuationEvent
+    note: one valuation of one derivative on one date (VALU)
+    natural_key: [reporting_counterparty_lei, uti, level, valuation_date]
+    fields:
+      valuation_date: {type: date}
+      valuation_timestamp: {type: UTC timestamp}
+      value: {type: scaled decimal}
+      currency: {type: string}
+  - name: CollateralEvent
+    note: sketch only; margin and collateral reports are not among the six action types of this exercise
+    natural_key: "<not established in the sources of this exercise>"
+    fields: {}
+
+# Spec 7.4: the event_identity tuple is declared in each source mapping (owned by P7a), not in the model.
+# The tuples below are the shape that the mappings must declare.
+# BRK-05 tested, not a break: a tuple of canonical fields is not execution-shaped, so a derivative
+# side and a valuation each get their own identity without any change to spec 10.
+event_identity_for_source_mapping:
+  DerivativeSide: [reporting_counterparty_lei, uti, level]
+  ValuationEvent: [reporting_counterparty_lei, uti, level, valuation_date]
+
+# Spec 6.3 and 10 know the legs MARKET, CLIENT and ALLOCATION. An EMIR report is one report per
+# derivative side and has none of them.
+legs:                                            # BRK-12 (block)
+  vocabulary: [SIDE]
+
+# The one report field that the sketch needs to show: the reporting timestamp is stamped when the file
+# is built, re-stamped on every resend, and must not change the logical hash (spec 10).
+report_fields:
+  - {name: reporting_timestamp, type: UTC timestamp, volatile: true, stamped_by: projection}    # BRK-06
+
+examples:
+  - id: CAN-EX-01
+    provenance: consistency-only
+    what: a valuation of an outstanding derivative on one date
+    record: {entity: ValuationEvent, kind: VALUATION, reporting_counterparty_lei: "<LEI-A>", uti: "<UTI-1>", level: T, valuation_date: 2026-01-06}
+    event_identity: ["<LEI-A>", "<UTI-1>", T, 2026-01-06]
+    report_subject_key: [emir.eu, "<LEI-A>/<UTI-1>/T/2026-01-06", SIDE]
+  - id: CAN-EX-02
+    provenance: consistency-only
+    what: the next day's valuation of the same derivative is a different event identity and a different chain
+    record: {entity: ValuationEvent, kind: VALUATION, reporting_counterparty_lei: "<LEI-A>", uti: "<UTI-1>", level: T, valuation_date: 2026-01-07}
+    event_identity: ["<LEI-A>", "<UTI-1>", T, 2026-01-07]
+    report_subject_key: [emir.eu, "<LEI-A>/<UTI-1>/T/2026-01-07", SIDE]
+  - id: CAN-EX-03
+    provenance: consistency-only
+    what: a lifecycle event of the derivative side keeps one identity for the original and every later event
+    record: {entity: DerivativeSide, kind: AMEND, reporting_counterparty_lei: "<LEI-A>", uti: "<UTI-1>", level: T}
+    event_identity: ["<LEI-A>", "<UTI-1>", T]
+    report_subject_key: [emir.eu, "<LEI-A>/<UTI-1>/T", SIDE]

@@ -182,7 +182,7 @@ class PackagingFilesTest {
   }
 
   @Test
-  void ciWorkflowHasTheFiveJobsReadOnlyPermissionsAndMatchingArtefactNames() throws IOException {
+  void ciWorkflowHasTheSixJobsReadOnlyPermissionsAndMatchingArtefactNames() throws IOException {
     String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
 
     assertThat(ci).containsPattern("(?m)^permissions:\\n  contents: read$");
@@ -194,7 +194,12 @@ class PackagingFilesTest {
             .toList();
     assertThat(jobIds)
         .containsExactly(
-            "build", "determinism-compare", "smoke-linux", "smoke-windows", "smoke-kubernetes");
+            "build",
+            "determinism-compare",
+            "spikes",
+            "smoke-linux",
+            "smoke-windows",
+            "smoke-kubernetes");
 
     // The distribution is uploaded once and downloaded under the same name by the three smokes.
     assertThat(ci).containsOnlyOnce("          name: regpack-dist\n          path: |");
@@ -206,6 +211,17 @@ class PackagingFilesTest {
         .contains("pattern: toy-digest-*")
         .contains("digests/toy-digest-ubuntu-24.04/toy-digest.txt")
         .contains("digests/toy-digest-windows-2025/toy-digest.txt");
+    // The pack-driven pipeline writes a second digest (T24): uploaded in the same artefact as the
+    // skeleton digest and compared between the two operating systems like it.
+    assertThat(ci)
+        .contains("regpack-engine/target/toy-digest.txt")
+        .contains("regpack-engine/target/pack-toy-digest.txt")
+        .contains("digests/toy-digest-ubuntu-24.04/pack-toy-digest.txt")
+        .contains("digests/toy-digest-windows-2025/pack-toy-digest.txt");
+    // The names above are only a smoke check; what the steps do is checked by their meaning (the
+    // compare step reads both files of both systems and fails on a difference, an empty or a
+    // missing file), with broken copies and an execution, in CiDeterminismCompareTest.
+    assertThat(CiCompareStep.problems(ci)).isEmpty();
   }
 
   @Test

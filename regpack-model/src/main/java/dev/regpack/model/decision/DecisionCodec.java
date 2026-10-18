@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /** Converts decision types to the map form of canonical JSON. */
 public final class DecisionCodec {
@@ -65,6 +66,9 @@ public final class DecisionCodec {
     }
     map.put("legs", legs);
     map.put("inputDigest", body.inputDigest().hex());
+    if (!body.attributes().isEmpty()) {
+      map.put("attributes", new TreeMap<>(body.attributes()));
+    }
     return map;
   }
 

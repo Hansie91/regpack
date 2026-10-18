@@ -1,0 +1,17 @@
+1 + 2		3
+true		1
+has(a.b)	a.b=absent:STRING	1
+x in [1, 2, 3]	x=i:2	9
+size('abc')		2
+contains('abc', 'b')		3
+s.contains(t)	s=s:@gen(512);t=s:@gen(300)	8
+a + b	a=s:@gen(512);b=s:@gen(512)	7
+[1, 2] + [3]		9
+upper(s)	s=s:@gen(512)	4
+dec('12.50')		3
+round(dec('2.5'), 0, 'HALF_UP')		7
+dec('1') / dec('4')		8
+true ? 1 : 2		3
+false && (1 / 0 == 1)		2
+date('2026-10-09')		3
+x in y	x=i:9;y=l:i:1|i:2|i:3|i:4	7

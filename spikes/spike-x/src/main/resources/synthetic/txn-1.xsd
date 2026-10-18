@@ -1,0 +1,541 @@
+<!-- SELF-AUTHORED SYNTHETIC SCHEMA: not derived from any ESMA or ISO 20022 artefact (gate G3) -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="urn:regpack:spike:synthetic:txn:1"
+           xmlns="urn:regpack:spike:synthetic:txn:1"
+           elementFormDefault="qualified"
+           attributeFormDefault="unqualified">
+
+  <!--
+    Declared shape (spike SP-X, task X1). Every name below is invented by the author of this file:
+    plain lower-case English for blocks and types, f<NN>_<purpose> for the 65 leaf fields of a
+    record. Every code list is an invented list. XSD 1.0 constructs only.
+  -->
+
+  <!-- ===================== enumeration types (invented code lists) ===================== -->
+  <xs:simpleType name="origin_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="oak"/><xs:enumeration value="elm"/><xs:enumeration value="ash"/>
+      <xs:enumeration value="fir"/><xs:enumeration value="yew"/><xs:enumeration value="pine"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="party_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="solo"/><xs:enumeration value="firm"/><xs:enumeration value="fund"/>
+      <xs:enumeration value="guild"/><xs:enumeration value="trust"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="zone_code">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="zn001"/> <xs:enumeration value="zn002"/> <xs:enumeration value="zn003"/> <xs:enumeration value="zn004"/> <xs:enumeration value="zn005"/> <xs:enumeration value="zn006"/>
+      <xs:enumeration value="zn007"/> <xs:enumeration value="zn008"/> <xs:enumeration value="zn009"/> <xs:enumeration value="zn010"/> <xs:enumeration value="zn011"/> <xs:enumeration value="zn012"/>
+      <xs:enumeration value="zn013"/> <xs:enumeration value="zn014"/> <xs:enumeration value="zn015"/> <xs:enumeration value="zn016"/> <xs:enumeration value="zn017"/> <xs:enumeration value="zn018"/>
+      <xs:enumeration value="zn019"/> <xs:enumeration value="zn020"/> <xs:enumeration value="zn021"/> <xs:enumeration value="zn022"/> <xs:enumeration value="zn023"/> <xs:enumeration value="zn024"/>
+      <xs:enumeration value="zn025"/> <xs:enumeration value="zn026"/> <xs:enumeration value="zn027"/> <xs:enumeration value="zn028"/> <xs:enumeration value="zn029"/> <xs:enumeration value="zn030"/>
+      <xs:enumeration value="zn031"/> <xs:enumeration value="zn032"/> <xs:enumeration value="zn033"/> <xs:enumeration value="zn034"/> <xs:enumeration value="zn035"/> <xs:enumeration value="zn036"/>
+      <xs:enumeration value="zn037"/> <xs:enumeration value="zn038"/> <xs:enumeration value="zn039"/> <xs:enumeration value="zn040"/> <xs:enumeration value="zn041"/> <xs:enumeration value="zn042"/>
+      <xs:enumeration value="zn043"/> <xs:enumeration value="zn044"/> <xs:enumeration value="zn045"/> <xs:enumeration value="zn046"/> <xs:enumeration value="zn047"/> <xs:enumeration value="zn048"/>
+      <xs:enumeration value="zn049"/> <xs:enumeration value="zn050"/> <xs:enumeration value="zn051"/> <xs:enumeration value="zn052"/> <xs:enumeration value="zn053"/> <xs:enumeration value="zn054"/>
+      <xs:enumeration value="zn055"/> <xs:enumeration value="zn056"/> <xs:enumeration value="zn057"/> <xs:enumeration value="zn058"/> <xs:enumeration value="zn059"/> <xs:enumeration value="zn060"/>
+      <xs:enumeration value="zn061"/> <xs:enumeration value="zn062"/> <xs:enumeration value="zn063"/> <xs:enumeration value="zn064"/> <xs:enumeration value="zn065"/> <xs:enumeration value="zn066"/>
+      <xs:enumeration value="zn067"/> <xs:enumeration value="zn068"/> <xs:enumeration value="zn069"/> <xs:enumeration value="zn070"/> <xs:enumeration value="zn071"/> <xs:enumeration value="zn072"/>
+      <xs:enumeration value="zn073"/> <xs:enumeration value="zn074"/> <xs:enumeration value="zn075"/> <xs:enumeration value="zn076"/> <xs:enumeration value="zn077"/> <xs:enumeration value="zn078"/>
+      <xs:enumeration value="zn079"/> <xs:enumeration value="zn080"/> <xs:enumeration value="zn081"/> <xs:enumeration value="zn082"/> <xs:enumeration value="zn083"/> <xs:enumeration value="zn084"/>
+      <xs:enumeration value="zn085"/> <xs:enumeration value="zn086"/> <xs:enumeration value="zn087"/> <xs:enumeration value="zn088"/> <xs:enumeration value="zn089"/> <xs:enumeration value="zn090"/>
+      <xs:enumeration value="zn091"/> <xs:enumeration value="zn092"/> <xs:enumeration value="zn093"/> <xs:enumeration value="zn094"/> <xs:enumeration value="zn095"/> <xs:enumeration value="zn096"/>
+      <xs:enumeration value="zn097"/> <xs:enumeration value="zn098"/> <xs:enumeration value="zn099"/> <xs:enumeration value="zn100"/> <xs:enumeration value="zn101"/> <xs:enumeration value="zn102"/>
+      <xs:enumeration value="zn103"/> <xs:enumeration value="zn104"/> <xs:enumeration value="zn105"/> <xs:enumeration value="zn106"/> <xs:enumeration value="zn107"/> <xs:enumeration value="zn108"/>
+      <xs:enumeration value="zn109"/> <xs:enumeration value="zn110"/> <xs:enumeration value="zn111"/> <xs:enumeration value="zn112"/> <xs:enumeration value="zn113"/> <xs:enumeration value="zn114"/>
+      <xs:enumeration value="zn115"/> <xs:enumeration value="zn116"/> <xs:enumeration value="zn117"/> <xs:enumeration value="zn118"/> <xs:enumeration value="zn119"/> <xs:enumeration value="zn120"/>
+      <xs:enumeration value="zn121"/> <xs:enumeration value="zn122"/> <xs:enumeration value="zn123"/> <xs:enumeration value="zn124"/> <xs:enumeration value="zn125"/> <xs:enumeration value="zn126"/>
+      <xs:enumeration value="zn127"/> <xs:enumeration value="zn128"/> <xs:enumeration value="zn129"/> <xs:enumeration value="zn130"/> <xs:enumeration value="zn131"/> <xs:enumeration value="zn132"/>
+      <xs:enumeration value="zn133"/> <xs:enumeration value="zn134"/> <xs:enumeration value="zn135"/> <xs:enumeration value="zn136"/> <xs:enumeration value="zn137"/> <xs:enumeration value="zn138"/>
+      <xs:enumeration value="zn139"/> <xs:enumeration value="zn140"/> <xs:enumeration value="zn141"/> <xs:enumeration value="zn142"/> <xs:enumeration value="zn143"/> <xs:enumeration value="zn144"/>
+      <xs:enumeration value="zn145"/> <xs:enumeration value="zn146"/> <xs:enumeration value="zn147"/> <xs:enumeration value="zn148"/> <xs:enumeration value="zn149"/> <xs:enumeration value="zn150"/>
+      <xs:enumeration value="zn151"/> <xs:enumeration value="zn152"/> <xs:enumeration value="zn153"/> <xs:enumeration value="zn154"/> <xs:enumeration value="zn155"/> <xs:enumeration value="zn156"/>
+      <xs:enumeration value="zn157"/> <xs:enumeration value="zn158"/> <xs:enumeration value="zn159"/> <xs:enumeration value="zn160"/> <xs:enumeration value="zn161"/> <xs:enumeration value="zn162"/>
+      <xs:enumeration value="zn163"/> <xs:enumeration value="zn164"/> <xs:enumeration value="zn165"/> <xs:enumeration value="zn166"/> <xs:enumeration value="zn167"/> <xs:enumeration value="zn168"/>
+      <xs:enumeration value="zn169"/> <xs:enumeration value="zn170"/> <xs:enumeration value="zn171"/> <xs:enumeration value="zn172"/> <xs:enumeration value="zn173"/> <xs:enumeration value="zn174"/>
+      <xs:enumeration value="zn175"/> <xs:enumeration value="zn176"/> <xs:enumeration value="zn177"/> <xs:enumeration value="zn178"/> <xs:enumeration value="zn179"/> <xs:enumeration value="zn180"/>
+      <xs:enumeration value="zn181"/> <xs:enumeration value="zn182"/> <xs:enumeration value="zn183"/> <xs:enumeration value="zn184"/> <xs:enumeration value="zn185"/> <xs:enumeration value="zn186"/>
+      <xs:enumeration value="zn187"/> <xs:enumeration value="zn188"/> <xs:enumeration value="zn189"/> <xs:enumeration value="zn190"/> <xs:enumeration value="zn191"/> <xs:enumeration value="zn192"/>
+      <xs:enumeration value="zn193"/> <xs:enumeration value="zn194"/> <xs:enumeration value="zn195"/> <xs:enumeration value="zn196"/> <xs:enumeration value="zn197"/> <xs:enumeration value="zn198"/>
+      <xs:enumeration value="zn199"/> <xs:enumeration value="zn200"/> <xs:enumeration value="zn201"/> <xs:enumeration value="zn202"/> <xs:enumeration value="zn203"/> <xs:enumeration value="zn204"/>
+      <xs:enumeration value="zn205"/> <xs:enumeration value="zn206"/> <xs:enumeration value="zn207"/> <xs:enumeration value="zn208"/> <xs:enumeration value="zn209"/> <xs:enumeration value="zn210"/>
+      <xs:enumeration value="zn211"/> <xs:enumeration value="zn212"/> <xs:enumeration value="zn213"/> <xs:enumeration value="zn214"/> <xs:enumeration value="zn215"/> <xs:enumeration value="zn216"/>
+      <xs:enumeration value="zn217"/> <xs:enumeration value="zn218"/> <xs:enumeration value="zn219"/> <xs:enumeration value="zn220"/> <xs:enumeration value="zn221"/> <xs:enumeration value="zn222"/>
+      <xs:enumeration value="zn223"/> <xs:enumeration value="zn224"/> <xs:enumeration value="zn225"/> <xs:enumeration value="zn226"/> <xs:enumeration value="zn227"/> <xs:enumeration value="zn228"/>
+      <xs:enumeration value="zn229"/> <xs:enumeration value="zn230"/> <xs:enumeration value="zn231"/> <xs:enumeration value="zn232"/> <xs:enumeration value="zn233"/> <xs:enumeration value="zn234"/>
+      <xs:enumeration value="zn235"/> <xs:enumeration value="zn236"/> <xs:enumeration value="zn237"/> <xs:enumeration value="zn238"/> <xs:enumeration value="zn239"/> <xs:enumeration value="zn240"/>
+      <xs:enumeration value="zn241"/> <xs:enumeration value="zn242"/> <xs:enumeration value="zn243"/> <xs:enumeration value="zn244"/> <xs:enumeration value="zn245"/> <xs:enumeration value="zn246"/>
+      <xs:enumeration value="zn247"/> <xs:enumeration value="zn248"/> <xs:enumeration value="zn249"/> <xs:enumeration value="zn250"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="unit_label">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="box"/><xs:enumeration value="crate"/><xs:enumeration value="pallet"/>
+      <xs:enumeration value="sack"/><xs:enumeration value="drum"/><xs:enumeration value="bale"/>
+      <xs:enumeration value="tin"/><xs:enumeration value="sheet"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="venue_code">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="vn001"/> <xs:enumeration value="vn002"/> <xs:enumeration value="vn003"/> <xs:enumeration value="vn004"/> <xs:enumeration value="vn005"/> <xs:enumeration value="vn006"/>
+      <xs:enumeration value="vn007"/> <xs:enumeration value="vn008"/> <xs:enumeration value="vn009"/> <xs:enumeration value="vn010"/> <xs:enumeration value="vn011"/> <xs:enumeration value="vn012"/>
+      <xs:enumeration value="vn013"/> <xs:enumeration value="vn014"/> <xs:enumeration value="vn015"/> <xs:enumeration value="vn016"/> <xs:enumeration value="vn017"/> <xs:enumeration value="vn018"/>
+      <xs:enumeration value="vn019"/> <xs:enumeration value="vn020"/> <xs:enumeration value="vn021"/> <xs:enumeration value="vn022"/> <xs:enumeration value="vn023"/> <xs:enumeration value="vn024"/>
+      <xs:enumeration value="vn025"/> <xs:enumeration value="vn026"/> <xs:enumeration value="vn027"/> <xs:enumeration value="vn028"/> <xs:enumeration value="vn029"/> <xs:enumeration value="vn030"/>
+      <xs:enumeration value="vn031"/> <xs:enumeration value="vn032"/> <xs:enumeration value="vn033"/> <xs:enumeration value="vn034"/> <xs:enumeration value="vn035"/> <xs:enumeration value="vn036"/>
+      <xs:enumeration value="vn037"/> <xs:enumeration value="vn038"/> <xs:enumeration value="vn039"/> <xs:enumeration value="vn040"/> <xs:enumeration value="vn041"/> <xs:enumeration value="vn042"/>
+      <xs:enumeration value="vn043"/> <xs:enumeration value="vn044"/> <xs:enumeration value="vn045"/> <xs:enumeration value="vn046"/> <xs:enumeration value="vn047"/> <xs:enumeration value="vn048"/>
+      <xs:enumeration value="vn049"/> <xs:enumeration value="vn050"/> <xs:enumeration value="vn051"/> <xs:enumeration value="vn052"/> <xs:enumeration value="vn053"/> <xs:enumeration value="vn054"/>
+      <xs:enumeration value="vn055"/> <xs:enumeration value="vn056"/> <xs:enumeration value="vn057"/> <xs:enumeration value="vn058"/> <xs:enumeration value="vn059"/> <xs:enumeration value="vn060"/>
+      <xs:enumeration value="vn061"/> <xs:enumeration value="vn062"/> <xs:enumeration value="vn063"/> <xs:enumeration value="vn064"/> <xs:enumeration value="vn065"/> <xs:enumeration value="vn066"/>
+      <xs:enumeration value="vn067"/> <xs:enumeration value="vn068"/> <xs:enumeration value="vn069"/> <xs:enumeration value="vn070"/> <xs:enumeration value="vn071"/> <xs:enumeration value="vn072"/>
+      <xs:enumeration value="vn073"/> <xs:enumeration value="vn074"/> <xs:enumeration value="vn075"/> <xs:enumeration value="vn076"/> <xs:enumeration value="vn077"/> <xs:enumeration value="vn078"/>
+      <xs:enumeration value="vn079"/> <xs:enumeration value="vn080"/> <xs:enumeration value="vn081"/> <xs:enumeration value="vn082"/> <xs:enumeration value="vn083"/> <xs:enumeration value="vn084"/>
+      <xs:enumeration value="vn085"/> <xs:enumeration value="vn086"/> <xs:enumeration value="vn087"/> <xs:enumeration value="vn088"/> <xs:enumeration value="vn089"/> <xs:enumeration value="vn090"/>
+      <xs:enumeration value="vn091"/> <xs:enumeration value="vn092"/> <xs:enumeration value="vn093"/> <xs:enumeration value="vn094"/> <xs:enumeration value="vn095"/> <xs:enumeration value="vn096"/>
+      <xs:enumeration value="vn097"/> <xs:enumeration value="vn098"/> <xs:enumeration value="vn099"/> <xs:enumeration value="vn100"/> <xs:enumeration value="vn101"/> <xs:enumeration value="vn102"/>
+      <xs:enumeration value="vn103"/> <xs:enumeration value="vn104"/> <xs:enumeration value="vn105"/> <xs:enumeration value="vn106"/> <xs:enumeration value="vn107"/> <xs:enumeration value="vn108"/>
+      <xs:enumeration value="vn109"/> <xs:enumeration value="vn110"/> <xs:enumeration value="vn111"/> <xs:enumeration value="vn112"/> <xs:enumeration value="vn113"/> <xs:enumeration value="vn114"/>
+      <xs:enumeration value="vn115"/> <xs:enumeration value="vn116"/> <xs:enumeration value="vn117"/> <xs:enumeration value="vn118"/> <xs:enumeration value="vn119"/> <xs:enumeration value="vn120"/>
+      <xs:enumeration value="vn121"/> <xs:enumeration value="vn122"/> <xs:enumeration value="vn123"/> <xs:enumeration value="vn124"/> <xs:enumeration value="vn125"/> <xs:enumeration value="vn126"/>
+      <xs:enumeration value="vn127"/> <xs:enumeration value="vn128"/> <xs:enumeration value="vn129"/> <xs:enumeration value="vn130"/> <xs:enumeration value="vn131"/> <xs:enumeration value="vn132"/>
+      <xs:enumeration value="vn133"/> <xs:enumeration value="vn134"/> <xs:enumeration value="vn135"/> <xs:enumeration value="vn136"/> <xs:enumeration value="vn137"/> <xs:enumeration value="vn138"/>
+      <xs:enumeration value="vn139"/> <xs:enumeration value="vn140"/> <xs:enumeration value="vn141"/> <xs:enumeration value="vn142"/> <xs:enumeration value="vn143"/> <xs:enumeration value="vn144"/>
+      <xs:enumeration value="vn145"/> <xs:enumeration value="vn146"/> <xs:enumeration value="vn147"/> <xs:enumeration value="vn148"/> <xs:enumeration value="vn149"/> <xs:enumeration value="vn150"/>
+      <xs:enumeration value="vn151"/> <xs:enumeration value="vn152"/> <xs:enumeration value="vn153"/> <xs:enumeration value="vn154"/> <xs:enumeration value="vn155"/> <xs:enumeration value="vn156"/>
+      <xs:enumeration value="vn157"/> <xs:enumeration value="vn158"/> <xs:enumeration value="vn159"/> <xs:enumeration value="vn160"/> <xs:enumeration value="vn161"/> <xs:enumeration value="vn162"/>
+      <xs:enumeration value="vn163"/> <xs:enumeration value="vn164"/> <xs:enumeration value="vn165"/> <xs:enumeration value="vn166"/> <xs:enumeration value="vn167"/> <xs:enumeration value="vn168"/>
+      <xs:enumeration value="vn169"/> <xs:enumeration value="vn170"/> <xs:enumeration value="vn171"/> <xs:enumeration value="vn172"/> <xs:enumeration value="vn173"/> <xs:enumeration value="vn174"/>
+      <xs:enumeration value="vn175"/> <xs:enumeration value="vn176"/> <xs:enumeration value="vn177"/> <xs:enumeration value="vn178"/> <xs:enumeration value="vn179"/> <xs:enumeration value="vn180"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="side_marker">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="near"/><xs:enumeration value="far"/>
+      <xs:enumeration value="mid"/><xs:enumeration value="nil"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="capacity_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="self"/><xs:enumeration value="proxy"/><xs:enumeration value="relay"/>
+      <xs:enumeration value="pool"/><xs:enumeration value="other"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="category_code">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="cat_a"/><xs:enumeration value="cat_b"/><xs:enumeration value="cat_c"/>
+      <xs:enumeration value="cat_d"/><xs:enumeration value="cat_e"/><xs:enumeration value="cat_f"/>
+      <xs:enumeration value="cat_g"/><xs:enumeration value="cat_h"/><xs:enumeration value="cat_i"/>
+      <xs:enumeration value="cat_j"/><xs:enumeration value="cat_k"/><xs:enumeration value="cat_l"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="settle_style">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="cash_out"/><xs:enumeration value="goods_out"/>
+      <xs:enumeration value="net_out"/><xs:enumeration value="split_out"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="option_style">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="early"/><xs:enumeration value="late"/>
+      <xs:enumeration value="mixed"/><xs:enumeration value="fixed"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="delivery_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="pickup"/><xs:enumeration value="courier"/>
+      <xs:enumeration value="freight"/><xs:enumeration value="digital"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="decision_role">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="owner"/><xs:enumeration value="agent"/><xs:enumeration value="panel"/>
+      <xs:enumeration value="robot"/><xs:enumeration value="unset"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="exec_role">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="maker"/><xs:enumeration value="taker"/>
+      <xs:enumeration value="broker"/><xs:enumeration value="runner"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="stance_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="flat"/><xs:enumeration value="up"/>
+      <xs:enumeration value="down"/><xs:enumeration value="unknown"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="extra_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="extra_a"/><xs:enumeration value="extra_b"/>
+      <xs:enumeration value="extra_c"/><xs:enumeration value="extra_d"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="money_code">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="mk01"/><xs:enumeration value="mk02"/><xs:enumeration value="mk03"/>
+      <xs:enumeration value="mk04"/><xs:enumeration value="mk05"/><xs:enumeration value="mk06"/>
+      <xs:enumeration value="mk07"/><xs:enumeration value="mk08"/><xs:enumeration value="mk09"/>
+      <xs:enumeration value="mk10"/><xs:enumeration value="mk11"/><xs:enumeration value="mk12"/>
+      <xs:enumeration value="mk13"/><xs:enumeration value="mk14"/><xs:enumeration value="mk15"/>
+      <xs:enumeration value="mk16"/><xs:enumeration value="mk17"/><xs:enumeration value="mk18"/>
+      <xs:enumeration value="mk19"/><xs:enumeration value="mk20"/><xs:enumeration value="mk21"/>
+      <xs:enumeration value="mk22"/><xs:enumeration value="mk23"/><xs:enumeration value="mk24"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="basis_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="per_unit"/><xs:enumeration value="per_lot"/>
+      <xs:enumeration value="per_day"/><xs:enumeration value="per_year"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="grade_kind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="low"/><xs:enumeration value="medium"/>
+      <xs:enumeration value="high"/><xs:enumeration value="top"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ===================== pattern types ===================== -->
+  <xs:simpleType name="ref_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="[a-z]{3}-[0-9]{6}-[a-z]{2}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="org_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="[a-z0-9]{20}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="instrument_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="q[a-z]{3}-[0-9]{4}-[a-z0-9]{3}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="tag_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="[a-z][a-z0-9_]{2,15}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="code_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="[A-Z]{2}[0-9]{3}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="version_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="v[0-9]{1,3}(\.[0-9]{1,3}){0,2}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="linkage_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="(alpha|beta|gamma|delta)-[0-9]{4,8}"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="digest_pattern">
+    <xs:restriction base="xs:string"><xs:pattern value="[a-f0-9]{32}"/></xs:restriction>
+  </xs:simpleType>
+
+  <!-- ===================== decimal types ===================== -->
+  <xs:simpleType name="money_decimal">
+    <xs:restriction base="xs:decimal"><xs:totalDigits value="18"/><xs:fractionDigits value="5"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="volume_decimal">
+    <xs:restriction base="xs:decimal"><xs:totalDigits value="20"/><xs:fractionDigits value="6"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="percent_decimal">
+    <xs:restriction base="xs:decimal"><xs:totalDigits value="12"/><xs:fractionDigits value="8"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="ratio_decimal">
+    <xs:restriction base="xs:decimal"><xs:totalDigits value="18"/><xs:fractionDigits value="17"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="notional_decimal">
+    <xs:restriction base="xs:decimal"><xs:totalDigits value="24"/><xs:fractionDigits value="2"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="strike_decimal">
+    <xs:restriction base="xs:decimal"><xs:totalDigits value="16"/><xs:fractionDigits value="9"/></xs:restriction>
+  </xs:simpleType>
+
+  <!-- ===================== length-restricted string types ===================== -->
+  <xs:simpleType name="name_text">
+    <xs:restriction base="xs:string"><xs:minLength value="1"/><xs:maxLength value="60"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="label_text">
+    <xs:restriction base="xs:string"><xs:minLength value="1"/><xs:maxLength value="35"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="note_text">
+    <xs:restriction base="xs:string"><xs:minLength value="1"/><xs:maxLength value="140"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="short_text">
+    <xs:restriction base="xs:string"><xs:minLength value="2"/><xs:maxLength value="12"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="fixed_text">
+    <xs:restriction base="xs:string"><xs:length value="8"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="long_text">
+    <xs:restriction base="xs:string"><xs:minLength value="1"/><xs:maxLength value="256"/></xs:restriction>
+  </xs:simpleType>
+
+  <!-- ===================== leaf types that carry one attribute each ===================== -->
+  <xs:complexType name="money_amount_type">
+    <xs:simpleContent>
+      <xs:extension base="money_decimal">
+        <xs:attribute name="currency_code" type="money_code" use="required"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="quantity_type">
+    <xs:simpleContent>
+      <xs:extension base="volume_decimal">
+        <xs:attribute name="unit_code" type="unit_label" use="required"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="rate_type">
+    <xs:simpleContent>
+      <xs:extension base="percent_decimal">
+        <xs:attribute name="rate_basis" type="basis_kind" use="required"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="tagged_text_type">
+    <xs:simpleContent>
+      <xs:extension base="label_text">
+        <xs:attribute name="source_tag" type="tag_pattern" use="optional"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="versioned_code_type">
+    <xs:simpleContent>
+      <xs:extension base="code_pattern">
+        <xs:attribute name="version_label" type="version_pattern" use="optional"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+  <xs:complexType name="graded_text_type">
+    <xs:simpleContent>
+      <xs:extension base="long_text">
+        <xs:attribute name="grade_mark" type="grade_kind" use="optional"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+  <!-- ===================== the header block and the transaction record ===================== -->
+  <xs:complexType name="header_type">
+    <xs:sequence>
+      <xs:element name="message_id" type="xs:string"/>
+      <xs:element name="created_at" type="xs:dateTime"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="record_type">
+    <xs:sequence>
+
+      <!-- identification: f01 to f04 -->
+      <xs:element name="marking">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f01_record_ref" type="ref_pattern"/>
+            <xs:element name="f02_revision_no" type="xs:unsignedShort"/>
+            <xs:element name="f03_batch_slot" type="fixed_text" minOccurs="0"/>
+            <xs:element name="f04_origin_label" type="origin_kind" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- buyer side: f05 to f13 -->
+      <xs:element name="buyer_side">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f05_party_kind" type="party_kind"/>
+            <xs:element name="identity">
+              <xs:complexType>
+                <xs:choice>
+                  <xs:element name="person">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="f06_given_name" type="name_text"/>
+                        <xs:element name="f07_family_name" type="name_text"/>
+                        <xs:element name="f08_birth_date" type="xs:date"/>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                  <xs:element name="organisation">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="f09_org_code" type="org_pattern"/>
+                        <xs:element name="f10_org_label" type="label_text"/>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                </xs:choice>
+              </xs:complexType>
+            </xs:element>
+            <xs:element name="f11_zone" type="zone_code" minOccurs="0"/>
+            <xs:element name="f12_contact_tag" type="tagged_text_type" minOccurs="0"/>
+            <xs:element name="f13_reference_note" type="note_text" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- seller side: f14 to f22 -->
+      <xs:element name="seller_side">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f14_party_kind" type="party_kind"/>
+            <xs:element name="identity">
+              <xs:complexType>
+                <xs:choice>
+                  <xs:element name="person">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="f15_given_name" type="name_text"/>
+                        <xs:element name="f16_family_name" type="name_text"/>
+                        <xs:element name="f17_birth_date" type="xs:date"/>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                  <xs:element name="organisation">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="f18_org_code" type="org_pattern"/>
+                        <xs:element name="f19_org_label" type="label_text"/>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                </xs:choice>
+              </xs:complexType>
+            </xs:element>
+            <xs:element name="f20_zone" type="zone_code" minOccurs="0"/>
+            <xs:element name="f21_contact_tag" type="tagged_text_type" minOccurs="0"/>
+            <xs:element name="f22_reference_note" type="note_text" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- transmission: f23 to f25 -->
+      <xs:element name="transmission" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f23_forwarder_label" type="label_text"/>
+            <xs:element name="f24_forwarded_at" type="xs:dateTime" minOccurs="0"/>
+            <xs:element name="f25_route_tag" type="tag_pattern" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- trade details: f26 to f37 -->
+      <xs:element name="trade_details">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f26_trade_time" type="xs:dateTime"/>
+            <xs:element name="f27_venue" type="venue_code"/>
+            <xs:element name="price">
+              <xs:complexType>
+                <xs:choice>
+                  <xs:element name="f28_price_amount" type="money_amount_type"/>
+                  <xs:element name="f29_price_rate" type="rate_type"/>
+                  <xs:element name="f30_price_pending" type="xs:boolean"/>
+                </xs:choice>
+              </xs:complexType>
+            </xs:element>
+            <xs:element name="f31_quantity" type="quantity_type"/>
+            <xs:element name="f32_side" type="side_marker"/>
+            <xs:element name="f33_capacity" type="capacity_kind"/>
+            <xs:element name="f34_settle_date" type="xs:date" minOccurs="0"/>
+            <xs:element name="f35_notional" type="notional_decimal" minOccurs="0"/>
+            <xs:element name="f36_settle_style" type="settle_style" minOccurs="0"/>
+            <xs:element name="f37_trade_note" type="note_text" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- instrument: f38 to f46, with the first repeating group -->
+      <xs:element name="instrument">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f38_instrument_ref" type="instrument_pattern"/>
+            <xs:element name="f39_category" type="category_code"/>
+            <xs:element name="f40_label" type="label_text" minOccurs="0"/>
+            <xs:element name="f41_issue_date" type="xs:date" minOccurs="0"/>
+            <xs:element name="alias" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="f42_alias_value" type="short_text"/>
+                  <xs:element name="f43_alias_scheme" type="code_pattern"/>
+                </xs:sequence>
+              </xs:complexType>
+            </xs:element>
+            <xs:element name="f44_listing_flag" type="xs:boolean" minOccurs="0"/>
+            <xs:element name="f45_digest_code" type="digest_pattern" minOccurs="0"/>
+            <xs:element name="f46_remark" type="note_text" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- derivative fields: f47 to f54, with the second repeating group -->
+      <xs:element name="derivative" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f47_expiry_date" type="xs:date"/>
+            <xs:element name="f48_strike" type="money_amount_type" minOccurs="0"/>
+            <xs:element name="f49_option_style" type="option_style" minOccurs="0"/>
+            <xs:element name="underlying" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="f50_underlying_ref" type="instrument_pattern"/>
+                  <xs:element name="f51_underlying_weight" type="ratio_decimal"/>
+                </xs:sequence>
+              </xs:complexType>
+            </xs:element>
+            <xs:element name="f52_delivery_kind" type="delivery_kind" minOccurs="0"/>
+            <xs:element name="f53_barrier_level" type="strike_decimal" minOccurs="0"/>
+            <xs:element name="f54_contract_ref" type="versioned_code_type" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- decision maker: f55 to f58 -->
+      <xs:element name="decision_maker" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f55_decision_role" type="decision_role"/>
+            <xs:element name="f56_person_link" type="linkage_pattern" minOccurs="0"/>
+            <xs:element name="f57_decision_label" type="name_text" minOccurs="0"/>
+            <xs:element name="f58_decision_tag" type="tagged_text_type" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- execution: f59 to f61 -->
+      <xs:element name="execution" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f59_exec_role" type="exec_role"/>
+            <xs:element name="f60_exec_link" type="linkage_pattern" minOccurs="0"/>
+            <xs:element name="f61_exec_label" type="graded_text_type" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <!-- stance: f62 -->
+      <xs:element name="f62_stance" type="stance_kind" minOccurs="0"/>
+
+      <!-- other flags: f63 to f65 -->
+      <xs:element name="flags" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="f63_late_marker" type="xs:boolean" minOccurs="0"/>
+            <xs:element name="f64_extra_kind" type="extra_kind" minOccurs="0"/>
+            <xs:element name="f65_comment" type="note_text" minOccurs="0"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- ===================== the file: a header block, then a set of transactions ===================== -->
+  <xs:complexType name="file_type">
+    <xs:sequence>
+      <xs:element name="file_header" type="header_type"/>
+      <xs:element name="transactions">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="transaction_record" type="record_type" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:element name="transaction_file" type="file_type"/>
+</xs:schema>

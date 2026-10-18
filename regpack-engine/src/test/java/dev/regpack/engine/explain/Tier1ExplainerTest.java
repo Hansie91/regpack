@@ -15,7 +15,9 @@ import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.model.decision.PathStep;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -49,6 +51,55 @@ class Tier1ExplainerTest {
             legs,
             INPUT);
     return new DecisionRecord(new DecisionId(7), 1, Optional.empty(), body);
+  }
+
+  private static DecisionRecord withAttributes(Map<String, String> attributes) {
+    DecisionBody plain =
+        record(
+                Outcome.REPORT,
+                "SAMPLE.N08.IN_SCOPE",
+                "N08",
+                List.of(),
+                List.of("R-SET"),
+                List.of(new PathStep("R-SET", true, 3)),
+                List.of(),
+                List.of(Leg.MARKET))
+            .body();
+    DecisionBody body =
+        new DecisionBody(
+            plain.eventIdentity(),
+            plain.regime(),
+            plain.decisionContextId(),
+            plain.asAt(),
+            plain.evaluatedAt(),
+            plain.outcome(),
+            plain.flags(),
+            plain.reasonCode(),
+            plain.node(),
+            plain.ruleIdsHit(),
+            plain.path(),
+            plain.citations(),
+            plain.legs(),
+            plain.inputDigest(),
+            attributes);
+    return new DecisionRecord(new DecisionId(7), 1, Optional.empty(), body);
+  }
+
+  @Test
+  void rendersAttributesOnlyWhenPresent() {
+    String without = Tier1Explainer.explain(withAttributes(Map.of()));
+    assertThat(without).doesNotContain("Attributes");
+
+    // the line comes after Legs, the names are sorted whatever the order of the map
+    Map<String, String> unsorted = new LinkedHashMap<>();
+    unsorted.put("zone", "B");
+    unsorted.put("action", "NEWT");
+    String with = Tier1Explainer.explain(withAttributes(unsorted));
+    assertThat(with)
+        .contains("Legs: MARKET\nAttributes: action=NEWT, zone=B\nInput digest: ")
+        .doesNotEndWith("\n");
+    // nothing else changes: with the line removed the text is the text without attributes
+    assertThat(with.replace("Attributes: action=NEWT, zone=B\n", "")).isEqualTo(without);
   }
 
   @Test
