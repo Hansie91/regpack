@@ -50,4 +50,6 @@ approved-schema-sha256:
 
 ## Deviations from the plan
 
-None yet.
+None to the plan so far. Limits recorded by tasks:
+
+- **T3 (OI-2 option A, D-L1): the circuit epoch is process-local.** `RuleCircuit.epoch()` lives in the `RuleCircuit` object, so after a restart it is 0 again: a close before the restart is invisible to the context and the re-evaluation of an `EXEC_CIRCUIT_OPEN` decision is a `NOOP_REDELIVERY` again. A pack rollback (P9b) has the same hole. P2a open item 1 therefore stays open until the epoch is durable: the per-pack-digest table `pack_circuit (pack_digest PK, epoch)`, read when the `RuleCircuit` is created and incremented in the transaction that records the close, is a P3d table. A batch pinned at an older epoch is refused as stale by `PackRegime` and must be pinned again (the batch driver is P7a).

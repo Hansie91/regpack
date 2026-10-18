@@ -187,6 +187,62 @@ class PackRegimeTest {
         .hasMessageContaining("differs");
   }
 
+  private static PackRegime createWithCircuit(RuleCircuit circuit) {
+    return PackRegime.create(
+        SamplePacks.load(), REPORT, EXECUTOR, Rulings.load(), Optional.of(circuit));
+  }
+
+  private static void openAndClose(RuleCircuit circuit, String ruleId) {
+    circuit.record(ruleId, true);
+    assertThat(circuit.isOpen(ruleId)).isTrue();
+    circuit.close(ruleId);
+  }
+
+  @Test
+  void decisionContextCarriesTheCurrentCircuitEpoch() {
+    RuleCircuit circuit = new RuleCircuit(1, 50);
+    PackRegime regime = createWithCircuit(circuit);
+    DecisionContext before = regime.decisionContext();
+    assertThat(before.circuitEpoch()).isZero();
+    assertThat(before).isEqualTo(create(SamplePacks.load(), REPORT).decisionContext());
+    assertThat(before.id()).isEqualTo(create(SamplePacks.load(), REPORT).decisionContext().id());
+
+    openAndClose(circuit, "r1");
+    DecisionContext afterOne = regime.decisionContext();
+    openAndClose(circuit, "r2");
+    DecisionContext afterTwo = regime.decisionContext();
+
+    assertThat(afterOne.circuitEpoch()).isEqualTo(1);
+    assertThat(afterTwo.circuitEpoch()).isEqualTo(2);
+    assertThat(afterOne.id()).isNotEqualTo(before.id());
+    assertThat(afterTwo.id()).isNotEqualTo(afterOne.id());
+    assertThat(afterOne.packDigest()).isEqualTo(before.packDigest());
+    assertThat(afterOne.engineBuild()).isEqualTo(before.engineBuild());
+    assertThat(afterOne.executor()).isEqualTo(before.executor());
+    DecisionBody stamped = decide(regime, execution(AssetClass.EQUITY));
+    assertThat(stamped.decisionContextId()).isEqualTo(afterTwo.id());
+  }
+
+  @Test
+  void aCallerContextFromBeforeTheCloseIsRefusedAsStale() {
+    RuleCircuit circuit = new RuleCircuit(1, 50);
+    PackRegime regime = createWithCircuit(circuit);
+    DecisionContext beforeClose = regime.decisionContext();
+    CanonicalExecution event = execution(AssetClass.EQUITY);
+    assertThat(regime.evaluate(event, contextOf(regime, beforeClose)).decision()).isNotNull();
+
+    openAndClose(circuit, "r1");
+
+    assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, beforeClose)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("stale decision context");
+    assertThatThrownBy(() -> regime.evaluateTraced(event, contextOf(regime, beforeClose)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("stale decision context");
+    assertThat(regime.evaluate(event, contextOf(regime, regime.decisionContext())).decision())
+        .isNotNull();
+  }
+
   private static DecisionContext with(
       DecisionContext own, Sha256 digest, String build, String executor) {
     return new DecisionContext(

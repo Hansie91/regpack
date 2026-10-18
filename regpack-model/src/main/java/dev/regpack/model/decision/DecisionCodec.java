@@ -23,6 +23,9 @@ public final class DecisionCodec {
     map.put("mappingVersion", context.mappingVersion());
     map.put("engineBuild", context.engineBuild());
     map.put("executor", context.executor());
+    if (context.circuitEpoch() > 0) {
+      map.put("circuitEpoch", context.circuitEpoch());
+    }
     return map;
   }
 

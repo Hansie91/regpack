@@ -228,6 +228,61 @@ class DecisionTypesTest {
         .isEqualTo("2c82bc6e73b568970a7152dcfd075c866a01dec5bc6c74d707e950e790a7be84");
   }
 
+  private static DecisionContext contextWithEpoch(String engineBuild, long circuitEpoch) {
+    return new DecisionContext(
+        Sha256.ofUtf8("pack"),
+        Optional.empty(),
+        List.of("pin-1"),
+        List.of("ref-1"),
+        List.of(),
+        "fp-1",
+        "map-1",
+        engineBuild,
+        "interpreter",
+        circuitEpoch);
+  }
+
+  @Test
+  void epochZeroLeavesEveryExistingContextIdUnchanged() {
+    DecisionContext zero = contextWithEpoch("b1", 0);
+
+    assertThat(zero.id().hex())
+        .isEqualTo("2c82bc6e73b568970a7152dcfd075c866a01dec5bc6c74d707e950e790a7be84");
+    assertThat(DecisionCodec.contextToMap(zero)).doesNotContainKey("circuitEpoch");
+    assertThat(zero.circuitEpoch()).isZero();
+  }
+
+  @Test
+  void oldConstructorMeansEpochZero() {
+    assertThat(context("b1").circuitEpoch()).isZero();
+    assertThat(context("b1")).isEqualTo(contextWithEpoch("b1", 0));
+    assertThat(context("b1").id()).isEqualTo(contextWithEpoch("b1", 0).id());
+  }
+
+  @Test
+  void aPositiveEpochChangesTheContextId() {
+    assertThat(contextWithEpoch("b1", 1).id()).isNotEqualTo(contextWithEpoch("b1", 0).id());
+    assertThat(contextWithEpoch("b1", 1).id()).isNotEqualTo(contextWithEpoch("b1", 2).id());
+    assertThat(contextWithEpoch("b1", 2).id()).isEqualTo(contextWithEpoch("b1", 2).id());
+  }
+
+  @Test
+  void epochAppearsInTheCanonicalContextOnlyWhenPositive() {
+    assertThat(DecisionCodec.contextToMap(contextWithEpoch("b1", 0)))
+        .doesNotContainKey("circuitEpoch");
+    assertThat(DecisionCodec.contextToMap(contextWithEpoch("b1", 3)))
+        .containsEntry("circuitEpoch", 3L);
+    assertThat(Json.canonical(DecisionCodec.contextToMap(contextWithEpoch("b1", 3))))
+        .contains("\"circuitEpoch\":3,");
+  }
+
+  @Test
+  void negativeEpochIsRejected() {
+    assertThatThrownBy(() -> contextWithEpoch("b1", -1))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("circuitEpoch");
+  }
+
   // The two literals below were printed from the unchanged 14-component model (plan T15 step 1a).
   private static final String PRE_ATTRIBUTES_JSON =
       "{\"asAt\":\"2026-10-09T09:30:00.000000Z\",\"citations\":[{\"provisionPath\":\"art26\","

@@ -60,7 +60,7 @@ public final class PackRegime implements RegimeProvider {
   private final PackManifest manifest;
   private final Executor executor;
   private final Optional<RuleCircuit> circuit;
-  private final DecisionContext decisionContext;
+  private final DecisionContext baseContext;
   private final Map<String, List<Citation>> citations;
   private final List<Citation> catchAllCitations;
 
@@ -74,7 +74,7 @@ public final class PackRegime implements RegimeProvider {
     this.manifest = pack.manifest();
     this.executor = executor;
     this.circuit = circuit;
-    this.decisionContext = context;
+    this.baseContext = context;
     Map<String, List<Citation>> resolved = new HashMap<>();
     for (CompiledPack.Table table : compiled.tables()) {
       for (CompiledPack.Row row : table.rows()) {
@@ -184,9 +184,28 @@ public final class PackRegime implements RegimeProvider {
     return new CostBudget(compiled.budget().perRecordUnits());
   }
 
-  /** The context every decision of this provider is stamped with. */
+  /**
+   * The context every decision of this provider is stamped with now: the base context with the
+   * current {@link RuleCircuit#epoch()} (INTERP-3, option A), or epoch 0 for a provider without a
+   * circuit. A close of an open rule changes it, so a caller takes it again for every batch, and a
+   * context from before a close is refused as stale.
+   */
   public DecisionContext decisionContext() {
-    return decisionContext;
+    return withEpoch(circuit.map(RuleCircuit::epoch).orElse(0L));
+  }
+
+  private DecisionContext withEpoch(long epoch) {
+    return new DecisionContext(
+        baseContext.packDigest(),
+        baseContext.overlayDigest(),
+        baseContext.interpretationPins(),
+        baseContext.referenceSnapshotIds(),
+        baseContext.enrichmentSnapshotIds(),
+        baseContext.firmProfileVersion(),
+        baseContext.mappingVersion(),
+        baseContext.engineBuild(),
+        baseContext.executor(),
+        epoch);
   }
 
   public CompiledPack compiled() {
@@ -229,7 +248,8 @@ public final class PackRegime implements RegimeProvider {
       Optional<RuleCircuit> poisonCircuit) {
     Objects.requireNonNull(event, "event");
     Objects.requireNonNull(context, "context");
-    requireOwnContext(context.decisionContext());
+    // one snapshot of the circuit epoch for the whole call: the check and the stamp agree
+    requireOwnContext(context.decisionContext(), decisionContext());
     CanonicalExecution execution =
         switch (event) {
           case CanonicalExecution e -> e;
@@ -306,31 +326,43 @@ public final class PackRegime implements RegimeProvider {
    * provider did not make. The overlay, pins, Firm Profile and snapshots are placeholders in P2a
    * and so are the provider's own too: until P2a-2 relaxes the components that really come from the
    * caller, the whole context must equal {@link #decisionContext()} and every decision is stamped
-   * with it.
+   * with it. The circuit epoch is a fact of this provider's circuit (INTERP-3): a context from
+   * before a close of an open rule is refused as stale, and the batch that holds it must be pinned
+   * again.
+   *
+   * @param current the snapshot taken at the start of the call
    */
-  private void requireOwnContext(DecisionContext given) {
-    if (!given.packDigest().equals(decisionContext.packDigest())) {
+  private void requireOwnContext(DecisionContext given, DecisionContext current) {
+    if (!given.packDigest().equals(current.packDigest())) {
       throw new IllegalArgumentException(
           "the decision context names pack digest "
               + given.packDigest().hex()
               + " but this provider runs "
-              + decisionContext.packDigest().hex());
+              + current.packDigest().hex());
     }
-    if (!given.engineBuild().equals(decisionContext.engineBuild())) {
+    if (!given.engineBuild().equals(current.engineBuild())) {
       throw new IllegalArgumentException(
           "the decision context names engine build '"
               + bounded(given.engineBuild())
               + "' but this provider is "
-              + decisionContext.engineBuild());
+              + current.engineBuild());
     }
-    if (!given.executor().equals(decisionContext.executor())) {
+    if (!given.executor().equals(current.executor())) {
       throw new IllegalArgumentException(
           "the decision context names executor '"
               + bounded(given.executor())
               + "' but this provider uses "
-              + decisionContext.executor());
+              + current.executor());
     }
-    if (!given.equals(decisionContext)) {
+    if (given.circuitEpoch() != current.circuitEpoch()) {
+      throw new IllegalArgumentException(
+          "stale decision context: it names circuit epoch "
+              + given.circuitEpoch()
+              + " but this provider is at epoch "
+              + current.circuitEpoch()
+              + "; take decisionContext() again");
+    }
+    if (!given.equals(current)) {
       throw new IllegalArgumentException(
           "the decision context differs from the one of this provider in its overlay, pins,"
               + " snapshots, Firm Profile or mapping version (P2a-2 supplies these)");
