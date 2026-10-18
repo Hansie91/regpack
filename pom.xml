@@ -18,6 +18,7 @@
     <module>regpack-testkit</module>
     <module>regpack-bench</module>
     <module>regpack-inmemory</module>
+    <module>regpack-postgres</module>
     <module>regpack-engine</module>
     <module>regpack-app</module>
   </modules>
