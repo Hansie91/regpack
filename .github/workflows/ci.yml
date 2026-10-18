@@ -2,10 +2,19 @@ name: ci
 
 on:
   push:
-    branches: [main, 'p0/**', 'p1a/**', 'p2a/**']
+    branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      capacity:
+        description: Run the ledger capacity job (P3a T21; no effect until that job exists)
+        type: boolean
+        default: false
+      confirm_downloads:
+        description: Confirm that the capacity job may pull its pinned images (P3a T21)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -121,6 +130,51 @@ jobs:
           set -euo pipefail
           ./mvnw -DskipTests -Dspotless.check.skip=true install
           ./mvnw -f spikes/pom.xml verify license:aggregate-add-third-party -DincludeTestScope=true
+
+  ledger-pg:
+    name: ledger (real PostgreSQL 18)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres
+      REGPACK_PG_REQUIRED: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - run: ./mvnw -DskipTests -Dspotless.check.skip=true install -pl regpack-postgres -am
+      - run: ./mvnw verify -pl regpack-postgres
+      - name: Real-store traceability
+        if: always()
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates traceability --file docs/traceability.md --root . --scan regpack-postgres/target --realstore only
+      - name: Test tallies and failure annotations
+        if: always()
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-postgres/target
+      - name: Upload ledger test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ledger-pg-reports
+          path: |
+            regpack-postgres/target/surefire-reports/TEST-*.xml
+            regpack-postgres/target/failsafe-reports/TEST-*.xml
+          if-no-files-found: warn
 
   smoke-linux:
     name: smoke (linux, systemd)

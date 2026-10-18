@@ -182,7 +182,8 @@ class PackagingFilesTest {
   }
 
   @Test
-  void ciWorkflowHasTheSixJobsReadOnlyPermissionsAndMatchingArtefactNames() throws IOException {
+  void ciWorkflowHasTheExpectedJobsReadOnlyPermissionsAndMatchingArtefactNames()
+      throws IOException {
     String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
 
     assertThat(ci).containsPattern("(?m)^permissions:\\n  contents: read$");
@@ -197,6 +198,7 @@ class PackagingFilesTest {
             "build",
             "determinism-compare",
             "spikes",
+            "ledger-pg",
             "smoke-linux",
             "smoke-windows",
             "smoke-kubernetes");
@@ -222,6 +224,75 @@ class PackagingFilesTest {
     // compare step reads both files of both systems and fails on a difference, an empty or a
     // missing file), with broken copies and an execution, in CiDeterminismCompareTest.
     assertThat(CiCompareStep.problems(ci)).isEmpty();
+  }
+
+  /** The lines of the job {@code job} of the workflow {@code ci}: everything below its key. */
+  private static List<String> jobLines(String ci, String job) {
+    List<String> lines = List.of(ci.split("\n", -1));
+    int start = lines.indexOf("  " + job + ":");
+    assertThat(start).as("job " + job).isNotNegative();
+    int end = lines.size();
+    for (int i = start + 1; i < lines.size(); i++) {
+      if (lines.get(i).matches("  [a-z][a-z-]*:")) {
+        end = i;
+        break;
+      }
+    }
+    return lines.subList(start + 1, end);
+  }
+
+  /**
+   * AP-6 and D-L8: the real-store job pulls one service image pinned by digest, publishes its port
+   * on the runner loopback only, runs on a GitHub-hosted runner and holds no credential anywhere in
+   * the workflow (the service uses trust authentication).
+   */
+  @Test
+  void ledgerJobUsesAPinnedServiceImageAndNoPasswordInTheWorkflow() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    List<String> job = jobLines(ci, "ledger-pg");
+
+    // no key that names a password, in any job, and no password inside the URL
+    assertThat(ci).doesNotContainPattern("(?im)^\\s*(?:-\\s*)?[a-z_]*password[a-z_]*\\s*:");
+    assertThat(ci).doesNotContainPattern("(?i)[?&]password=");
+    assertThat(ci).doesNotContainPattern("jdbc:postgresql://[^/\\s]*@");
+
+    List<String> images = job.stream().filter(l -> l.strip().startsWith("image:")).toList();
+    assertThat(images).hasSize(1);
+    assertThat(images.get(0).strip())
+        .isEqualTo(
+            "image: postgres:18.6-trixie@sha256:"
+                + "74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336");
+    assertThat(images.get(0)).containsPattern("@sha256:[0-9a-f]{64}$");
+
+    int ports = -1;
+    for (int i = 0; i < job.size(); i++) {
+      if (job.get(i).strip().equals("ports:")) {
+        ports = i;
+      }
+    }
+    assertThat(ports).as("ports: line").isNotNegative();
+    List<String> published = new java.util.ArrayList<>();
+    for (int i = ports + 1; i < job.size() && job.get(i).strip().startsWith("- "); i++) {
+      published.add(job.get(i).strip());
+    }
+    assertThat(published).isNotEmpty().allMatch(p -> p.startsWith("- 127.0.0.1:"));
+
+    List<String> runsOn = job.stream().filter(l -> l.strip().startsWith("runs-on:")).toList();
+    assertThat(runsOn).hasSize(1);
+    assertThat(runsOn.get(0).strip()).isEqualTo("runs-on: ubuntu-24.04");
+
+    // the real store is required, so a missing server fails the job instead of skipping its tests
+    assertThat(job).anyMatch(l -> l.strip().equals("REGPACK_PG_REQUIRED: 'true'"));
+    assertThat(job).anyMatch(l -> l.strip().equals("POSTGRES_HOST_AUTH_METHOD: trust"));
+    assertThat(job)
+        .anyMatch(
+            l ->
+                l.strip()
+                    .equals(
+                        "REGPACK_PG_URL:"
+                            + " jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres"));
+    // the report artefact is not the distribution
+    assertThat(job).anyMatch(l -> l.strip().equals("name: ledger-pg-reports"));
   }
 
   @Test

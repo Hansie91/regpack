@@ -45,47 +45,76 @@ public final class PgTestDatabase {
       if (shared != null) {
         return shared;
       }
-      if (unavailableReason != null) {
-        // the first check already failed: later calls do not wait for the connect timeout again
-        unavailable(unavailableReason);
-      }
-      String url = System.getenv(URL_VARIABLE);
-      if (url == null || url.isBlank()) {
-        unavailable(URL_VARIABLE + " is not set");
-      }
-      PGSimpleDataSource candidate = new PGSimpleDataSource();
-      try {
-        candidate.setUrl(url);
-      } catch (IllegalArgumentException e) {
-        // the driver's message repeats the whole URL, password included: use neither it nor the
-        // cause
-        unavailable(URL_VARIABLE + " is set but is not a valid JDBC URL");
-      }
-      try (Connection connection = candidate.getConnection()) {
-        if (connection.isValid(10)) {
-          shared = candidate;
-          return candidate;
+      if (unavailableReason == null) {
+        String url = System.getenv(URL_VARIABLE);
+        String reason = probe(url);
+        if (reason == null) {
+          shared = connect(url);
+          return shared;
         }
-        unavailable(URL_VARIABLE + " is set but the connection is not valid");
-      } catch (SQLException e) {
-        unavailable(
-            URL_VARIABLE
-                + " is set but the server is unreachable (sqlstate="
-                + e.getSQLState()
-                + ")");
+        unavailableReason = reason;
       }
-      throw new IllegalStateException("unreachable: unavailable() always throws");
+      // the first check already failed: later calls do not wait for the connect timeout again
+      return unavailable(unavailableReason, required());
     }
   }
 
-  private static void unavailable(String reason) {
-    if (unavailableReason == null) {
-      unavailableReason = reason;
+  /**
+   * The pure decision of the harness: a data source for {@code url} when the server answers;
+   * otherwise a failure naming {@code REGPACK_PG_REQUIRED} when {@code required} is set, and a skip
+   * by assumption when it is not. It reads no environment variable and keeps no state, so it can be
+   * tested without a server (with an unreachable URL). The message never repeats the URL, which may
+   * carry a password.
+   */
+  public static DataSource requireOrAbort(String url, boolean required) {
+    String reason = probe(url);
+    if (reason == null) {
+      return connect(url);
     }
-    if (required()) {
+    return unavailable(reason, required);
+  }
+
+  /** Null when the server answers; otherwise the reason it cannot be used, without the URL. */
+  private static String probe(String url) {
+    if (url == null || url.isBlank()) {
+      return URL_VARIABLE + " is not set";
+    }
+    PGSimpleDataSource candidate = new PGSimpleDataSource();
+    try {
+      candidate.setUrl(url);
+    } catch (IllegalArgumentException e) {
+      // the driver's message repeats the whole URL, password included: use neither it nor the
+      // cause
+      return URL_VARIABLE + " is set but is not a valid JDBC URL";
+    }
+    try (Connection connection = candidate.getConnection()) {
+      if (connection.isValid(10)) {
+        return null;
+      }
+      return URL_VARIABLE + " is set but the connection is not valid";
+    } catch (SQLException e) {
+      return URL_VARIABLE
+          + " is set but the server is unreachable (sqlstate="
+          + e.getSQLState()
+          + ")";
+    }
+  }
+
+  private static DataSource connect(String url) {
+    PGSimpleDataSource dataSource = new PGSimpleDataSource();
+    try {
+      dataSource.setUrl(url);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalStateException(URL_VARIABLE + " is not a valid JDBC URL");
+    }
+    return dataSource;
+  }
+
+  private static DataSource unavailable(String reason, boolean required) {
+    if (required) {
       Assertions.fail(REQUIRED_VARIABLE + "=true and " + reason);
     }
-    Assumptions.abort("real-store test skipped: " + reason);
+    return Assumptions.abort("real-store test skipped: " + reason);
   }
 
   /** A schema name unique per JVM: the process id and a counter, matching {@link SqlIdentifier}. */
