@@ -56,7 +56,7 @@ The six constraint mutants of `PgSchemaTeethIT` (`decision_idem_key`, `decision_
 
 ### 1.7 Units of work and errors
 
-Every write unit starts through `Unit.begin(Connection, Config)`: autocommit off, `READ COMMITTED`, `SET LOCAL TimeZone = UTC`, lock and statement timeouts, `synchronous_commit = on` (only the capacity variant C turns it off). Rows are locked in a canonical order (heads by regime and event identity, subjects by regime, event identity and leg, deliveries by endpoint and business key); results come back in input order. `PgErrors` maps `40P01` and `40001` (on a head update to `DecisionHeadConflictException`, otherwise `LedgerException`) and connection-class codes (always a `LedgerException`, never `false`, `STATE_MISMATCH` or an empty `Optional`). No SQL text, bind value, server detail or report body reaches an exception message, log line or annotation.
+Every write unit starts through `Unit.begin(Connection, Config)`: autocommit off, `READ COMMITTED`, a transaction-local TimeZone of UTC (set_config with is_local true; search_path and the timeouts the same way, all as bind values), lock and statement timeouts, `synchronous_commit = on` (only the capacity variant C turns it off). Rows are locked in a canonical order (heads by regime and event identity, subjects by regime, event identity and leg, deliveries by endpoint and business key); results come back in input order. `PgErrors` maps `40P01` and `40001` (on a head update to `DecisionHeadConflictException`, otherwise `LedgerException`) and connection-class codes (always a `LedgerException`, never `false`, `STATE_MISMATCH` or an empty `Optional`). No SQL text, bind value, server detail or report body reaches an exception message, log line or annotation.
 
 ### 1.8 Integrity queries
 
@@ -81,7 +81,7 @@ Normative text in the plan section "Port and model changes"; the contract tests 
 Local, from the repository root (Git Bash; PowerShell forms as in the P0 Conventions):
 
 - `./mvnw -B -ntp verify` (all modules; the `*IT` classes of `regpack-postgres` skip without `REGPACK_PG_URL`).
-- `bash scripts/check-gates.sh` ends `check-gates: all gates passed`. Its traceability call uses `--realstore skip`, so the REALSTORE evidence lines are counted as deferred locally.
+- `bash scripts/check-gates.sh` ends `check-gates: all gates passed`. Its traceability call uses `--realstore skip`, so the REALSTORE evidence lines are ignored locally (a due row that has only such lines would be listed as REALSTORE_DEFERRED information; none is due before P3 exits).
 - Unit tests of one module: `bash scripts/t.sh regpack-postgres '*Test'`; integration tests: `bash scripts/it.sh <module> '<selector>'`.
 
 CI (job `ledger-pg`, a service container of the pinned image, `REGPACK_PG_REQUIRED=true`):
