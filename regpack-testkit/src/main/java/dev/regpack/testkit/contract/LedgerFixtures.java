@@ -10,6 +10,7 @@ import dev.regpack.model.ReasonCode;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.ports.ledger.DecisionLedger;
 import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.IngestLedger;
@@ -102,6 +103,49 @@ public final class LedgerFixtures {
   /** A new decision that expects the chain head to be at {@code expectedHeadSeq}. */
   public static DecisionLedger.NewDecision decision(DecisionBody body, long expectedHeadSeq) {
     return new DecisionLedger.NewDecision(body, expectedHeadSeq);
+  }
+
+  /** A new decision that carries its decision context (stored in the same unit). */
+  public static DecisionLedger.NewDecision decision(
+      DecisionBody body, long expectedHeadSeq, DecisionContext context) {
+    return new DecisionLedger.NewDecision(body, expectedHeadSeq, Optional.of(context));
+  }
+
+  /**
+   * A decision context whose engine build is {@code engineTag}; every other component is fixed.
+   * Different tags give different context ids.
+   */
+  public static DecisionContext context(String engineTag) {
+    return new DecisionContext(
+        Sha256.ofUtf8("pack"),
+        Optional.empty(),
+        List.of("pin-1"),
+        List.of("ref-1"),
+        List.of(),
+        "fp-1",
+        "map-1",
+        engineTag,
+        "interpreter");
+  }
+
+  /** The same body with {@code decisionContextId} set to the id of {@code context}. */
+  public static DecisionBody withContext(DecisionBody body, DecisionContext context) {
+    return new DecisionBody(
+        body.eventIdentity(),
+        body.regime(),
+        context.id(),
+        body.asAt(),
+        body.evaluatedAt(),
+        body.outcome(),
+        body.flags(),
+        body.reasonCode(),
+        body.node(),
+        body.ruleIdsHit(),
+        body.path(),
+        body.citations(),
+        body.legs(),
+        body.inputDigest(),
+        body.attributes());
   }
 
   /** The endpoint {@code ("SIMULATOR", "ARM", "LEI-" + name, "NCA-" + name)}. */

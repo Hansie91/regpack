@@ -7,6 +7,7 @@ import dev.regpack.model.IngestKey;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
@@ -41,8 +42,9 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   private record ChainKey(Regime regime, EventIdentity eventIdentity) {}
 
+  /** Spec 10 scopes the decision key by regime: (regime, event identity, context, input). */
   private record DecisionKey(
-      EventIdentity eventIdentity, Sha256 decisionContextId, Sha256 inputDigest) {}
+      Regime regime, EventIdentity eventIdentity, Sha256 decisionContextId, Sha256 inputDigest) {}
 
   /** States in which at most one delivery per (endpoint, business key) may be (spec 11.2). */
   private static final Set<DeliveryState> IN_FLIGHT =
@@ -77,6 +79,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private long nextOutboxId = 1;
   private final Map<ChainKey, List<DecisionRecord>> chains = new HashMap<>();
   private final Map<DecisionKey, DecisionRecord> decisionsByKey = new HashMap<>();
+  private final Map<Sha256, DecisionContext> contexts = new HashMap<>();
   private long nextDecisionId = 1;
   private final Map<EndpointKey, LeaseGrant> leases = new HashMap<>();
   private final Map<EndpointKey, Long> leaseCounters = new HashMap<>();
@@ -258,10 +261,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
       // Work on copies; real state is touched only after every decision has been accepted.
       Map<ChainKey, List<DecisionRecord>> appended = new LinkedHashMap<>();
       Map<DecisionKey, DecisionRecord> inserted = new LinkedHashMap<>();
+      Map<Sha256, DecisionContext> newContexts = new LinkedHashMap<>();
       long nextId = nextDecisionId;
       List<Committed> committed = new ArrayList<>();
       for (NewDecision decision : commit.decisions()) {
         DecisionBody body = decision.body();
+        // a context travels with a redelivery too: storing it is idempotent
+        decision.context().ifPresent(c -> newContexts.put(c.id(), c));
         DecisionKey decisionKey = decisionKey(body);
         DecisionRecord known = inserted.get(decisionKey);
         if (known == null) {
@@ -295,6 +301,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
         committed.add(new Committed(CommitStatus.INSERTED, record));
       }
       publish(appended, inserted, nextId);
+      contexts.putAll(newContexts);
       commit
           .completesOutbox()
           .ifPresent(
@@ -321,7 +328,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
     // test double only: deliberate flaw for ContractSuiteTeethTest
     Sha256 context =
         flaw == Flaw.IDEMPOTENCY_KEY_IGNORES_CONTEXT ? NO_CONTEXT : body.decisionContextId();
-    return new DecisionKey(body.eventIdentity(), context, body.inputDigest());
+    return new DecisionKey(body.regime(), body.eventIdentity(), context, body.inputDigest());
   }
 
   private void validate(BatchCommit commit) {
@@ -329,6 +336,18 @@ public final class InMemoryLedgerStore implements LedgerStore {
       if (decision.expectedHeadSeq() < 0) {
         throw new IllegalArgumentException("expectedHeadSeq must be >= 0");
       }
+      decision
+          .context()
+          .ifPresent(
+              c -> {
+                if (!c.id().equals(decision.body().decisionContextId())) {
+                  throw new IllegalArgumentException(
+                      "the context supplied with a decision has id "
+                          + c.id().hex()
+                          + " but the body cites "
+                          + decision.body().decisionContextId().hex());
+                }
+              });
     }
     commit
         .completesOutbox()
@@ -357,6 +376,14 @@ public final class InMemoryLedgerStore implements LedgerStore {
     Objects.requireNonNull(eventIdentity, "eventIdentity");
     synchronized (lock) {
       return List.copyOf(chains.getOrDefault(new ChainKey(regime, eventIdentity), List.of()));
+    }
+  }
+
+  @Override
+  public Optional<DecisionContext> decisionContext(Sha256 contextId) {
+    Objects.requireNonNull(contextId, "contextId");
+    synchronized (lock) {
+      return Optional.ofNullable(contexts.get(contextId));
     }
   }
 

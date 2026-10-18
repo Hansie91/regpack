@@ -409,4 +409,146 @@ class DecisionTypesTest {
         .isInstanceOf(IllegalArgumentException.class);
     assertThat(new PathStep("r", false, 0).costUnits()).isZero();
   }
+
+  /** The stored form: the canonical JSON of the map, parsed back. */
+  private static Map<String, Object> viaCanonicalJson(Map<String, Object> map) {
+    Object parsed = Json.parse(Json.canonical(map));
+    Map<String, Object> out = new LinkedHashMap<>();
+    ((Map<?, ?>) parsed).forEach((k, v) -> out.put((String) k, v));
+    return out;
+  }
+
+  private static DecisionBody richBody(Outcome outcome, Instant asAt, Instant evaluatedAt) {
+    return new DecisionBody(
+        EventIdentity.of("L", "XPAR", "EX-1"),
+        new Regime("mifir.eu.rts22"),
+        context("b1").id(),
+        asAt,
+        evaluatedAt,
+        outcome,
+        List.of("circuit=open", "second"),
+        new ReasonCode("MIFIR.N03.EXCLUDED"),
+        "n03",
+        List.of("r1", "r2"),
+        List.of(new PathStep("r1", true, 3), new PathStep("r2", false, 0)),
+        List.of(
+            new Citation("mifir", "art26", CitationRole.BASIS, Optional.of(Sha256.ofUtf8("q"))),
+            new Citation("mifir", "art27", CitationRole.GUIDANCE, Optional.empty())),
+        outcome == Outcome.REPORT ? List.of(Leg.MARKET, Leg.CLIENT) : List.of(),
+        Sha256.ofUtf8("in"),
+        Map.of("zeta", "1", "action", "NEWT"));
+  }
+
+  @Test
+  void bodyRoundTripsThroughCanonicalJson() {
+    Instant asAt = Instant.parse("2026-10-09T09:30:00.000000Z");
+    Instant evaluatedAt = Instant.parse("2026-10-09T10:00:00.000000Z");
+    for (Outcome outcome : Outcome.values()) {
+      DecisionBody original = richBody(outcome, asAt, evaluatedAt);
+      DecisionBody decoded =
+          DecisionCodec.bodyFromMap(viaCanonicalJson(DecisionCodec.bodyToMap(original, true)));
+      assertThat(decoded).as(outcome.name()).isEqualTo(original);
+      assertThat(decoded.replayDigest()).isEqualTo(original.replayDigest());
+    }
+    DecisionBody plain = body(evaluatedAt, Outcome.REPORT, 1, List.of());
+    assertThat(DecisionCodec.bodyFromMap(viaCanonicalJson(DecisionCodec.bodyToMap(plain, true))))
+        .isEqualTo(plain);
+    // the map of bodyToMap itself (instants and enums not yet written) decodes as well
+    assertThat(DecisionCodec.bodyFromMap(DecisionCodec.bodyToMap(plain, true))).isEqualTo(plain);
+  }
+
+  @Test
+  void contextRoundTripsThroughCanonicalJson() {
+    for (long epoch : new long[] {0L, 3L}) {
+      DecisionContext original = contextWithEpoch("b1", epoch);
+      DecisionContext decoded =
+          DecisionCodec.contextFromMap(viaCanonicalJson(DecisionCodec.contextToMap(original)));
+      assertThat(decoded).isEqualTo(original);
+      assertThat(decoded.circuitEpoch()).isEqualTo(epoch);
+      assertThat(decoded.id()).isEqualTo(original.id());
+    }
+    DecisionContext withOverlay =
+        new DecisionContext(
+            Sha256.ofUtf8("pack"),
+            Optional.of(Sha256.ofUtf8("overlay")),
+            List.of("pin-1", "pin-2"),
+            List.of("ref-1"),
+            List.of("enr-1"),
+            "fp-1",
+            "map-1",
+            "b1",
+            "interpreter",
+            2L);
+    assertThat(
+            DecisionCodec.contextFromMap(viaCanonicalJson(DecisionCodec.contextToMap(withOverlay))))
+        .isEqualTo(withOverlay);
+  }
+
+  @Test
+  void bodyFromMapRejectsUnknownOutcomeAndMissingKeys() {
+    Instant t = Instant.parse("2026-10-09T10:00:00.000000Z");
+    Map<String, Object> good =
+        viaCanonicalJson(DecisionCodec.bodyToMap(richBody(Outcome.REPORT, t, t), true));
+    assertThat(DecisionCodec.bodyFromMap(good)).isNotNull();
+
+    Map<String, Object> unknownOutcome = new LinkedHashMap<>(good);
+    unknownOutcome.put("outcome", "MAYBE");
+    assertThatThrownBy(() -> DecisionCodec.bodyFromMap(unknownOutcome))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    for (String key : good.keySet()) {
+      if (key.equals("attributes")) {
+        continue; // optional: omitted when empty
+      }
+      Map<String, Object> missing = new LinkedHashMap<>(good);
+      missing.remove(key);
+      assertThatThrownBy(() -> DecisionCodec.bodyFromMap(missing))
+          .as("missing " + key)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    Map<String, Object> unknownKey = new LinkedHashMap<>(good);
+    unknownKey.put("surprise", "x");
+    assertThatThrownBy(() -> DecisionCodec.bodyFromMap(unknownKey))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    Map<String, Object> badType = new LinkedHashMap<>(good);
+    badType.put("flags", "not-a-list");
+    assertThatThrownBy(() -> DecisionCodec.bodyFromMap(badType))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    Map<String, Object> badInstant = new LinkedHashMap<>(good);
+    badInstant.put("asAt", "yesterday");
+    assertThatThrownBy(() -> DecisionCodec.bodyFromMap(badInstant))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    Map<String, Object> badEvent = new LinkedHashMap<>(good);
+    badEvent.put("eventIdentity", "a||b");
+    assertThatThrownBy(() -> DecisionCodec.bodyFromMap(badEvent))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    assertThatThrownBy(() -> DecisionCodec.contextFromMap(Map.of()))
+        .isInstanceOf(IllegalArgumentException.class);
+    Map<String, Object> contextMap = viaCanonicalJson(DecisionCodec.contextToMap(context("b1")));
+    contextMap.put("circuitEpoch", -1L);
+    assertThatThrownBy(() -> DecisionCodec.contextFromMap(contextMap))
+        .isInstanceOf(IllegalArgumentException.class);
+    Map<String, Object> contextExtra = viaCanonicalJson(DecisionCodec.contextToMap(context("b1")));
+    contextExtra.put("surprise", "x");
+    assertThatThrownBy(() -> DecisionCodec.contextFromMap(contextExtra))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void decodedBodyKeepsMicrosecondInstants() {
+    Instant asAt = Instant.parse("2026-10-09T23:59:59.999999Z");
+    Instant evaluatedAt = Instant.parse("2026-10-10T00:00:00.000001Z");
+    DecisionBody original = richBody(Outcome.REPORT, asAt, evaluatedAt);
+    DecisionBody decoded =
+        DecisionCodec.bodyFromMap(viaCanonicalJson(DecisionCodec.bodyToMap(original, true)));
+    assertThat(decoded.asAt()).isEqualTo(asAt);
+    assertThat(decoded.evaluatedAt()).isEqualTo(evaluatedAt);
+    assertThat(decoded.asAt().getNano()).isEqualTo(999_999_000);
+    assertThat(decoded.evaluatedAt().getNano()).isEqualTo(1_000);
+  }
 }
