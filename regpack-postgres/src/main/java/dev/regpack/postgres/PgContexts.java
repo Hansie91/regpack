@@ -18,7 +18,7 @@ import javax.sql.DataSource;
 /**
  * The reads of the decision-context dictionary (spec 6.3, D-S7). A row whose {@code body} is NULL
  * is a stub, made when a decision cited its context id before the context was given: it reads as
- * empty. The context is written with the decision, in T16.
+ * empty. The context is written with the decision, by {@link PgDecisions} (T16).
  */
 final class PgContexts {
   private static final String SQL =

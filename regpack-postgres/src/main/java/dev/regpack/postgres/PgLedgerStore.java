@@ -94,6 +94,7 @@ public final class PgLedgerStore implements LedgerStore {
   private final PgIngest ingest;
   private final PgOutbox outbox;
   private final PgContexts contexts;
+  private final PgDecisions decisions;
 
   public PgLedgerStore(DataSource dataSource, Clock clock, Config config) {
     Objects.requireNonNull(dataSource, "dataSource");
@@ -102,6 +103,7 @@ public final class PgLedgerStore implements LedgerStore {
     this.ingest = new PgIngest(dataSource, clock, config);
     this.outbox = new PgOutbox(dataSource, config);
     this.contexts = new PgContexts(dataSource, config);
+    this.decisions = new PgDecisions(dataSource, config);
   }
 
   // IngestLedger (T15)
@@ -138,7 +140,7 @@ public final class PgLedgerStore implements LedgerStore {
     return outbox.outboxItem(id);
   }
 
-  // ContextLedger (T15: reads; the context is written with the decision, T16)
+  // ContextLedger (T15: reads; the context is written with the decision, T16: PgDecisions)
 
   @Override
   public Optional<DecisionContext> decisionContext(Sha256 contextId) {
@@ -149,17 +151,17 @@ public final class PgLedgerStore implements LedgerStore {
 
   @Override
   public List<Committed> commitDecisions(BatchCommit commit) {
-    throw new UnsupportedOperationException("T16");
+    return decisions.commitDecisions(commit);
   }
 
   @Override
   public Optional<DecisionRecord> currentDecision(Regime regime, EventIdentity eventIdentity) {
-    throw new UnsupportedOperationException("T16");
+    return decisions.currentDecision(regime, eventIdentity);
   }
 
   @Override
   public List<DecisionRecord> decisionChain(Regime regime, EventIdentity eventIdentity) {
-    throw new UnsupportedOperationException("T16");
+    return decisions.decisionChain(regime, eventIdentity);
   }
 
   // LeaseLedger (T17)
