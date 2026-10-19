@@ -200,6 +200,34 @@ class TraceabilityCheckTest {
     assertThat(stale.problems()).contains("NOT_PASSING:R12:c.D#stale");
   }
 
+  /**
+   * Failed, errored or skipped in any report is not passed, whatever other reports say: the same
+   * test fails in one of two reports and passes in the other, each way round, so that the result
+   * does not depend on the order in which the files are read.
+   */
+  @Test
+  void aFailureInAnyReportWinsWhicheverReportIsReadFirst() throws IOException {
+    List<String> directories = List.of("failsafe-reports", "surefire-reports");
+    for (String failing : directories) {
+      String passing = failing.equals(directories.get(0)) ? directories.get(1) : directories.get(0);
+      for (String bad : List.of("failure", "error", "skipped")) {
+        String name = bad + "_in_" + failing.substring(0, 4);
+        write(
+            "target/" + failing + "/TEST-e.F.xml",
+            "<testsuite><testcase classname=\"e.F\" name=\""
+                + name
+                + "\"><"
+                + bad
+                + "/></testcase></testsuite>");
+        write(
+            "target/" + passing + "/TEST-e.F.xml",
+            "<testsuite><testcase classname=\"e.F\" name=\"" + name + "\"/></testsuite>");
+        var result = check(new Table().exited("P3").set("R12", r12("e.F#" + name)));
+        assertThat(result.problems()).as(name).contains("NOT_PASSING:R12:e.F#" + name);
+      }
+    }
+  }
+
   @Test
   void testNamesWithParenthesesAreMatched() throws IOException {
     report(

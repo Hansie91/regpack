@@ -1,5 +1,6 @@
 package dev.regpack.testkit.contract;
 
+import static dev.regpack.model.Leg.ALLOCATION;
 import static dev.regpack.model.Leg.CLIENT;
 import static dev.regpack.model.Leg.MARKET;
 import static dev.regpack.testkit.contract.LedgerFixtures.EMIR_REGIME;
@@ -894,6 +895,281 @@ public interface ReportLedgerContract {
         .isEqualTo(CommitStatus.INSERTED);
   }
 
+  private static List<Leg> allLegs() {
+    return List.of(MARKET, CLIENT, ALLOCATION);
+  }
+
+  /** Decision 1 of {@code event}: REPORT on all three legs, with a version on each of them. */
+  private List<SubjectId> allLegsReported(String event) {
+    NewVersion[] versions = new NewVersion[allLegs().size()];
+    for (int i = 0; i < versions.length; i++) {
+      Leg leg = allLegs().get(i);
+      versions[i] = newVersion(event, leg, "EXEC1", "TRN" + event + leg.name(), "NEWT", "h" + leg);
+    }
+    List<VersionResult> created =
+        commitUnit(next(event, "d1", allLegs(), versions)).get(0).versions();
+    assertThat(created).extracting(VersionResult::status).containsOnly(VersionStatus.CREATED);
+    return created.stream().map(VersionResult::subject).toList();
+  }
+
+  /** Nothing of a refused supersession is stored: one decision, and one version on every leg. */
+  private void assertAllLegsUnchanged(String event, List<SubjectId> subjects) {
+    assertThat(ledger().decisionChain(mifir(), event(event))).hasSize(1);
+    for (int i = 0; i < allLegs().size(); i++) {
+      assertThat(ledger().subject(key(event, allLegs().get(i))).orElseThrow().lastVersionSeq())
+          .as(allLegs().get(i).name())
+          .isEqualTo(1);
+      assertThat(ledger().versions(subjects.get(i))).hasSize(1);
+    }
+  }
+
+  private List<CommitStatus> commitDecisionsOnly(NewDecision decision) {
+    return ledger().commitDecisions(new BatchCommit(List.of(decision), Optional.empty())).stream()
+        .map(c -> c.status())
+        .toList();
+  }
+
+  /**
+   * Rule 8 (D-L4) for every leg, not only the first: versions exist on MARKET, CLIENT and
+   * ALLOCATION, and a REPORT that leaves out any one of them fails closed, whichever of the two
+   * entry points carries it. A leg without a version can be left out.
+   */
+  @Test
+  default void aSupersedingDecisionThatDropsALaterLegFailsClosed() {
+    for (Leg dropped : allLegs()) {
+      String event = "W" + dropped.name();
+      List<SubjectId> subjects = allLegsReported(event);
+      Leg[] kept = allLegs().stream().filter(leg -> leg != dropped).toArray(Leg[]::new);
+
+      NewDecision drops = reportDecision(1, event, "ctx", "d2", kept);
+      assertThatThrownBy(() -> commitUnit(new ReportableDecision(drops, List.of())))
+          .as("commitReportable drops " + dropped)
+          .isInstanceOf(WithdrawalRequiredException.class);
+      assertAllLegsUnchanged(event, subjects);
+      assertThatThrownBy(() -> commitDecisionsOnly(drops))
+          .as("commitDecisions drops " + dropped)
+          .isInstanceOf(WithdrawalRequiredException.class);
+      assertAllLegsUnchanged(event, subjects);
+
+      // keeping every leg is a normal supersession
+      assertThat(
+              commitDecisionsOnly(
+                  reportDecision(1, event, "ctx", "d3", allLegs().toArray(Leg[]::new))))
+          .containsExactly(CommitStatus.INSERTED);
+    }
+
+    // a leg without a version can be left out: only the leg with a version is protected
+    commitVersion(
+        "WN",
+        "d1",
+        List.of(MARKET, CLIENT),
+        newVersion("WN", MARKET, "EXEC1", "TRNWN", "NEWT", "m"));
+    assertThat(commitDecisionsOnly(reportDecision(1, "WN", "ctx", "d2", MARKET)))
+        .containsExactly(CommitStatus.INSERTED);
+    assertThat(ledger().subject(key("WN", CLIENT))).isEmpty();
+  }
+
+  /**
+   * A superseding decision that is not REPORT fails closed even when it still names the legs that
+   * have versions: the outcome decides, not the leg list.
+   */
+  @Test
+  default void aNonReportDecisionThatStillNamesLegsFailsClosed() {
+    for (Outcome outcome :
+        List.of(Outcome.DO_NOT_REPORT, Outcome.UNDETERMINED, Outcome.REPORT_BY_OTHER)) {
+      String event = "N" + outcome.ordinal();
+      List<SubjectId> subjects = allLegsReported(event);
+      NewDecision names =
+          LedgerFixtures.decision(
+              LedgerFixtures.bodyWithLegs(
+                  MIFIR_REGIME, event, "ctx", "d2", outcome, allLegs().toArray(Leg[]::new)),
+              1);
+      assertThatThrownBy(() -> commitUnit(new ReportableDecision(names, List.of())))
+          .as("commitReportable " + outcome)
+          .isInstanceOf(WithdrawalRequiredException.class);
+      assertAllLegsUnchanged(event, subjects);
+      assertThatThrownBy(() -> commitDecisionsOnly(names))
+          .as("commitDecisions " + outcome)
+          .isInstanceOf(WithdrawalRequiredException.class);
+      assertAllLegsUnchanged(event, subjects);
+    }
+  }
+
+  /**
+   * Rule 2, the outcome half: a version on a decision that is not REPORT is refused although the
+   * decision names the leg (the leg-membership check alone would accept it).
+   */
+  @Test
+  default void aVersionOnANonReportDecisionThatNamesLegsIsRefused() {
+    for (Outcome outcome :
+        List.of(Outcome.DO_NOT_REPORT, Outcome.UNDETERMINED, Outcome.REPORT_BY_OTHER)) {
+      String event = "V" + outcome.ordinal();
+      NewDecision names =
+          LedgerFixtures.decision(
+              LedgerFixtures.bodyWithLegs(MIFIR_REGIME, event, "ctx", "d1", outcome, MARKET), 0);
+      ReportableDecision unit =
+          new ReportableDecision(
+              names, List.of(newVersion(event, MARKET, "EXEC1", "TRN" + event, "NEWT", "h1")));
+      assertThatThrownBy(() -> commitUnit(unit))
+          .as(outcome.name())
+          .isInstanceOf(IllegalArgumentException.class);
+      assertNothingStored(event, MARKET);
+      assertThat(ledger().subjectByTrn("EXEC1", "TRN" + event)).isEmpty();
+    }
+  }
+
+  /**
+   * A redelivery of a decision that is not the head is not a new decision: it never runs the
+   * withdrawal guard, however many versions the chain has gained since.
+   */
+  @Test
+  default void aRedeliveryOfAnEarlierNonReportDecisionIsANoopWhenLaterVersionsExist() {
+    NewDecision earlier =
+        LedgerFixtures.decision(
+            LedgerFixtures.body(
+                "E1",
+                MIFIR_REGIME,
+                "ctx",
+                "d1",
+                Outcome.DO_NOT_REPORT,
+                Instant.parse("2026-10-09T10:00:00Z")),
+            0);
+    assertThat(commitDecisionsOnly(earlier)).containsExactly(CommitStatus.INSERTED);
+    VersionResult created =
+        commitVersion(
+            "E1", "d2", List.of(MARKET), newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "h1"));
+    assertThat(created.status()).isEqualTo(VersionStatus.CREATED);
+
+    assertThat(commitDecisionsOnly(earlier)).containsExactly(CommitStatus.NOOP_REDELIVERY);
+    List<ReportableCommitted> again = commitUnit(new ReportableDecision(earlier, List.of()));
+    assertThat(again.get(0).decision().status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+    assertThat(again.get(0).versions()).isEmpty();
+    assertThat(ledger().decisionChain(mifir(), event("E1"))).hasSize(2);
+    assertThat(ledger().versions(created.subject())).hasSize(1);
+  }
+
+  /**
+   * Two decisions of one chain in one unit (the case the wave split of the real store exists for):
+   * the second sees the first one's version, numbers its own after it, and shares the TRN.
+   */
+  @Test
+  default void twoDecisionsOfOneChainWithVersionsInOneUnitChainInOrder() {
+    ReportableDecision d1 =
+        new ReportableDecision(
+            reportDecision(0, "E1", "ctx", "d1", MARKET),
+            List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "A")));
+    ReportableDecision d2 =
+        new ReportableDecision(
+            reportDecision(1, "E1", "ctx", "d2", MARKET),
+            List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "CANC", "B")));
+    List<ReportableCommitted> committed = commitUnit(d1, d2);
+
+    assertThat(committed)
+        .extracting(c -> c.decision().status())
+        .containsExactly(CommitStatus.INSERTED, CommitStatus.INSERTED);
+    VersionResult first = committed.get(0).versions().get(0);
+    VersionResult second = committed.get(1).versions().get(0);
+    assertThat(first.status()).isEqualTo(VersionStatus.CREATED);
+    assertThat(second.status()).isEqualTo(VersionStatus.CREATED);
+    assertThat(first.versionSeq()).isEqualTo(1);
+    assertThat(second.versionSeq()).isEqualTo(2);
+    assertThat(second.subject()).isEqualTo(first.subject());
+    assertThat(List.of(first.trn(), second.trn())).containsOnly("TRN1");
+    assertThat(first.delivery()).isPresent();
+    assertThat(second.delivery()).isPresent().isNotEqualTo(first.delivery());
+
+    List<DecisionRecord> chain = ledger().decisionChain(mifir(), event("E1"));
+    assertThat(chain).extracting(DecisionRecord::decisionSeq).containsExactly(1L, 2L);
+    assertThat(chain.get(0).supersedesDecisionId()).isEmpty();
+    assertThat(chain.get(1).supersedesDecisionId()).contains(chain.get(0).decisionId());
+    List<StoredVersion> versions = ledger().versions(first.subject());
+    assertThat(versions).extracting(StoredVersion::versionSeq).containsExactly(1L, 2L);
+    assertThat(versions)
+        .extracting(StoredVersion::decision)
+        .containsExactly(chain.get(0).decisionId(), chain.get(1).decisionId());
+    assertThat(versions).extracting(StoredVersion::action).containsExactly("NEWT", "CANC");
+    assertThat(ledger().subjectByTrn("EXEC1", "TRN1").orElseThrow().id())
+        .isEqualTo(first.subject());
+    assertThat(ledger().subject(key("E1", MARKET)).orElseThrow().lastVersionSeq()).isEqualTo(2);
+  }
+
+  /** The second decision's suppression read sees the version that the first one just wrote. */
+  @Test
+  default void aSecondDecisionOfTheUnitWithTheSameContentIsSuppressedAgainstTheFirst() {
+    ReportableDecision d1 =
+        new ReportableDecision(
+            reportDecision(0, "E1", "ctx", "d1", MARKET),
+            List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "A")));
+    ReportableDecision d2 =
+        new ReportableDecision(
+            reportDecision(1, "E1", "ctx", "d2", MARKET),
+            List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "A")));
+    List<ReportableCommitted> committed = commitUnit(d1, d2);
+
+    VersionResult created = committed.get(0).versions().get(0);
+    VersionResult suppressed = committed.get(1).versions().get(0);
+    assertThat(created.status()).isEqualTo(VersionStatus.CREATED);
+    assertThat(suppressed.status()).isEqualTo(VersionStatus.SUPPRESSED_UNCHANGED);
+    assertThat(suppressed.subject()).isEqualTo(created.subject());
+    assertThat(suppressed.versionSeq()).isEqualTo(1);
+    assertThat(suppressed.delivery()).isEmpty();
+    assertThat(committed.get(1).decision().status()).isEqualTo(CommitStatus.INSERTED);
+    assertThat(committed.get(1).decision().record().decisionSeq()).isEqualTo(2);
+    assertThat(ledger().versions(created.subject())).hasSize(1);
+    assertThat(ledger().decisionChain(mifir(), event("E1"))).hasSize(2);
+  }
+
+  /** Rule 8 on the second decision of the unit sees the version of the first one. */
+  @Test
+  default void aNonReportSecondDecisionOfTheUnitFailsClosedAndWritesNothing() {
+    ReportableDecision d1 =
+        new ReportableDecision(
+            reportDecision(0, "E1", "ctx", "d1", MARKET),
+            List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "A")));
+    ReportableDecision d2 =
+        new ReportableDecision(
+            LedgerFixtures.decision(
+                LedgerFixtures.body(
+                    "E1",
+                    MIFIR_REGIME,
+                    "ctx",
+                    "d2",
+                    Outcome.DO_NOT_REPORT,
+                    Instant.parse("2026-10-09T10:00:00Z")),
+                1),
+            List.of());
+
+    assertThatThrownBy(() -> commitUnit(d1, d2)).isInstanceOf(WithdrawalRequiredException.class);
+    assertNothingStored("E1", MARKET);
+    assertThat(ledger().subjectByTrn("EXEC1", "TRN1")).isEmpty();
+    assertThatCode(
+            () -> ledger().createDelivery(new NewDelivery(endpoint("EP1"), 1, "EXEC1|TRN1", 1)))
+        .doesNotThrowAnyException();
+  }
+
+  /**
+   * A redelivered earlier decision listed after a new decision of its chain is no longer the head:
+   * the unit is a head conflict and nothing of it is stored.
+   */
+  @Test
+  default void aRedeliveredDecisionListedAfterALaterOneOfItsChainIsAHeadConflict() {
+    NewDecision first = reportDecision(0, "E1", "ctx", "d1", MARKET);
+    ledger().commitDecisions(new BatchCommit(List.of(first), Optional.empty()));
+    ReportableDecision later =
+        new ReportableDecision(
+            reportDecision(1, "E1", "ctx", "d2", MARKET),
+            List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "h2")));
+    ReportableDecision redelivered =
+        new ReportableDecision(
+            first, List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "h1")));
+
+    assertThatThrownBy(() -> commitUnit(later, redelivered))
+        .isInstanceOf(DecisionHeadConflictException.class);
+    assertThat(ledger().decisionChain(mifir(), event("E1"))).hasSize(1);
+    assertThat(ledger().subject(key("E1", MARKET))).isEmpty();
+    assertThat(ledger().subjectByTrn("EXEC1", "TRN1")).isEmpty();
+  }
+
   /**
    * Meaningful only against a real store; the single-lock in-memory adapter passes trivially (spec
    * 14.1).
@@ -1089,6 +1365,8 @@ public interface ReportLedgerContract {
 
   @Test
   default void oneSequenceOutboxItemPerBatchEvenOnRedelivery() {
+    // a pending DECIDE_BATCH item next to the SEQUENCE item: each kind lists only its own
+    OutboxId decideItem = decideBatchItem();
     var batch = LedgerFixtures.batchId("b1");
     ReportableCommit commit =
         new ReportableCommit(
@@ -1107,6 +1385,10 @@ public interface ReportLedgerContract {
     assertThat(pending.get(0).kind()).isEqualTo(OutboxKind.SEQUENCE);
     assertThat(pending.get(0).subjectId()).isEqualTo(batch.value());
     assertThat(pending.get(0).state()).isEqualTo(OutboxState.PENDING);
+    List<OutboxItem> decide = ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 10);
+    assertThat(decide).extracting(OutboxItem::id).containsExactly(decideItem);
+    assertThat(decide).extracting(OutboxItem::kind).containsOnly(OutboxKind.DECIDE_BATCH);
+    assertThat(decide.get(0).subjectId()).isNotEqualTo(batch.value());
 
     // a redelivery of the unit, and another unit of the same batch, leave the one item
     ledger().commitReportable(commit);

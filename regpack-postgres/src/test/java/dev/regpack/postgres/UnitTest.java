@@ -88,6 +88,43 @@ class UnitTest {
         .noneMatch(e -> e.startsWith("execute: SELECT set_config") && e.contains("synchronous"));
   }
 
+  /**
+   * TEETH-9: every setting of the prologue is transaction-local (the third argument of {@code
+   * set_config} is {@code true}), so nothing of the ledger leaks into the next user of a pooled
+   * connection.
+   */
+  @Test
+  void everySettingOfThePrologueIsTransactionLocal() {
+    for (boolean synchronous : new boolean[] {true, false}) {
+      SqlSpy spy = new SqlSpy();
+      Unit.inUnit(
+          spy.over(null), CONFIG.withForceSynchronousCommit(synchronous), connection -> "x");
+      List<String> settings =
+          spy.events().stream().filter(e -> e.startsWith("execute: SELECT set_config")).toList();
+      assertThat(settings).hasSize(1);
+      java.util.regex.Matcher calls =
+          java.util.regex.Pattern.compile("set_config\\(([^()]*)\\)").matcher(settings.get(0));
+      List<String> names = new java.util.ArrayList<>();
+      while (calls.find()) {
+        String arguments = calls.group(1);
+        assertThat(arguments).as(arguments).endsWith(", true");
+        names.add(arguments.substring(0, arguments.indexOf(',')));
+      }
+      assertThat(names)
+          .contains("'TimeZone'", "'search_path'", "'lock_timeout'", "'statement_timeout'");
+      if (synchronous) {
+        assertThat(names).contains("'synchronous_commit'");
+      } else {
+        assertThat(names).doesNotContain("'synchronous_commit'");
+      }
+      // and no statement sets anything for the session
+      assertThat(spy.events())
+          .noneMatch(e -> e.toUpperCase(java.util.Locale.ROOT).contains("SET SESSION"))
+          .noneMatch(e -> e.startsWith("execute: SET ") && !e.contains("SET TRANSACTION"))
+          .noneMatch(e -> e.contains("ALTER ROLE") || e.contains("ALTER DATABASE"));
+    }
+  }
+
   @Test
   void aFailingUnitRollsBackClosesAndNeverTouchesAutoCommitAgain() {
     SqlSpy spy = new SqlSpy();

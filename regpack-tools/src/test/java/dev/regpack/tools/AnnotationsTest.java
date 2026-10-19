@@ -248,6 +248,42 @@ class AnnotationsTest {
   }
 
   @Test
+  void everyCredentialKeywordIsRedacted() throws IOException {
+    report(
+        "a.B",
+        fail(
+            "a.B", "kw", "bad passwd=x1 and apikey: y2 and api_key=z3 and token=t4 and secret=s5"));
+    String error = withPrefix(render(), "::error").get(0);
+    assertThat(error).doesNotContain("x1", "y2", "z3", "t4", "s5").doesNotContain("passwd");
+    assertThat(error).contains("bad [REDACTED] and [REDACTED] and [REDACTED]");
+  }
+
+  @Test
+  void aCarriageReturnInANameOrAClassCannotStartAnotherCommandEither() throws IOException {
+    report(
+        "a.B",
+        "<testcase classname=\"x&#13;::error title=forged::y\" name=\"t&#13;::error title=z::w\">"
+            + "<failure message=\"m\"/></testcase>");
+    List<String> lines = render();
+    assertThat(lines).allSatisfy(l -> assertThat(l).doesNotContain("\r").doesNotContain("\n"));
+    assertThat(lines).anySatisfy(l -> assertThat(l).startsWith("::notice title=tally::class=x%0D"));
+    assertThat(lines).anySatisfy(l -> assertThat(l).startsWith("::error title=x%0D"));
+    assertThat(withPrefix(lines, "::error")).hasSize(1);
+  }
+
+  @Test
+  void theSkippedWarningIsCutAt60000Characters() throws IOException {
+    List<String> cases = new ArrayList<>();
+    for (int i = 0; i < 3; i++) {
+      cases.add(skip("a.B", "n".repeat(30_000) + i));
+    }
+    report("a.B", cases.toArray(new String[0]));
+    String warning = withPrefix(render(), "::warning title=skipped").get(0);
+    String message = warning.substring("::warning title=skipped::".length());
+    assertThat(message).hasSize(60_000).startsWith("skipped=3 a.B#nnnn");
+  }
+
+  @Test
   void aTestNameWithALineFeedCannotStartAnotherCommand() throws IOException {
     report(
         "a.B",

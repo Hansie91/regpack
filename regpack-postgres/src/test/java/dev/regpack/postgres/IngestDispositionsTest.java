@@ -136,6 +136,38 @@ class IngestDispositionsTest {
   }
 
   @Test
+  void aVersionBetweenTwoNewVersionsOfOneCommitIsStale() {
+    Stored stored = new Stored();
+    assertThat(decide(stored, entry("r1", 1, A), entry("r1", 3, B), entry("r1", 2, A)))
+        .containsExactly(Disposition.NEW_VERSION, Disposition.NEW_VERSION, Disposition.STALE);
+    // with versions already stored the highest of the commit still decides, not the lowest
+    Stored with = new Stored().row("r2", 1, "r2", A);
+    assertThat(
+            decide(
+                with, entry("r2", 4, B), entry("r2", 6, A), entry("r2", 5, B), entry("r2", 7, A)))
+        .containsExactly(
+            Disposition.NEW_VERSION,
+            Disposition.NEW_VERSION,
+            Disposition.STALE,
+            Disposition.NEW_VERSION);
+  }
+
+  @Test
+  void theExactKeyIsDecidedFirstEvenWhenTheEventIdentityDiffers() {
+    // (src, r1, 1) is stored under event e1; the source re-sends it with the event e2
+    Stored stored = new Stored().row("r1", 1, "e1", A);
+    assertThat(decide(stored, entry("r1", 1, "e2", A)))
+        .containsExactly(Disposition.NOOP_SAME_VERSION_SAME_HASH);
+    assertThat(decide(stored, entry("r1", 1, "e2", B)))
+        .containsExactly(Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH);
+    // and ahead of a source conflict and of stale for the event it now names
+    Stored other =
+        new Stored().row("r1", 1, "e1", A).row("r9", 5, "e2", A).ownedByAnotherSource("e2");
+    assertThat(decide(other, entry("r1", 1, "e2", A)))
+        .containsExactly(Disposition.NOOP_SAME_VERSION_SAME_HASH);
+  }
+
+  @Test
   void aStaleEntryDoesNotRaiseTheHighestVersionAndASkippedEntryStoresNothing() {
     Stored stored = new Stored().row("r1", 5, "r1", A);
     // v3 is stale against the stored 5; v6 then is new; v4 after v6 is stale again

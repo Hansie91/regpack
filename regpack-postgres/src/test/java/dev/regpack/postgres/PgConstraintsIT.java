@@ -24,7 +24,10 @@ import org.junit.jupiter.api.Test;
  * of the constraint clause of the P3 exit criterion, together with {@code
  * PgDecisionsIT#crossPartitionDuplicateDecisionSeqIsRejectedByTheHead}. The adapter is not used:
  * what the schema itself refuses is the point. Skipped without {@code REGPACK_PG_URL}; first run at
- * CP-3.
+ * CP-3. The tests of the dictionary, batch, checkpoint, lease and restore-epoch keys and of the
+ * foreign keys of the decision, ingest, TRN, attempt and lease tables were added in FP3 and first
+ * run at the checkpoint after it; docs/ledger/p3a-notes.md (section 4) lists which constraints have
+ * a seeded test.
  *
  * <p>State and kind codes in the statements are the stored ones of {@link Codes}: delivery states
  * QUEUED 3, SENDING 4, AWAITING_ACK 5; outcome REPORT 1; leg MARKET 1, CLIENT 2; version origin
@@ -434,6 +437,229 @@ class PgConstraintsIT extends AbstractPgStoreTest {
     assertRejected(
         deliveryRow("bk", 7, 1, false, Long.toString(subject)), "23503", "delivery_version_fk");
     assertThat(count("SELECT count(*) FROM delivery")).isZero();
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // the keys and foreign keys of the dictionaries, the batch, the lease and the restore epoch
+  // (FP3, SPEC-2): one seeded duplicate or orphan each. A key that the adapter also uses as an ON
+  // CONFLICT arbiter has behavioural cover as well; these name the constraint itself.
+
+  /**
+   * The name of a constraint of the partitioned table {@code parent}, or of a copy on a partition.
+   */
+  private List<String> familyOf(String constraint) throws SQLException {
+    String namespace = "(SELECT n.oid FROM pg_namespace n WHERE n.nspname = current_schema())";
+    return names(
+        "SELECT c.conname FROM pg_constraint c WHERE c.connamespace = "
+            + namespace
+            + " AND (c.conname = '"
+            + constraint
+            + "' OR c.conparentid IN (SELECT p.oid FROM pg_constraint p WHERE p.connamespace = "
+            + namespace
+            + " AND p.conname = '"
+            + constraint
+            + "'))"
+            + " UNION SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
+            + " WHERE i.inhparent = to_regclass('"
+            + constraint
+            + "')");
+  }
+
+  /**
+   * A rejection by a constraint of the partitioned {@code decision} table: the server names the
+   * constraint of the partition that holds the row, which is a copy of the one of the parent.
+   */
+  private void assertRejectedOnPartitioned(String sql, String sqlState, String constraint)
+      throws SQLException {
+    SQLException failure = failureOf(sql);
+    assertThat(failure.getSQLState()).as(sql).isEqualTo(sqlState);
+    assertThat(PgErrors.constraint(failure)).as(sql).isPresent();
+    assertThat(familyOf(constraint)).as(constraint).isNotEmpty();
+    assertThat(familyOf(constraint)).as(sql).contains(PgErrors.constraint(failure).orElseThrow());
+  }
+
+  @Test
+  void duplicateRegimeNameIsRejected() throws SQLException {
+    exec("INSERT INTO regime (regime) VALUES ('r1')");
+    assertRejected("INSERT INTO regime (regime) VALUES ('r1')", "23505", "regime_name_key");
+    assertThat(count("SELECT count(*) FROM regime")).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateSourceNameIsRejected() throws SQLException {
+    exec("INSERT INTO source (source) VALUES ('srcA')");
+    assertRejected("INSERT INTO source (source) VALUES ('srcA')", "23505", "source_name_key");
+    assertThat(count("SELECT count(*) FROM source")).isEqualTo(1);
+  }
+
+  private static final String ENDPOINT_ROW =
+      "INSERT INTO endpoint (environment, submission_route, submitting_entity_lei,"
+          + " destination_authority) VALUES ('SIMULATOR', 'ARM', 'LEI-EP1', 'NCA-EP1')";
+
+  @Test
+  void duplicateEndpointIsRejected() throws SQLException {
+    exec(ENDPOINT_ROW);
+    assertRejected(ENDPOINT_ROW, "23505", "endpoint_key");
+    assertThat(count("SELECT count(*) FROM endpoint")).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateContextShaIsRejected() throws SQLException {
+    String context =
+        "INSERT INTO decision_context (context_sha) VALUES (decode(repeat('0a', 32), 'hex'))";
+    exec(context);
+    assertRejected(context, "23505", "decision_context_sha_key");
+    assertThat(count("SELECT count(*) FROM decision_context")).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateBatchIdIsRejected() throws SQLException {
+    insertBatch();
+    assertRejected(
+        "INSERT INTO ingest_batch (batch_id, source_id, result, created_at)"
+            + " VALUES ('b1', 2, decode('01', 'hex'), now())",
+        "23505",
+        "ingest_batch_id_key");
+    assertThat(count("SELECT count(*) FROM ingest_batch")).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateCheckpointForASourceAndStreamIsRejected() throws SQLException {
+    String checkpoint =
+        "INSERT INTO ingest_checkpoint (source_id, stream, state, batch_no)"
+            + " VALUES (1, 'trades', decode('00', 'hex'), 1)";
+    exec(checkpoint);
+    assertRejected(checkpoint, "23505", "ingest_checkpoint_pk");
+    // another stream of the source, and the stream of another source, are accepted
+    exec(
+        checkpoint.replace("'trades'", "'quotes'"), checkpoint.replace("VALUES (1,", "VALUES (2,"));
+    assertThat(count("SELECT count(*) FROM ingest_checkpoint")).isEqualTo(3);
+  }
+
+  @Test
+  void aSecondLeaseRowForOneEndpointIsRejected() throws SQLException {
+    long endpoint = returning(ENDPOINT_ROW + " RETURNING endpoint_id");
+    String lease =
+        "INSERT INTO lease (endpoint_id, restore_epoch, counter, holder, expires_at, released)"
+            + " VALUES ("
+            + endpoint
+            + ", 0, 1, 'holder-1', now(), false)";
+    exec(lease);
+    // the same endpoint with other values: only the key (entity, endpoint) can clash
+    assertRejected(
+        lease.replace(", 0, 1, 'holder-1',", ", 3, 9, 'holder-2',"), "23505", "lease_pk");
+    assertThat(count("SELECT count(*) FROM lease")).isEqualTo(1);
+    assertThat(count("SELECT counter FROM lease")).isEqualTo(1);
+  }
+
+  @Test
+  void aSecondRestoreEpochRowIsRejected() throws SQLException {
+    assertThat(count("SELECT count(*) FROM restore_epoch")).isEqualTo(1);
+    assertRejected(
+        "INSERT INTO restore_epoch (singleton, epoch) VALUES (true, 5)",
+        "23505",
+        "restore_epoch_pk");
+    // the other value of the flag is refused by the check, not by the key
+    assertRejected(
+        "INSERT INTO restore_epoch (singleton, epoch) VALUES (false, 5)",
+        "23514",
+        "restore_epoch_singleton_check");
+    assertThat(count("SELECT count(*) FROM restore_epoch")).isEqualTo(1);
+    assertThat(count("SELECT epoch FROM restore_epoch")).isZero();
+  }
+
+  @Test
+  void duplicateDecisionIdAndDayIsRejected() throws SQLException {
+    seedDictionaries();
+    long decision = insertDecision("r1", EVENT, 1, "01");
+    // the same (decision_id, as_at) with another sequence and digest: only decision_pk can clash
+    String again =
+        decisionRow("r1", EVENT, 2, "02")
+            .replace("INSERT INTO decision (", "INSERT INTO decision (decision_id, ")
+            .replace(" SELECT DATE", " SELECT " + decision + ", DATE");
+    assertRejectedOnPartitioned(again, "23505", "decision_pk");
+    assertThat(count("SELECT count(*) FROM decision")).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateSubjectIdIsRejected() throws SQLException {
+    String subject =
+        "INSERT INTO report_subject (subject_id, regime_id, event_identity, leg, last_version_seq)"
+            + " OVERRIDING SYSTEM VALUE VALUES (7, 1, '"
+            + EVENT
+            + "', 1, 0)";
+    exec(subject);
+    // the same id for another leg: only the primary key can clash
+    assertRejected(subject.replace(", 1, 0)", ", 2, 0)"), "23505", "report_subject_pk");
+    assertThat(count("SELECT count(*) FROM report_subject")).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateVersionNumberForOneSubjectIsRejected() throws SQLException {
+    seedDictionaries();
+    long first = insertDecision("r1", EVENT, 1, "01");
+    long second = insertDecision("r1", EVENT, 2, "02");
+    long subject = insertSubject("r1", EVENT, 1);
+    exec(versionRow(subject, 1, first));
+    // version 1 again, for another decision: only the key (subject, version) can clash
+    assertRejected(versionRow(subject, 1, second), "23505", "report_version_pk");
+    assertThat(count("SELECT count(*) FROM report_version")).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateDeliveryIdIsRejected() throws SQLException {
+    String delivery =
+        "INSERT INTO delivery (delivery_id, endpoint_id, endpoint_epoch, business_key, version_seq,"
+            + " state, gate_released, subject_id, created_at)"
+            + " VALUES (77, 1, 1, 'bk-a', 1, 3, false, NULL, now())";
+    exec(delivery);
+    // another business key under the same id: only the primary key can clash
+    assertRejected(delivery.replace("'bk-a'", "'bk-b'"), "23505", "delivery_pk");
+    assertThat(count("SELECT count(*) FROM delivery")).isEqualTo(1);
+  }
+
+  @Test
+  void decisionWithAnUnknownContextIsRejected() throws SQLException {
+    seedDictionaries();
+    String orphan =
+        "INSERT INTO decision (as_at, regime_id, event_identity, decision_seq, context_id,"
+            + " input_digest, outcome, circuit_open, body_encoding, body)"
+            + " SELECT DATE '"
+            + DAY
+            + "', r.regime_id, '"
+            + EVENT
+            + "', 1, 999999, decode(repeat('01', 32), 'hex'), 1, false, 1, decode('01', 'hex')"
+            + " FROM regime r WHERE r.regime = 'r1'";
+    assertRejectedOnPartitioned(orphan, "23503", "decision_context_fk");
+    assertThat(count("SELECT count(*) FROM decision")).isZero();
+  }
+
+  @Test
+  void ingestWithoutABatchIsRejected() throws SQLException {
+    assertRejected(ingestRow(999_999, "rec", 1, EVENT, "05"), "23503", "ingest_batch_fk");
+    assertThat(count("SELECT count(*) FROM ingest")).isZero();
+  }
+
+  @Test
+  void trnAssignmentWithoutASubjectIsRejected() throws SQLException {
+    assertRejected(trnRow(999_999, "LEI-A", "TRN1"), "23503", "trn_assignment_subject_fk");
+    assertThat(count("SELECT count(*) FROM trn_assignment")).isZero();
+  }
+
+  @Test
+  void attemptWithoutADeliveryIsRejected() throws SQLException {
+    assertRejected(attemptRow(1, 999_999), "23503", "attempt_delivery_fk");
+    assertThat(count("SELECT count(*) FROM attempt")).isZero();
+  }
+
+  @Test
+  void leaseWithoutAnEndpointIsRejected() throws SQLException {
+    assertRejected(
+        "INSERT INTO lease (endpoint_id, restore_epoch, counter, holder, expires_at, released)"
+            + " VALUES (999999, 0, 1, 'holder-1', now(), false)",
+        "23503",
+        "lease_endpoint_fk");
+    assertThat(count("SELECT count(*) FROM lease")).isZero();
   }
 
   // ------------------------------------------------------------------------------------------

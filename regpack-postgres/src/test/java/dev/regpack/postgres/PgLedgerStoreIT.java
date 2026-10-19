@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.IngestKey;
+import dev.regpack.model.Leg;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionCodec;
 import dev.regpack.model.decision.DecisionContext;
@@ -15,7 +16,10 @@ import dev.regpack.model.json.Json;
 import dev.regpack.ports.ledger.IngestLedger.Commit;
 import dev.regpack.ports.ledger.IngestLedger.Entry;
 import dev.regpack.ports.ledger.LedgerException;
+import dev.regpack.ports.ledger.ReportLedger.ReportableCommit;
+import dev.regpack.ports.ledger.ReportLedger.ReportableDecision;
 import dev.regpack.postgres.PgLedgerStore.Config;
+import dev.regpack.testkit.contract.LedgerFixtures;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -146,8 +150,16 @@ class PgLedgerStoreIT extends AbstractPgStoreTest {
             "SET TimeZone = 'Pacific/Kiritimati'",
             "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE");
     Config config = Config.forSchema(schema());
-    // the skew is real
+    // the skew is real; the three settings that the prologue sets without a skew are the
+    // session's own, and must be the same after the unit (TEETH-9: set_config(..., true))
+    List<String> sessionOwn;
     try (Connection connection = skewed.getConnection()) {
+      sessionOwn =
+          List.of(
+              show(connection, "search_path"),
+              show(connection, "lock_timeout"),
+              show(connection, "statement_timeout"));
+      assertThat(sessionOwn.get(0)).isNotEqualTo(schema());
       assertThat(show(connection, "synchronous_commit")).isEqualTo("off");
       assertThat(show(connection, "TimeZone")).isEqualTo("Pacific/Kiritimati");
       assertThat(show(connection, "transaction_isolation")).isEqualTo("serializable");
@@ -174,11 +186,52 @@ class PgLedgerStoreIT extends AbstractPgStoreTest {
       assertThat(show(connection, "synchronous_commit")).isEqualTo("off");
       assertThat(show(connection, "TimeZone")).isEqualTo("Pacific/Kiritimati");
       assertThat(show(connection, "transaction_isolation")).isEqualTo("serializable");
+      assertThat(
+              List.of(
+                  show(connection, "search_path"),
+                  show(connection, "lock_timeout"),
+                  show(connection, "statement_timeout")))
+          .isEqualTo(sessionOwn);
     }
     // and the adapter works through such sessions
     PgLedgerStore through = new PgLedgerStore(skewed, clock(), config);
     through.commitIngest(commit("K1", SRC, checkpoint(1), entry(SRC, "r1", 1, "A")));
     assertThat(store().findIngest(new IngestKey(SRC, "r1", 1))).isPresent();
+  }
+
+  /**
+   * D-S13: every instant column is bound from the injected clock. The TRN assignment, the report
+   * version and the delivery of one reportable unit carry the instant of the clock, not the one of
+   * the server.
+   */
+  @Test
+  void theInstantsOfATrnAssignmentAReportVersionAndItsDeliveryComeFromTheInjectedClock()
+      throws SQLException {
+    Instant at = Instant.parse("2031-02-03T04:05:06.123456Z");
+    clock().set(at);
+    store()
+        .commitReportable(
+            new ReportableCommit(
+                List.of(
+                    new ReportableDecision(
+                        LedgerFixtures.reportDecision(0, "E1", "ctx", "d1", Leg.MARKET),
+                        List.of(
+                            LedgerFixtures.newVersion(
+                                "E1", Leg.MARKET, "EXEC1", "TRN1", "NEWT", "h1")))),
+                Optional.empty(),
+                Optional.empty()));
+    assertThat(storedInstant("SELECT assigned_at FROM trn_assignment")).isEqualTo(at);
+    assertThat(storedInstant("SELECT created_at FROM report_version")).isEqualTo(at);
+    assertThat(storedInstant("SELECT created_at FROM delivery")).isEqualTo(at);
+  }
+
+  private Instant storedInstant(String sql) throws SQLException {
+    try (Connection connection = raw();
+        PreparedStatement statement = connection.prepareStatement(sql);
+        ResultSet rows = statement.executeQuery()) {
+      assertThat(rows.next()).isTrue();
+      return rows.getObject(1, OffsetDateTime.class).toInstant();
+    }
   }
 
   @Test

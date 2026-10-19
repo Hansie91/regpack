@@ -14,6 +14,7 @@ import static dev.regpack.testkit.contract.LedgerFixtures.reportBody;
 import static dev.regpack.testkit.contract.LedgerFixtures.reportDecision;
 import static dev.regpack.testkit.contract.LedgerFixtures.subjectKey;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.IngestKey;
@@ -25,6 +26,7 @@ import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.ledger.DecisionLedger.BatchCommit;
 import dev.regpack.ports.ledger.DecisionLedger.CommitStatus;
+import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.IngestLedger.Result;
@@ -39,6 +41,7 @@ import dev.regpack.ports.ledger.ReportLedger.StoredVersion;
 import dev.regpack.ports.ledger.ReportLedger.Subject;
 import dev.regpack.ports.ledger.ReportLedger.SubjectKey;
 import dev.regpack.ports.ledger.ReportLedger.VersionStatus;
+import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -173,6 +176,24 @@ public interface ExitFixturesContract {
         .containsExactly(Sha256.ofUtf8("A"), Sha256.ofUtf8("B"));
   }
 
+  /** A version between two stored ones is stale against the highest, and is never reported. */
+  @Test
+  default void aVersionBetweenTwoStoredVersionsIsStaleAndNeverReported() {
+    receive("M1", 1, "A");
+    receive("M1", 3, "B");
+    Received between = receive("M1", 2, "C");
+
+    assertThat(between.disposition()).isEqualTo(Disposition.STALE);
+    assertThat(between.reported()).isEmpty();
+    assertThat(ledger().findIngest(new IngestKey(FIXTURE_SOURCE, "M1", 2))).isEmpty();
+    assertThat(ledger().decisionChain(mifir(), event("M1"))).hasSize(2);
+    assertThat(versionsOf("M1")).extracting(StoredVersion::versionSeq).containsExactly(1L, 2L);
+    assertThat(versionsOf("M1"))
+        .extracting(StoredVersion::logicalHash)
+        .containsExactly(Sha256.ofUtf8("A"), Sha256.ofUtf8("B"));
+    assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 10)).isEmpty();
+  }
+
   /**
    * Spec 10: the same source version with a different content hash is never a silent merge. The
    * UNDETERMINED decision with its data-quality item is made by the pipeline and queued by a later
@@ -246,6 +267,48 @@ public interface ExitFixturesContract {
           .isEqualTo(DeliveryState.PREPARED);
     }
     assertThat(versions).extracting(v -> v.delivery().orElseThrow()).doesNotHaveDuplicates();
+  }
+
+  /**
+   * The narrowing of the A-B-A fixture, made visible: the three decisions above all have the
+   * outcome REPORT. A chain with a report version cannot take a B decision whose outcome differs
+   * (REPORT, DO_NOT_REPORT, REPORT): rule 8 (D-L4) refuses B until the WITHDRAWN transaction exists
+   * (P3d), so the third decision is never reached with a differing B. The differing-outcome half of
+   * the exit clause is shown on a chain without versions by {@code
+   * DecisionLedgerContract#abaSameOutcomeThirdDecisionIsNewRow}.
+   */
+  @Test
+  default void abaWithADifferingOutcomeOnAChainWithAVersionFailsClosed() {
+    receive("X1", 1, "A");
+    NewDecision b =
+        LedgerFixtures.decision(
+            body(
+                "X1",
+                MIFIR_REGIME,
+                "ctx",
+                "B@v2",
+                Outcome.DO_NOT_REPORT,
+                Instant.parse("2026-10-09T10:00:00Z")),
+            1);
+
+    assertThatThrownBy(
+            () ->
+                ledger()
+                    .commitReportable(
+                        new ReportableCommit(
+                            List.of(new ReportableDecision(b, List.of())),
+                            Optional.empty(),
+                            Optional.empty())))
+        .isInstanceOf(WithdrawalRequiredException.class);
+    assertThatThrownBy(
+            () -> ledger().commitDecisions(new BatchCommit(List.of(b), Optional.empty())))
+        .isInstanceOf(WithdrawalRequiredException.class);
+
+    // B was not stored, so the chain is still the one decision and the next REPORT is seq 2
+    assertThat(ledger().decisionChain(mifir(), event("X1"))).hasSize(1);
+    Received again = receive("X1", 3, "A");
+    assertThat(again.reported().orElseThrow().decision().record().decisionSeq()).isEqualTo(2);
+    assertThat(versionsOf("X1")).extracting(StoredVersion::versionSeq).containsExactly(1L);
   }
 
   /**

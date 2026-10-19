@@ -455,6 +455,43 @@ public interface LeaseDeliveryLedgerContract {
   }
 
   /**
+   * The takeover of an expired lease under a race (TEETH-11): after the lease has expired, many
+   * contenders acquire at once and exactly one is granted, with the next counter of the endpoint;
+   * the others see the new holder. Repeated, so that every round races on a lease row that already
+   * exists and is expired, not on the insert of the first one. Meaningful only against a real
+   * store; the single-lock in-memory adapter passes trivially (spec 14.1).
+   */
+  @Test
+  default void concurrentTakeoverOfAnExpiredLeaseGrantsExactlyOneHolder() throws Exception {
+    int threads = 16;
+    LeaseToken previous = acquire(E1, "first");
+    for (int round = 1; round <= 3; round++) {
+      clock().advance(TTL);
+      int current = round;
+      List<LeaseResult> results =
+          runConcurrently(threads, i -> ledger().acquire(E1, "r" + current + "h" + i, TTL));
+      List<Granted> granted =
+          results.stream().filter(r -> r instanceof Granted).map(r -> (Granted) r).toList();
+      assertThat(granted).as("round " + round).hasSize(1);
+      assertThat(results.stream().filter(r -> r instanceof Held).count())
+          .as("round " + round)
+          .isEqualTo(threads - 1);
+      LeaseToken token = granted.get(0).grant().token();
+      assertThat(token.restoreEpoch()).isEqualTo(previous.restoreEpoch());
+      assertThat(token.counter()).as("round " + round).isEqualTo(previous.counter() + 1);
+      String winner = granted.get(0).grant().holder();
+      assertThat(
+              results.stream()
+                  .filter(r -> r instanceof Held)
+                  .map(r -> ((Held) r).holder())
+                  .distinct())
+          .as("every loser sees the winner")
+          .containsExactly(winner);
+      previous = token;
+    }
+  }
+
+  /**
    * Meaningful only against a real store; the single-lock in-memory adapter passes trivially (spec
    * 14.1).
    */
@@ -541,7 +578,7 @@ public interface LeaseDeliveryLedgerContract {
       release.countDown();
       List<T> results = new ArrayList<>();
       for (Future<T> f : futures) {
-        results.add(f.get());
+        results.add(f.get(60, java.util.concurrent.TimeUnit.SECONDS));
       }
       return results;
     } finally {

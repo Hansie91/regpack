@@ -139,7 +139,21 @@ public final class InMemoryLedgerStore implements LedgerStore {
     /** The idempotency key of a decision leaves out the UTC day of its asAt. */
     IDEMPOTENCY_KEY_IGNORES_DAY,
     /** A lease ttl above {@link LeaseLedger#MAX_TTL} is accepted. */
-    LEASE_TTL_UNBOUNDED
+    LEASE_TTL_UNBOUNDED,
+    /** The withdrawal guard looks at the first leg only. */
+    WITHDRAWAL_GUARD_FIRST_LEG_ONLY,
+    /** The withdrawal guard ignores the outcome: only a dropped leg counts. */
+    WITHDRAWAL_GUARD_IGNORES_OUTCOME,
+    /** The withdrawal guard also runs on a redelivered (NOOP_REDELIVERY) decision. */
+    WITHDRAWAL_GUARD_ON_REDELIVERY,
+    /** A version is accepted on a decision whose outcome is not REPORT. */
+    VERSION_ON_ANY_OUTCOME,
+    /** The highest stored version of an event is kept as the lowest one. */
+    HIGHEST_VERSION_IS_MIN,
+    /** The exact ingest key is not looked up first, only (event, source, version). */
+    EXACT_KEY_NOT_FIRST,
+    /** The pending outbox lists the items of every kind. */
+    OUTBOX_KIND_IGNORED
   }
 
   /** Constant stand-in for the day under IDEMPOTENCY_KEY_IGNORES_DAY. */
@@ -237,7 +251,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   /** Decides and, when the entry is new, stores it. Called only after validation. */
   private Disposition apply(Commit commit, Entry entry) {
-    StoredIngest existing = ingests.get(entry.key());
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    StoredIngest existing = flaw == Flaw.EXACT_KEY_NOT_FIRST ? null : ingests.get(entry.key());
     if (existing != null) {
       return existing.contentHash().equals(entry.contentHash())
           ? Disposition.NOOP_SAME_VERSION_SAME_HASH
@@ -273,7 +288,12 @@ public final class InMemoryLedgerStore implements LedgerStore {
     ingestsByEventVersion.put(
         new EventVersion(entry.eventIdentity(), commit.sourceId(), entry.key().sourceVersion()),
         stored);
-    highestVersion.put(sourceEvent, entry.key().sourceVersion());
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    highestVersion.put(
+        sourceEvent,
+        flaw == Flaw.HIGHEST_VERSION_IS_MIN && highest != null
+            ? Math.min(highest, entry.key().sourceVersion())
+            : entry.key().sourceVersion());
     owningSource.put(entry.eventIdentity(), commit.sourceId());
     return Disposition.NEW_VERSION;
   }
@@ -328,7 +348,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
         if (pending.size() >= limit) {
           break;
         }
-        if (item.kind() == kind && item.state() == OutboxState.PENDING) {
+        if ((item.kind() == kind || flaw == Flaw.OUTBOX_KIND_IGNORED)
+            && item.state() == OutboxState.PENDING) {
           pending.add(item);
         }
       }
@@ -354,7 +375,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
       List<Committed> committed = new ArrayList<>();
       for (NewDecision decision : commit.decisions()) {
         Committed c = stage.stage(decision);
-        if (c.status() == CommitStatus.INSERTED) {
+        if (c.status() == CommitStatus.INSERTED || flaw == Flaw.WITHDRAWAL_GUARD_ON_REDELIVERY) {
           requireNoWithdrawal(decision.body());
         }
         committed.add(c);
@@ -449,11 +470,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
       return;
     }
     for (Leg leg : Leg.values()) {
+      // test double only: deliberate flaws for ContractSuiteTeethTest
+      if (flaw == Flaw.WITHDRAWAL_GUARD_FIRST_LEG_ONLY && leg != Leg.values()[0]) {
+        break;
+      }
+      boolean outcomeWithdraws =
+          flaw != Flaw.WITHDRAWAL_GUARD_IGNORES_OUTCOME && body.outcome() != Outcome.REPORT;
       SubjectRow subject =
           subjects.get(indexKey(new SubjectKey(body.regime(), body.eventIdentity(), leg)));
       if (subject != null
           && !subject.versions.isEmpty()
-          && (body.outcome() != Outcome.REPORT || !body.legs().contains(leg))) {
+          && (outcomeWithdraws || !body.legs().contains(leg))) {
         throw new WithdrawalRequiredException(
             "the "
                 + leg
@@ -483,7 +510,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
       try {
         for (ReportableDecision reportable : commit.decisions()) {
           Committed committed = stage.stage(reportable.decision());
-          if (committed.status() == CommitStatus.INSERTED) {
+          if (committed.status() == CommitStatus.INSERTED
+              || flaw == Flaw.WITHDRAWAL_GUARD_ON_REDELIVERY) {
             requireNoWithdrawal(reportable.decision().body());
           }
           List<VersionResult> versionResults = new ArrayList<>();
@@ -513,12 +541,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
   }
 
   /** Rule 2: checked for the whole unit before anything is written. */
-  private static void validateVersions(ReportableDecision reportable) {
+  private void validateVersions(ReportableDecision reportable) {
     DecisionBody body = reportable.decision().body();
     Set<Leg> seen = EnumSet.noneOf(Leg.class);
     for (NewVersion version : reportable.versions()) {
       SubjectKey subject = version.subject();
-      if (body.outcome() != Outcome.REPORT) {
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (body.outcome() != Outcome.REPORT && flaw != Flaw.VERSION_ON_ANY_OUTCOME) {
         throw new IllegalArgumentException("a version needs a REPORT decision: " + body.outcome());
       }
       if (!body.legs().contains(subject.leg())) {

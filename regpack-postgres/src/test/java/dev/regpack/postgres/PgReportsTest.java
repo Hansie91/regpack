@@ -79,6 +79,21 @@ class PgReportsTest {
                 doNotReport, List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "h1")))));
   }
 
+  /** The outcome check on its own: the decision names the leg, so only the outcome refuses it. */
+  @Test
+  void aVersionOnANonReportDecisionThatNamesTheLegIsRefusedBeforeAnyConnection() {
+    for (Outcome outcome :
+        List.of(Outcome.DO_NOT_REPORT, Outcome.UNDETERMINED, Outcome.REPORT_BY_OTHER)) {
+      NewDecision names =
+          LedgerFixtures.decision(
+              LedgerFixtures.bodyWithLegs(MIFIR_REGIME, "E1", "ctx", "d1", outcome, MARKET), 0);
+      assertRefusedBeforeAnyConnection(
+          unit(
+              new ReportableDecision(
+                  names, List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "h1")))));
+    }
+  }
+
   @Test
   void aLegThatTheDecisionDoesNotReportIsRefusedBeforeAnyConnection() {
     assertRefusedBeforeAnyConnection(

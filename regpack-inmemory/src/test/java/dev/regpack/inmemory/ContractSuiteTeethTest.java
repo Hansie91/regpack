@@ -5,6 +5,8 @@ import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClass
 
 import dev.regpack.inmemory.mutants.AbaAsNoopLedgerContractTest;
 import dev.regpack.inmemory.mutants.AsAtNotCheckedLedgerContractTest;
+import dev.regpack.inmemory.mutants.ExactKeyNotFirstLedgerContractTest;
+import dev.regpack.inmemory.mutants.HighestVersionIsMinLedgerContractTest;
 import dev.regpack.inmemory.mutants.IdempotencyIgnoresContextLedgerContractTest;
 import dev.regpack.inmemory.mutants.IdempotencyIgnoresDayLedgerContractTest;
 import dev.regpack.inmemory.mutants.IgnoreLeaseTokenLedgerContractTest;
@@ -15,6 +17,7 @@ import dev.regpack.inmemory.mutants.NoTakeoverInDoubtLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoWithdrawalGuardLedgerContractTest;
 import dev.regpack.inmemory.mutants.NonAtomicDecisionsLedgerContractTest;
 import dev.regpack.inmemory.mutants.NonAtomicReportableLedgerContractTest;
+import dev.regpack.inmemory.mutants.OutboxKindIgnoredLedgerContractTest;
 import dev.regpack.inmemory.mutants.OverwriteOnDuplicateEvidenceContractTest;
 import dev.regpack.inmemory.mutants.PageUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.RedeliveryReingestsLedgerContractTest;
@@ -24,6 +27,10 @@ import dev.regpack.inmemory.mutants.SuppressAgainstAnyVersionLedgerContractTest;
 import dev.regpack.inmemory.mutants.TakeoverTouchesOtherEndpointsLedgerContractTest;
 import dev.regpack.inmemory.mutants.TrnNotUniquePerLeiLedgerContractTest;
 import dev.regpack.inmemory.mutants.TrnReassignedPerVersionLedgerContractTest;
+import dev.regpack.inmemory.mutants.VersionOnAnyOutcomeLedgerContractTest;
+import dev.regpack.inmemory.mutants.WithdrawalGuardFirstLegOnlyLedgerContractTest;
+import dev.regpack.inmemory.mutants.WithdrawalGuardIgnoresOutcomeLedgerContractTest;
+import dev.regpack.inmemory.mutants.WithdrawalGuardOnRedeliveryLedgerContractTest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -107,7 +114,9 @@ class ContractSuiteTeethTest {
         NoWithdrawalGuardLedgerContractTest.class,
         Set.of(
             "aSupersedingNonReportDecisionFailsClosedWhileVersionsExist",
-            "aSupersedingNonReportDecisionFailsClosedThroughCommitDecisionsToo"));
+            "aSupersedingNonReportDecisionFailsClosedThroughCommitDecisionsToo",
+            "aNonReportSecondDecisionOfTheUnitFailsClosedAndWritesNothing",
+            "abaWithADifferingOutcomeOnAChainWithAVersionFailsClosed"));
     expected.put(
         TakeoverTouchesOtherEndpointsLedgerContractTest.class,
         Set.of("takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder"));
@@ -123,6 +132,33 @@ class ContractSuiteTeethTest {
     expected.put(
         LeaseTtlUnboundedLedgerContractTest.class,
         Set.of("aLeaseTtlBeyondTheMaximumIsRejectedAndTheMaximumIsGranted"));
+
+    // FP3: the guards of rule 8 and rule 2 on every leg and outcome, the highest stored version,
+    // the exact ingest key and the kind filter of the outbox
+    expected.put(
+        WithdrawalGuardFirstLegOnlyLedgerContractTest.class,
+        Set.of("aSupersedingDecisionThatDropsALaterLegFailsClosed"));
+    expected.put(
+        WithdrawalGuardIgnoresOutcomeLedgerContractTest.class,
+        Set.of("aNonReportDecisionThatStillNamesLegsFailsClosed"));
+    expected.put(
+        WithdrawalGuardOnRedeliveryLedgerContractTest.class,
+        Set.of("aRedeliveryOfAnEarlierNonReportDecisionIsANoopWhenLaterVersionsExist"));
+    expected.put(
+        VersionOnAnyOutcomeLedgerContractTest.class,
+        Set.of("aVersionOnANonReportDecisionThatNamesLegsIsRefused"));
+    expected.put(
+        HighestVersionIsMinLedgerContractTest.class,
+        Set.of(
+            "aLowerVersionBetweenTwoStoredVersionsIsStale",
+            "aLowerVersionBetweenTwoVersionsOfOneCommitIsStale",
+            "aVersionBetweenTwoStoredVersionsIsStaleAndNeverReported"));
+    expected.put(
+        ExactKeyNotFirstLedgerContractTest.class,
+        Set.of("theExactKeyIsDecidedFirstEvenWhenTheEventIdentityDiffers"));
+    expected.put(
+        OutboxKindIgnoredLedgerContractTest.class,
+        Set.of("oneSequenceOutboxItemPerBatchEvenOnRedelivery"));
 
     List<String> misses = new ArrayList<>();
     expected.forEach(

@@ -195,6 +195,24 @@ public final class LedgerFixtures {
         List.of(legs));
   }
 
+  /**
+   * A body of any outcome that names exactly the given {@code legs}, in particular a non-REPORT
+   * body that still lists legs (which {@link #body} never builds); everything else as {@link
+   * #reportBody}.
+   */
+  public static DecisionBody bodyWithLegs(
+      String regime, String event, String ctxTag, String digestTag, Outcome outcome, Leg... legs) {
+    return decisionBody(
+        event,
+        regime,
+        ctxTag,
+        digestTag,
+        outcome,
+        Instant.parse("2026-10-09T10:00:00Z"),
+        Instant.parse("2026-10-09T09:30:00Z"),
+        List.of(legs));
+  }
+
   /** A REPORT decision in {@link #MIFIR_REGIME} that expects an empty chain (head 0). */
   public static DecisionLedger.NewDecision reportDecision(
       String event, String ctxTag, String digestTag, Leg... legs) {

@@ -297,6 +297,103 @@ class PackagingFilesTest {
   }
 
   /**
+   * FP3 (TEETH-1): the steps of job ledger-pg that run the real-store suites and gate on them are
+   * given word for word, and nothing in the job skips, ignores or tolerates a failure: no job-level
+   * condition, no continue-on-error, one verify step of the exact command, the install with -pl
+   * regpack-postgres -am, the traceability step that always runs in {@code --realstore only} mode
+   * and the annotation step.
+   */
+  @Test
+  void ledgerJobRunsAndGatesOnTheRealStoreSuites() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    assertThat(CiLedgerJob.problems(ci)).isEmpty();
+  }
+
+  /** The checker has teeth: each single edit that neuters the job is reported. */
+  @Test
+  void theLedgerJobCheckerReportsEachWayOfNeuteringTheJob() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    assertThat(CiLedgerJob.problems(ci)).isEmpty();
+    String traceability =
+        CiLedgerJob.TRACEABILITY_NAME
+            + "\n        if: always()\n        shell: bash\n"
+            + CiLedgerJob.TRACEABILITY_RUN
+            + "\n";
+    String annotate =
+        CiLedgerJob.ANNOTATE_NAME
+            + "\n        if: always()\n        shell: bash\n"
+            + CiLedgerJob.ANNOTATE_RUN
+            + "\n";
+    String verify = CiLedgerJob.VERIFY + "\n";
+    java.util.Map<String, String> broken = new java.util.LinkedHashMap<>();
+    broken.put(
+        "a job-level condition",
+        inLedgerJob(
+            ci, "    runs-on: ubuntu-24.04\n", "    if: false\n    runs-on: ubuntu-24.04\n"));
+    broken.put(
+        "continue-on-error on the verify step",
+        inLedgerJob(ci, verify, verify + "        continue-on-error: true\n"));
+    broken.put(
+        "continue-on-error on the job",
+        inLedgerJob(
+            ci,
+            "    timeout-minutes: 40\n",
+            "    timeout-minutes: 40\n    continue-on-error: true\n"));
+    broken.put(
+        "test failures ignored",
+        inLedgerJob(
+            ci,
+            verify,
+            "      - run: ./mvnw verify -pl regpack-postgres -Dmaven.test.failure.ignore=true\n"));
+    broken.put(
+        "tests skipped",
+        inLedgerJob(ci, verify, "      - run: ./mvnw verify -pl regpack-postgres -DskipTests\n"));
+    broken.put(
+        "integration tests skipped",
+        inLedgerJob(ci, verify, "      - run: ./mvnw verify -pl regpack-postgres -DskipITs\n"));
+    broken.put(
+        "another module verified",
+        inLedgerJob(ci, verify, "      - run: ./mvnw verify -pl regpack-engine\n"));
+    broken.put("no verify step", inLedgerJob(ci, verify, ""));
+    broken.put("a second verify step", inLedgerJob(ci, verify, verify + verify));
+    broken.put(
+        "no -am on the install",
+        inLedgerJob(ci, "install -pl regpack-postgres -am", "install -pl regpack-postgres"));
+    broken.put("no traceability step", inLedgerJob(ci, traceability, ""));
+    broken.put(
+        "traceability in skip mode", inLedgerJob(ci, "--realstore only", "--realstore skip"));
+    broken.put("traceability in the default mode", inLedgerJob(ci, " --realstore only", ""));
+    broken.put(
+        "traceability without if always",
+        inLedgerJob(ci, traceability, traceability.replace("        if: always()\n", "")));
+    broken.put("no annotation step", inLedgerJob(ci, annotate, ""));
+    broken.put(
+        "annotation without if always",
+        inLedgerJob(ci, annotate, annotate.replace("        if: always()\n", "")));
+    broken.put(
+        "a one minute timeout", inLedgerJob(ci, "timeout-minutes: 40", "timeout-minutes: 1"));
+    broken.put(
+        "no health command", inLedgerJob(ci, "--health-cmd \"pg_isready -U postgres\" ", ""));
+    broken.put("one health retry", inLedgerJob(ci, "--health-retries 12", "--health-retries 1"));
+    broken.put(
+        "a missing server skips the tests",
+        inLedgerJob(ci, "REGPACK_PG_REQUIRED: 'true'", "REGPACK_PG_REQUIRED: 'false'"));
+    for (java.util.Map.Entry<String, String> copy : broken.entrySet()) {
+      assertThat(copy.getValue()).as(copy.getKey()).isNotEqualTo(ci);
+      assertThat(CiLedgerJob.problems(copy.getValue())).as(copy.getKey()).isNotEmpty();
+    }
+  }
+
+  /** The workflow with the first {@code from} inside job ledger-pg replaced by {@code to}. */
+  private static String inLedgerJob(String ci, String from, String to) {
+    int job = ci.indexOf("\n  ledger-pg:\n");
+    assertThat(job).as("job ledger-pg").isNotNegative();
+    int at = ci.indexOf(from, job);
+    assertThat(at).as("text in job ledger-pg: " + from).isNotNegative();
+    return ci.substring(0, at) + to + ci.substring(at + from.length());
+  }
+
+  /**
    * T21 and AP-3, AP-6, AP-8: the capacity job runs only on a manual dispatch that sets both
    * inputs, on a GitHub-hosted runner, pulls the one digest-pinned image of the real-store job (the
    * same digest), publishes its port on the loopback only, holds no secret and no password, runs

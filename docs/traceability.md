@@ -68,4 +68,7 @@ exited_plans: P0
 | I9 | P3 | TEST | dev.regpack.postgres.PgLedgerStoreContractIT#stallAfterTokenCheckResumesAfterTakeoverAndTheMarkerCasFails | REALSTORE | BUILD | real PostgreSQL 18.6, job ledger-pg |
 | I9 | P3 | TEST | dev.regpack.postgres.PgLedgerStoreContractIT#restoreThenZombieSenderIsFencedAtTheGate | REALSTORE | BUILD | real PostgreSQL 18.6, job ledger-pg |
 | I9 | P3 | TEST | dev.regpack.postgres.PgLedgerStoreContractIT#concurrentAcquireGrantsExactlyOneHolder | REALSTORE | BUILD | real PostgreSQL 18.6, job ledger-pg |
+| I9 | P3 | TEST | dev.regpack.inmemory.InMemoryLedgerStoreContractTest#twoConcurrentSendersOnlyOneReachesTheDestination | INMEMORY | BUILD | interim: does not close the row |
+| I9 | P3 | TEST | dev.regpack.postgres.PgLedgerStoreContractIT#twoConcurrentSendersOnlyOneReachesTheDestination | REALSTORE | BUILD | real PostgreSQL 18.6, job ledger-pg; spec 14.4: two concurrent senders reaching a destination |
+| I9 | P3 | TEST | dev.regpack.postgres.PgFencingIT#theTokenPairIsComparedAsAWholeAcrossEpochs | REALSTORE | BUILD | real PostgreSQL 18.6, job ledger-pg; spec 14.4: a stale token against a lease row restored to epoch 0 next to the singleton at 1 |
 | I10 | P3,P4 | TEST | dev.regpack.inmemory.InMemoryEvidenceStoreContractTest#putSameKeyDifferentBytesIsIntegrityAlarmAndKeepsOriginal | INMEMORY | BUILD | interim: does not close the row |

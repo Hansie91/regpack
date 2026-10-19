@@ -131,6 +131,38 @@ class TrnDerivationTest {
         .isEqualTo("AAAQEAYE");
   }
 
+  /**
+   * RFC 4648 section 10, unpadded, and five bytes of ones: together they reach the last two
+   * characters of the alphabet ('6' is index 30, '7' is index 31), which the 0x00 to 0x1F vector
+   * above does not.
+   */
+  @Test
+  void knownAnswersOfRfc4648ReachTheWholeAlphabet() {
+    String[][] vectors = {
+      {"f", "MY"},
+      {"fo", "MZXQ"},
+      {"foo", "MZXW6"},
+      {"foob", "MZXW6YQ"},
+      {"fooba", "MZXW6YTB"},
+      {"foobar", "MZXW6YTBOI"}
+    };
+    for (String[] vector : vectors) {
+      Kms fake = new FixedMacKms(vector[0].getBytes(UTF_8));
+      assertThat(
+              TrnDerivation.derive(
+                      fake, KEY_ONE, REGIME_A, IDENTITY, Leg.MARKET, vector[1].length())
+                  .trn())
+          .as(vector[0])
+          .isEqualTo(vector[1]);
+    }
+    byte[] ones = new byte[5];
+    java.util.Arrays.fill(ones, (byte) 0xFF);
+    assertThat(
+            TrnDerivation.derive(new FixedMacKms(ones), KEY_ONE, REGIME_A, IDENTITY, Leg.MARKET, 8)
+                .trn())
+        .isEqualTo("77777777");
+  }
+
   @Test
   void aSigningKeyCannotBeUsedForTheMac() {
     assertThatThrownBy(() -> derive(SIGNING, REGIME_A, Leg.MARKET, 32))
