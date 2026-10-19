@@ -22,11 +22,15 @@ class GatesTest {
   private static Outcome run(String... args) {
     var outBytes = new ByteArrayOutputStream();
     var errBytes = new ByteArrayOutputStream();
+    // An explicit, empty environment: the result must not depend on the process environment (CI
+    // sets GITHUB_ACTIONS=true, which switches traceability to error annotations).
     int rc =
         Gates.run(
             args,
+            new ByteArrayInputStream(new byte[0]),
             new PrintStream(outBytes, true, StandardCharsets.UTF_8),
-            new PrintStream(errBytes, true, StandardCharsets.UTF_8));
+            new PrintStream(errBytes, true, StandardCharsets.UTF_8),
+            Map.of());
     return new Outcome(
         rc, outBytes.toString(StandardCharsets.UTF_8), errBytes.toString(StandardCharsets.UTF_8));
   }
