@@ -445,7 +445,8 @@ class PackagingFilesTest {
     // list of verbs, so that a pull, run, login, build, stop, create, cp, network or volume (or a
     // verb behind an option) fails the test
     java.util.regex.Matcher docker =
-        java.util.regex.Pattern.compile("\\bdocker\\b\\s*(\\S*)").matcher(String.join("\n", job));
+        java.util.regex.Pattern.compile("(?<![\\w/.-])docker(?![\\w/.-])\\s+(\\S*)")
+            .matcher(String.join("\n", job));
     int dockerCalls = 0;
     while (docker.find()) {
       dockerCalls++;

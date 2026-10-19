@@ -275,7 +275,19 @@ jobs:
             echo "runner cpus $(nproc)"
             free -m
             df -h /
+            lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Socket' || true
+            findmnt -T /var/lib || true
+            docker inspect --format 'network {{.HostConfig.NetworkMode}}' "$cid" || true
+            docker exec "$cid" pg_test_fsync -s 2 -f /var/lib/postgresql/data/pg_test_fsync.tmp || echo "pg_test_fsync unavailable or failed"
+            docker exec "$cid" rm -f /var/lib/postgresql/data/pg_test_fsync.tmp || true
           } | tee "regpack-postgres/target/capacity/fixture-${REGPACK_CAPACITY_VARIANT}.txt"
+          full_id="$(docker inspect --format '{{.Id}}' "$cid")"
+          cgdir="/sys/fs/cgroup/system.slice/docker-${full_id}.scope"
+          if [ -d "$cgdir" ]; then
+            echo "REGPACK_CAPACITY_CGROUP_DIR=$cgdir" >> "$GITHUB_ENV"
+          else
+            echo "::notice title=capacity ${REGPACK_CAPACITY_VARIANT} cgroup::no container cgroup directory at ${cgdir}"
+          fi
           settings="$(sql -c "SELECT string_agg(name || '=' || current_setting(name), ' ' ORDER BY name) FROM pg_settings WHERE name IN ('shared_buffers','synchronous_commit','max_wal_size','checkpoint_timeout','track_io_timing','track_wal_io_timing')")"
           limits="$(docker inspect --format 'memory {{.HostConfig.Memory}} swap {{.HostConfig.MemorySwap}} shm {{.HostConfig.ShmSize}}' "$cid")"
           echo "::notice title=capacity ${REGPACK_CAPACITY_VARIANT} server::${settings}"
