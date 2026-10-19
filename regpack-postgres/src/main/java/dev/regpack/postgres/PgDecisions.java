@@ -5,11 +5,9 @@ import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
 import dev.regpack.model.decision.DecisionBody;
-import dev.regpack.model.decision.DecisionCodec;
 import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
-import dev.regpack.model.json.Json;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DecisionLedger.BatchCommit;
 import dev.regpack.ports.ledger.DecisionLedger.CommitStatus;
@@ -39,7 +37,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
@@ -55,7 +52,11 @@ import javax.sql.DataSource;
  *
  * <ol>
  *   <li>the dictionary rows: the regime, and the decision context once per distinct context id of
- *       the unit (a stub row when the context is not given, filled once when it is, D-S7);
+ *       the unit (a stub row when the context is not given, filled once when it is, D-S7). They are
+ *       resolved before the unit, each kind in a short transaction of its own ({@link
+ *       PgDictionaries}), so that a new row is not held uncommitted for the length of a long unit
+ *       (a concurrent unit that needs the same new row would wait for it until {@code
+ *       lock_timeout}); an orphan row after a failed unit is harmless;
  *   <li>a plain read of the head of the chain; it supplies the link to the superseded decision and
  *       is not judged yet, because a redelivery with a stale expected head is a no-op;
  *   <li>the insert of the decision row, {@code ON CONFLICT ON CONSTRAINT decision_idem_key DO
@@ -106,23 +107,6 @@ final class PgDecisions {
   static final String PARTITION_LISTED_SQL =
       "SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
           + " WHERE c.relname = ? AND i.inhparent = 'decision'::regclass";
-
-  static final String REGIME_SELECT_SQL = "SELECT regime_id FROM regime WHERE regime = ?";
-
-  static final String REGIME_INSERT_SQL =
-      "INSERT INTO regime (regime) VALUES (?) ON CONFLICT ON CONSTRAINT regime_name_key DO NOTHING";
-
-  static final String CONTEXT_SELECT_SQL =
-      "SELECT context_id, body IS NULL FROM decision_context WHERE context_sha = decode(?, 'hex')";
-
-  static final String CONTEXT_INSERT_SQL =
-      "INSERT INTO decision_context (context_sha) VALUES (decode(?, 'hex'))"
-          + " ON CONFLICT (context_sha) DO NOTHING";
-
-  /** The only UPDATE of {@code decision_context}: the stub fill (D-S7). */
-  static final String CONTEXT_FILL_SQL =
-      "UPDATE decision_context SET pack_digest = decode(?, 'hex'), circuit_epoch = ?,"
-          + " engine_build = ?, body = ? WHERE context_sha = decode(?, 'hex') AND body IS NULL";
 
   /** The heads of a wave, plain read: regime ids and event identities in, heads out. */
   static final String HEADS_SQL =
@@ -205,11 +189,18 @@ final class PgDecisions {
 
   private final DataSource dataSource;
   private final Config config;
+  private final PgDictionaries dictionaries;
   private final Set<LocalDate> knownPartitions = ConcurrentHashMap.newKeySet();
 
   PgDecisions(DataSource dataSource, Config config) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.config = Objects.requireNonNull(config, "config");
+    this.dictionaries = new PgDictionaries(dataSource, config);
+  }
+
+  /** The dictionary rows (regime, context, endpoint), resolved before a unit starts. */
+  PgDictionaries dictionaries() {
+    return dictionaries;
   }
 
   /** True when the decision was made under an open circuit (flag {@value #CIRCUIT_OPEN_FLAG}). */
@@ -222,18 +213,28 @@ final class PgDecisions {
 
   List<Committed> commitDecisions(BatchCommit commit) {
     Prepared prepared = prepare(commit);
-    return runUnit(prepared.days(), connection -> commitIn(connection, prepared, WaveHook.NONE));
+    beforeUnit(prepared);
+    return runUnit(connection -> commitIn(connection, prepared, WaveHook.NONE));
   }
 
   /**
-   * Runs one unit whose work includes the decision steps ({@link #commitIn}): the daily partitions
-   * of {@code days} are made first, outside the unit; a lost race for a head, signalled by {@link
-   * HeadMismatch}, becomes the {@link DecisionHeadConflictException} of a head that is read again
-   * after the rollback; the cache of known partitions is forgotten when no partition accepted a
-   * row. The report side of T18 runs its unit through here so that it shares all three.
+   * What a unit needs before it starts, each step outside the unit and in short transactions of its
+   * own: the daily partitions of the batch, then its dictionary rows ({@link PgDictionaries}). A
+   * partition that cannot be made fails the call before any dictionary row is written.
    */
-  <T> T runUnit(Collection<LocalDate> days, Unit.Work<T> work) {
-    ensurePartitions(days);
+  void beforeUnit(Prepared prepared) {
+    ensurePartitions(prepared.days());
+    resolveDictionaries(prepared);
+  }
+
+  /**
+   * Runs one unit whose work includes the decision steps ({@link #commitIn}) after {@link
+   * #beforeUnit}: a lost race for a head, signalled by {@link HeadMismatch}, becomes the {@link
+   * DecisionHeadConflictException} of a head that is read again after the rollback; the cache of
+   * known partitions is forgotten when no partition accepted a row. The report side of T18 runs its
+   * unit through here so that it shares both.
+   */
+  <T> T runUnit(Unit.Work<T> work) {
     try {
       return Unit.inUnit(dataSource, config, work);
     } catch (HeadMismatch mismatch) {
@@ -279,20 +280,20 @@ final class PgDecisions {
 
   /**
    * The decision steps of a unit, inside a transaction that the caller owns and started with {@link
-   * Unit#begin}: nothing is committed here and the partitions must exist (see {@link #runUnit}).
-   * After each wave the {@code hook} runs in the same transaction, so that the report side can add
-   * the versions of a decision before the next decision of the same chain is written and the
-   * withdrawal guard of that next decision sees them. The outbox item is completed last.
+   * Unit#begin}: nothing is committed here, the partitions must exist and the dictionary rows must
+   * be resolved (see {@link #beforeUnit}). After each wave the {@code hook} runs in the same
+   * transaction, so that the report side can add the versions of a decision before the next
+   * decision of the same chain is written and the withdrawal guard of that next decision sees them.
+   * The outbox item is completed last.
    */
   List<Committed> commitIn(Connection connection, Prepared prepared, WaveHook hook)
       throws SQLException {
     List<Item> items = prepared.items();
-    Map<String, Short> regimes = resolveRegimes(connection, items);
-    Map<String, Integer> contexts = resolveContexts(connection, items);
     List<Chain> chains = new ArrayList<>(items.size());
     for (Item item : items) {
-      item.regimeId = regimes.get(item.regime());
-      item.contextId = contexts.get(item.body().decisionContextId().hex());
+      if (!item.resolved) {
+        throw new IllegalStateException("the dictionary rows of the batch are not resolved");
+      }
       item.chain = new Chain(item.regimeId, item.body().eventIdentity().value());
       chains.add(item.chain);
     }
@@ -309,108 +310,31 @@ final class PgDecisions {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // dictionaries (step 0)
-
-  /** The dictionary ids of the regimes of the batch, resolved in name order. */
-  private static Map<String, Short> resolveRegimes(Connection connection, List<Item> items)
-      throws SQLException {
-    Set<String> names = new TreeSet<>();
-    for (Item item : items) {
-      names.add(item.regime());
-    }
-    Map<String, Short> ids = new HashMap<>();
-    for (String name : names) {
-      ids.put(name, resolveRegime(connection, name));
-    }
-    return ids;
-  }
-
-  private static short resolveRegime(Connection connection, String name) throws SQLException {
-    OptionalInt id = selectRegime(connection, name);
-    if (id.isEmpty()) {
-      try (PreparedStatement insert = connection.prepareStatement(REGIME_INSERT_SQL)) {
-        insert.setString(1, name);
-        insert.executeUpdate();
-      }
-      id = selectRegime(connection, name);
-    }
-    return (short)
-        id.orElseThrow(() -> new LedgerException("the regime dictionary row is missing"));
-  }
-
-  private static OptionalInt selectRegime(Connection connection, String name) throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement(REGIME_SELECT_SQL)) {
-      statement.setString(1, name);
-      try (ResultSet rows = statement.executeQuery()) {
-        return rows.next() ? OptionalInt.of(rows.getShort(1)) : OptionalInt.empty();
-      }
-    }
-  }
+  // dictionaries (step 0), before the unit
 
   /**
-   * The context row of every distinct context id of the batch, once per id, in id order; the first
-   * context that the batch supplies for an id fills the stub row of that id.
+   * Resolves the regimes and the contexts of the batch, outside the unit, and sets the ids on the
+   * items. The first context that the batch supplies for an id fills the stub row of that id. The
+   * context id that a supplied context carries was checked against the body in {@link #prepare},
+   * before anything is written.
    */
-  private static Map<String, Integer> resolveContexts(Connection connection, List<Item> items)
-      throws SQLException {
+  void resolveDictionaries(Prepared prepared) {
+    List<Item> items = prepared.items();
+    Set<String> names = new TreeSet<>();
     Map<String, Optional<DecisionContext>> supplied = new TreeMap<>();
     for (Item item : items) {
+      names.add(item.regime());
       supplied.merge(
           item.body().decisionContextId().hex(),
           item.decision().context(),
           (known, next) -> known.isPresent() ? known : next);
     }
-    Map<String, Integer> ids = new HashMap<>();
-    for (Map.Entry<String, Optional<DecisionContext>> entry : supplied.entrySet()) {
-      ids.put(entry.getKey(), resolveContext(connection, entry.getKey(), entry.getValue()));
-    }
-    return ids;
-  }
-
-  private record ContextRow(int id, boolean stub) {}
-
-  private static int resolveContext(
-      Connection connection, String contextHex, Optional<DecisionContext> context)
-      throws SQLException {
-    Optional<ContextRow> row = selectContext(connection, contextHex);
-    if (row.isEmpty()) {
-      try (PreparedStatement insert = connection.prepareStatement(CONTEXT_INSERT_SQL)) {
-        insert.setString(1, contextHex);
-        insert.executeUpdate();
-      }
-      // a skipped insert burns an identity value; the row that won the race is read here
-      row = selectContext(connection, contextHex);
-    }
-    ContextRow found =
-        row.orElseThrow(() -> new LedgerException("the decision context row is missing"));
-    if (found.stub() && context.isPresent()) {
-      fillContext(connection, contextHex, context.get());
-    }
-    return found.id();
-  }
-
-  private static Optional<ContextRow> selectContext(Connection connection, String contextHex)
-      throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement(CONTEXT_SELECT_SQL)) {
-      statement.setString(1, contextHex);
-      try (ResultSet rows = statement.executeQuery()) {
-        return rows.next()
-            ? Optional.of(new ContextRow(rows.getInt(1), rows.getBoolean(2)))
-            : Optional.empty();
-      }
-    }
-  }
-
-  /** Fills a stub row; a row that is not a stub any more (a concurrent fill) is left alone. */
-  private static void fillContext(Connection connection, String contextHex, DecisionContext context)
-      throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement(CONTEXT_FILL_SQL)) {
-      statement.setString(1, context.packDigest().hex());
-      statement.setLong(2, context.circuitEpoch());
-      statement.setString(3, context.engineBuild());
-      statement.setString(4, Json.canonical(DecisionCodec.contextToMap(context)));
-      statement.setString(5, contextHex);
-      statement.executeUpdate();
+    Map<String, Short> regimes = dictionaries.regimes(names);
+    Map<String, Integer> contexts = dictionaries.contexts(supplied);
+    for (Item item : items) {
+      item.regimeId = regimes.get(item.regime());
+      item.contextId = contexts.get(item.body().decisionContextId().hex());
+      item.resolved = true;
     }
   }
 
@@ -1052,6 +976,10 @@ final class PgDecisions {
 
     short regimeId;
     int contextId;
+
+    /** True once {@link #resolveDictionaries} has set the ids above. */
+    boolean resolved;
+
     Chain chain;
 
     /** The sequence of the head that was read, 0 when the chain has no head. */

@@ -45,9 +45,12 @@ import org.junit.jupiter.api.Timeout;
  */
 @Tag("capacity")
 class LedgerBurstProbeIT {
-  /** Raised from the adapter defaults: a commit under memory pressure can take many seconds. */
-  private static final Duration LOCK_TIMEOUT = Duration.ofSeconds(60);
-
+  /**
+   * The only timeout raised from the adapter defaults (Convention 11 allows the statement timeout).
+   * The lock timeout stays at the adapter default of five seconds, so that the read-out shows what
+   * the default timeouts do under the load: a unit that waits for a lock longer than that is a
+   * result of the probe, not something to hide.
+   */
   private static final Duration STATEMENT_TIMEOUT = Duration.ofMinutes(5);
 
   /** The settings that are recorded in the read-out, so that it states the server it ran on. */
@@ -122,7 +125,6 @@ class LedgerBurstProbeIT {
       PgLedgerStore.Config config =
           PgLedgerStore.Config.forSchema(schema)
               .withForceSynchronousCommit(settings.forceSynchronousCommit())
-              .withLockTimeout(LOCK_TIMEOUT)
               .withStatementTimeout(STATEMENT_TIMEOUT);
       CountingDataSource counting = CountingDataSource.over(server);
       PgLedgerStore store = new PgLedgerStore(counting.dataSource(), new WallClock(), config);

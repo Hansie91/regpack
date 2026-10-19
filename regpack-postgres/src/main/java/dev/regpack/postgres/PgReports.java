@@ -16,6 +16,7 @@ import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.DeliveryLedger.NewDelivery;
+import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LedgerException;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
@@ -46,6 +47,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -73,9 +75,13 @@ import javax.sql.DataSource;
  *       not exist yet is created only while the decision is still the head: the head row is read
  *       {@code FOR SHARE} (rule 3), so that a concurrent decision that supersedes it waits at its
  *       compare-and-set until this unit has committed, and then its withdrawal guard sees the
- *       version;
+ *       version. Share locks do not exclude each other, so two redeliveries of the same decision
+ *       can both miss the version here; the read is repeated under the subject lock (next step);
  *   <li>the subject row is inserted {@code ON CONFLICT ON CONSTRAINT report_subject_key DO NOTHING}
- *       and locked {@code FOR UPDATE}: the version number is assigned under that lock (rule 6);
+ *       and locked {@code FOR UPDATE}: the version number is assigned under that lock (rule 6). For
+ *       a redelivery the existing-version read is repeated now, under the lock, and a version that
+ *       the other unit has committed meanwhile is {@code EXISTING}, before the TRN and suppression
+ *       steps;
  *   <li>the stored TRN is read first. A subject with a TRN takes it (the cases of {@link
  *       IllegalArgumentException} are decided by this read, never by catching {@code
  *       trn_assignment_pk}) and is checked for suppression (rule 7: the latest version whose latest
@@ -88,10 +94,16 @@ import javax.sql.DataSource;
  * </ol>
  *
  * <p>A unique violation of {@code report_version_decision_subject_key} on the insert would mean
- * that two units wrote the same version; it is not expected (the subject lock serialises them) and
- * is surfaced as the {@link LedgerException} of {@link PgErrors#wrap}. Nothing continues after an
- * expected violation, so no savepoint is needed. The {@code SEQUENCE} outbox item is inserted last
- * when at least one version was created (rule 9).
+ * that two units wrote the same version of one decision. It is not expected: a decision that this
+ * unit inserted is not visible to any other unit, and for a redelivered decision the existing
+ * version is read under the subject lock, which every writer of a version of that subject holds
+ * (two redeliveries are serialised there, and the second answers {@code EXISTING}). Should it
+ * happen it is surfaced as the {@link LedgerException} of {@link PgErrors#wrap}. Nothing continues
+ * after an expected violation, so no savepoint is needed. The {@code SEQUENCE} outbox item is
+ * inserted last when at least one version was created (rule 9).
+ *
+ * <p>The dictionary rows of the unit, including the endpoints of the deliveries, are resolved
+ * before the unit starts ({@link PgDictionaries}); the unit reads their ids.
  *
  * <p>Nothing is checked in Java that the schema can decide (D-L3); the Java checks are the argument
  * rules of rule 2, which need no row, and the stored-TRN cases, which the port defines as {@link
@@ -238,22 +250,30 @@ final class PgReports {
   List<ReportableCommitted> commitReportable(ReportableCommit commit) {
     Plan plan = plan(commit);
     Instant now = ledgerTime();
-    return decisions.runUnit(plan.prepared().days(), connection -> run(connection, plan, now));
+    // partitions and dictionary rows (regime, context, endpoint) first, each in a short
+    // transaction: the unit below only reads their ids
+    decisions.beforeUnit(plan.prepared());
+    Map<EndpointKey, Integer> endpointIds = decisions.dictionaries().endpoints(plan.endpoints());
+    return decisions.runUnit(connection -> run(connection, plan, now, endpointIds));
   }
 
   /**
    * {@link #commitReportable} in a transaction that the caller owns and started with {@link
    * Unit#begin}: nothing is committed, the partitions of the decisions must exist, and a lost race
    * for a head is signalled by an internal exception instead of the typed conflict, which only
-   * {@link #commitReportable} produces after its rollback.
+   * {@link #commitReportable} produces after its rollback. The dictionary rows are resolved first,
+   * on connections of their own, as {@link #commitReportable} does.
    */
   List<ReportableCommitted> commitReportableIn(Connection connection, ReportableCommit commit)
       throws SQLException {
     Plan plan = plan(commit);
-    return run(connection, plan, ledgerTime());
+    decisions.resolveDictionaries(plan.prepared());
+    Map<EndpointKey, Integer> endpointIds = decisions.dictionaries().endpoints(plan.endpoints());
+    return run(connection, plan, ledgerTime(), endpointIds);
   }
 
-  private record Plan(ReportableCommit commit, Prepared prepared) {}
+  /** The request, its decisions prepared for the unit, and the endpoints of its versions. */
+  private record Plan(ReportableCommit commit, Prepared prepared, Set<EndpointKey> endpoints) {}
 
   /**
    * Validates the whole request before any connection is opened (rule 2 and the decision rules).
@@ -266,10 +286,14 @@ final class PgReports {
     }
     Prepared prepared =
         PgDecisions.prepare(new BatchCommit(newDecisions, commit.completesOutbox()));
+    Set<EndpointKey> endpoints = new LinkedHashSet<>();
     for (ReportableDecision reportable : commit.decisions()) {
       validateVersions(reportable);
+      for (NewVersion version : reportable.versions()) {
+        endpoints.add(version.endpoint());
+      }
     }
-    return new Plan(commit, prepared);
+    return new Plan(commit, prepared, Collections.unmodifiableSet(endpoints));
   }
 
   /** Rule 2: a version needs a REPORT decision, a leg of it, once, and its own chain. */
@@ -302,9 +326,10 @@ final class PgReports {
     return now;
   }
 
-  private List<ReportableCommitted> run(Connection connection, Plan plan, Instant now)
+  private List<ReportableCommitted> run(
+      Connection connection, Plan plan, Instant now, Map<EndpointKey, Integer> endpointIds)
       throws SQLException {
-    Run run = new Run(plan, now);
+    Run run = new Run(plan, now, endpointIds);
     List<Committed> committed = decisions.commitIn(connection, plan.prepared(), run::afterWave);
     List<ReportableCommitted> results = new ArrayList<>(committed.size());
     for (int i = 0; i < committed.size(); i++) {
@@ -320,12 +345,14 @@ final class PgReports {
   private final class Run {
     private final Plan plan;
     private final Instant now;
+    private final Map<EndpointKey, Integer> endpointIds;
     private final Map<Integer, List<VersionResult>> byDecision = new HashMap<>();
     boolean anyCreated;
 
-    Run(Plan plan, Instant now) {
+    Run(Plan plan, Instant now, Map<EndpointKey, Integer> endpointIds) {
       this.plan = plan;
       this.now = now;
+      this.endpointIds = endpointIds;
     }
 
     List<VersionResult> versionsOf(int index) {
@@ -344,7 +371,8 @@ final class PgReports {
         }
         Arrays.sort(order, Comparator.comparingInt(i -> Codes.of(versions.get(i).subject().leg())));
         for (int position : order) {
-          results[position] = applyVersion(connection, now, written, versions.get(position));
+          results[position] =
+              applyVersion(connection, now, written, versions.get(position), endpointIds);
           anyCreated |= results[position].status() == VersionStatus.CREATED;
         }
         byDecision.put(written.index(), List.of(results));
@@ -356,13 +384,20 @@ final class PgReports {
   // one version
 
   private static VersionResult applyVersion(
-      Connection connection, Instant now, Written written, NewVersion version) throws SQLException {
+      Connection connection,
+      Instant now,
+      Written written,
+      NewVersion version,
+      Map<EndpointKey, Integer> endpointIds)
+      throws SQLException {
     DecisionRecord decision = written.committed().record();
     DecisionBody body = decision.body();
     EventIdentity event = body.eventIdentity();
     short leg = Codes.of(version.subject().leg());
-    if (written.committed().status() == CommitStatus.NOOP_REDELIVERY) {
-      // rule 3: found by a read, never by a unique violation
+    boolean redelivery = written.committed().status() == CommitStatus.NOOP_REDELIVERY;
+    if (redelivery) {
+      // rule 3: found by a read, never by a unique violation. This read is the cheap path; it is
+      // not stable, because a concurrent unit may be creating the version right now (see below).
       Optional<VersionResult> existing =
           existingVersion(connection, decision.decisionId(), written.regimeId(), event, leg);
       if (existing.isPresent()) {
@@ -371,6 +406,19 @@ final class PgReports {
       requireStillHead(connection, written, decision);
     }
     LockedSubject subject = lockSubject(connection, written.regimeId(), event, leg);
+    if (redelivery) {
+      // Two units that redeliver the same decision both miss the version above (neither has
+      // committed) and both pass the shared lock on the head; the subject lock serialises them
+      // here. The one that waited reads again under the lock, a new statement at READ COMMITTED
+      // that sees what the other unit committed: that version exists, so the answer is EXISTING
+      // (as in the in-memory adapter), whatever content the redelivery carries, and not a
+      // suppression or a second version of the same decision.
+      Optional<VersionResult> existing =
+          existingVersion(connection, decision.decisionId(), written.regimeId(), event, leg);
+      if (existing.isPresent()) {
+        return existing.get();
+      }
+    }
     Optional<StoredTrn> stored = readTrn(connection, subject.id());
     String trn;
     if (stored.isPresent()) {
@@ -404,6 +452,10 @@ final class PgReports {
     insertVersion(
         connection, now, subject.id(), versionSeq, written, decision.decisionId(), version);
     bumpSubject(connection, subject.id());
+    Integer endpointId = endpointIds.get(version.endpoint());
+    if (endpointId == null) {
+      throw new LedgerException("the endpoint of a version was not resolved before the unit");
+    }
     DeliveryId delivery =
         PgDeliveries.createDelivery(
             connection,
@@ -413,7 +465,8 @@ final class PgReports {
                 version.endpointEpoch(),
                 version.executingLei() + "|" + trn,
                 versionSeq),
-            OptionalLong.of(subject.id()));
+            OptionalLong.of(subject.id()),
+            endpointId);
     return new VersionResult(
         new SubjectId(subject.id()), trn, versionSeq, VersionStatus.CREATED, Optional.of(delivery));
   }

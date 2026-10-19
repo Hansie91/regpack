@@ -12,7 +12,8 @@ import org.postgresql.util.ServerErrorMessage;
 /**
  * Classifies PostgreSQL errors by SQLState and by the constraint name that the server reports,
  * never by message text (Convention 6 and 11), and turns them into a {@link LedgerException} whose
- * message carries nothing but those two fields (Convention 12).
+ * message carries nothing but those two fields (Convention 12). The original exception stays as the
+ * cause, so the guarantee covers the message only: see {@link #wrap}.
  */
 public final class PgErrors {
   /** What a failed statement means to the adapter. */
@@ -81,7 +82,15 @@ public final class PgErrors {
   /**
    * Returns {@code ledger statement failed: sqlstate=<SQLSTATE> constraint=<name|none>} with the
    * original exception as the cause. A SQLState or constraint name that does not have the expected
-   * shape is written as {@code none}; no message, detail, hint, SQL text or value is ever repeated.
+   * shape is written as {@code none}; no message, detail, hint, SQL text or value is ever repeated
+   * <em>in the message of the returned exception</em>.
+   *
+   * <p>The cause is not sanitized: it is what the classification of {@link #classify} and the
+   * callers of the unit read, and its message carries the server's detail (the failing key or row,
+   * and for a batch the statement with its bound values). So the guarantee is about {@link
+   * LedgerException#getMessage()} only: a caller logs that message, never the exception with its
+   * causes ({@code printStackTrace}, a logger given the throwable), and an annotation or log line
+   * is built from the message (ADAPTER-5; the adapter itself logs nothing).
    */
   public static LedgerException wrap(SQLException e) {
     String state = sqlState(e);

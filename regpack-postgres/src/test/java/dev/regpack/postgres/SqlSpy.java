@@ -12,6 +12,7 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 
 /**
@@ -27,6 +28,21 @@ final class SqlSpy {
   private final AtomicInteger closed = new AtomicInteger();
   private volatile SQLException failOpen;
   private volatile SQLException failCommit;
+  private volatile Fault fault;
+  private volatile Answers answers;
+
+  /** A statement whose text contains {@code fragment} fails with {@code exception}. */
+  private record Fault(String fragment, SQLException exception) {}
+
+  /**
+   * What the fake server answers to a query: the rows (values by column, 1-based in the result set)
+   * for the text of the statement, given the events recorded so far, so that an answer can depend
+   * on what was executed before. An empty list is a result without rows.
+   */
+  @FunctionalInterface
+  interface Answers {
+    List<Object[]> rows(String sql, List<String> events);
+  }
 
   /** The data source to hand to the adapter; {@code real} may be null (a fake server). */
   DataSource over(DataSource real) {
@@ -60,6 +76,26 @@ final class SqlSpy {
   /** Every {@code commit} fails with this exception (after it is recorded). */
   SqlSpy failCommitWith(SQLException exception) {
     this.failCommit = exception;
+    return this;
+  }
+
+  /**
+   * Every execution of a statement whose text contains {@code sqlFragment} (execute, executeQuery,
+   * executeUpdate, executeBatch) fails with this exception, after it is recorded. For a batch the
+   * exception is what the driver throws from {@code executeBatch}, for example a {@link
+   * java.sql.BatchUpdateException}.
+   */
+  SqlSpy failStatementWith(String sqlFragment, SQLException exception) {
+    this.fault = new Fault(sqlFragment, exception);
+    return this;
+  }
+
+  /**
+   * A fake server that answers the queries of prepared statements and of plain statements; it
+   * applies only over no real data source ({@code over(null)}).
+   */
+  SqlSpy answering(Answers answers) {
+    this.answers = answers;
     return this;
   }
 
@@ -146,6 +182,13 @@ final class SqlSpy {
             String sql =
                 args != null && args.length > 0 && args[0] instanceof String s ? s : preparedSql;
             events.add("execute: " + sql);
+            Fault failing = fault;
+            if (failing != null && sql != null && sql.contains(failing.fragment())) {
+              throw failing.exception();
+            }
+            if (real == null && name.equals("executeQuery") && answers != null) {
+              return resultSetOf(answers.rows(sql, List.copyOf(events)));
+            }
           } else if (name.equals("setString")) {
             events.add("bind " + args[0] + "=" + args[1]);
           }
@@ -163,6 +206,45 @@ final class SqlSpy {
             SqlSpy.class.getClassLoader(),
             new Class<?>[] {ResultSet.class},
             (proxy, method, args) -> defaultFor(method));
+  }
+
+  /** A result set over the given rows: next, wasNull and the typed getters by column index. */
+  private static ResultSet resultSetOf(List<Object[]> rows) {
+    AtomicInteger cursor = new AtomicInteger(-1);
+    AtomicReference<Object> last = new AtomicReference<>();
+    return (ResultSet)
+        Proxy.newProxyInstance(
+            SqlSpy.class.getClassLoader(),
+            new Class<?>[] {ResultSet.class},
+            (proxy, method, args) -> {
+              String name = method.getName();
+              if (name.equals("next")) {
+                return cursor.incrementAndGet() < rows.size();
+              }
+              if (name.equals("wasNull")) {
+                return last.get() == null;
+              }
+              if (name.startsWith("get") && args != null && args[0] instanceof Integer column) {
+                Object value = rows.get(cursor.get())[column - 1];
+                last.set(value);
+                return typed(name, value, method);
+              }
+              return defaultFor(method);
+            });
+  }
+
+  private static Object typed(String getter, Object value, Method method) {
+    if (value == null) {
+      return defaultFor(method);
+    }
+    return switch (getter) {
+      case "getShort" -> ((Number) value).shortValue();
+      case "getInt" -> ((Number) value).intValue();
+      case "getLong" -> ((Number) value).longValue();
+      case "getBoolean" -> (Boolean) value;
+      case "getString" -> value.toString();
+      default -> value; // getBytes, getObject(column, type)
+    };
   }
 
   private static String sql(Object[] args) {

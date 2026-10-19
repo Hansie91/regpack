@@ -222,8 +222,8 @@ class PgDecisionsTest {
         .contains("CONSTRAINT decision_head_pk PRIMARY KEY (regime_id, event_identity)")
         .contains("CONSTRAINT regime_name_key UNIQUE (regime)")
         .contains("CONSTRAINT decision_context_sha_key UNIQUE (context_sha)");
-    assertThat(PgDecisions.CONTEXT_INSERT_SQL).contains("ON CONFLICT (context_sha) DO NOTHING");
-    assertThat(PgDecisions.REGIME_INSERT_SQL)
+    assertThat(PgDictionaries.CONTEXT_INSERT_SQL).contains("ON CONFLICT (context_sha) DO NOTHING");
+    assertThat(PgDictionaries.REGIME_INSERT_SQL)
         .contains("ON CONFLICT ON CONSTRAINT regime_name_key DO NOTHING");
     assertThat(PgDecisions.INSERT_SQL).contains("decision_idem_key");
   }

@@ -143,6 +143,29 @@ class PgErrorsTest {
         .isEqualTo("ledger statement failed: sqlstate=23505 constraint=decision_pk");
   }
 
+  /**
+   * The limit of the claim of Convention 12 (ADAPTER-5): only the message of the wrapping exception
+   * is free of server text. The original stays as the cause, because the classification and the
+   * unit's callers read it, and its message holds the server's detail (the failing key or row; for
+   * a batch also the statement with its bound values). A caller therefore logs {@code getMessage()}
+   * of a {@code LedgerException}, never the exception with its causes ({@code printStackTrace}, a
+   * logger given the throwable); this test pins the fact so that the documentation cannot drift.
+   */
+  @Test
+  void onlyTheWrappingMessageIsFreeOfServerTextTheCauseKeepsIt() {
+    PSQLException unique =
+        server(
+            "23505",
+            "ingest_pk",
+            "duplicate key value violates unique constraint",
+            "Key (source_id, source_record_id)=(1, REC-7) already exists.");
+    LedgerException wrapped = PgErrors.wrap(unique);
+
+    assertThat(wrapped.getMessage()).doesNotContain("REC-7").doesNotContain("duplicate");
+    assertThat(wrapped.getCause()).isSameAs(unique);
+    assertThat(wrapped.getCause().getMessage()).contains("REC-7");
+  }
+
   @Test
   void wrapNeverRepeatsFreeTextFromTheException() {
     LedgerException noState = PgErrors.wrap(new SQLException("password=hunter2 select 1"));

@@ -5,6 +5,7 @@ import static dev.regpack.testkit.contract.LedgerFixtures.decision;
 import static dev.regpack.testkit.contract.LedgerFixtures.withContext;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.assertj.core.api.Assertions.fail;
 
 import dev.regpack.model.EventIdentity;
@@ -22,9 +23,11 @@ import dev.regpack.ports.ledger.DecisionLedger.CommitStatus;
 import dev.regpack.ports.ledger.DecisionLedger.Committed;
 import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.LedgerException;
+import dev.regpack.ports.ledger.ReportLedger.NewVersion;
 import dev.regpack.ports.ledger.ReportLedger.ReportableCommit;
 import dev.regpack.ports.ledger.ReportLedger.ReportableCommitted;
 import dev.regpack.ports.ledger.ReportLedger.ReportableDecision;
+import dev.regpack.ports.ledger.ReportLedger.VersionResult;
 import dev.regpack.ports.ledger.ReportLedger.VersionStatus;
 import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import dev.regpack.postgres.PgLedgerStore.Config;
@@ -415,8 +418,9 @@ class PgDecisionsIT extends AbstractPgStoreTest {
         .isInstanceOf(LedgerException.class)
         .hasMessage("ledger statement failed: sqlstate=23514 constraint=none");
     assertThat(count("SELECT count(*) FROM decision_head")).isZero();
-    assertThat(count("SELECT count(*) FROM regime")).isZero();
-    assertThat(count("SELECT count(*) FROM decision_context")).isZero();
+    // the dictionary rows are resolved before the unit, which is what fails: they stay, as orphans
+    assertThat(count("SELECT count(*) FROM regime")).isEqualTo(1);
+    assertThat(count("SELECT count(*) FROM decision_context")).isEqualTo(1);
 
     try (Connection connection = raw();
         Statement statement = connection.createStatement()) {
@@ -868,7 +872,30 @@ class PgDecisionsIT extends AbstractPgStoreTest {
             });
     assertThat(count("SELECT count(*) FROM decision")).isZero();
     assertThat(count("SELECT count(*) FROM decision_head")).isZero();
-    assertThat(count("SELECT count(*) FROM regime")).isZero();
+    // the dictionary rows are resolved before the unit and stay (an orphan row is harmless)
+    assertThat(count("SELECT count(*) FROM regime")).isEqualTo(1);
+  }
+
+  /**
+   * The dictionary rows are committed before the unit starts, so a unit that fails leaves them: the
+   * regime, and the context in the state the batch supplied (SQL-1; D-S7 says "in the same unit", a
+   * deliberate and recorded deviation). Everything else of the unit is rolled back.
+   */
+  @Test
+  void aRolledBackBatchLeavesItsDictionaryRowsAndNothingElse() throws SQLException {
+    commitOne(body("X1", "d1", DAY1), 0);
+    DecisionContext context = LedgerFixtures.context("b-orphan");
+    DecisionBody fresh = withContext(body("X2", "d1", DAY1), context);
+    BatchCommit stale = batch(decision(fresh, 0, context), decision(body("X1", "d2", DAY1), 0));
+    assertThatThrownBy(() -> store().commitDecisions(stale))
+        .isInstanceOf(DecisionHeadConflictException.class);
+
+    assertThat(count("SELECT count(*) FROM decision")).isEqualTo(1);
+    assertThat(count("SELECT count(*) FROM decision_head")).isEqualTo(1);
+    assertThat(store().decisionChain(new Regime(MIFIR), event("X2"))).isEmpty();
+    assertThat(count("SELECT count(*) FROM regime")).isEqualTo(1);
+    assertThat(count("SELECT count(*) FROM decision_context WHERE body IS NULL")).isEqualTo(1);
+    assertThat(store().decisionContext(context.id())).contains(context);
   }
 
   /**
@@ -952,6 +979,231 @@ class PgDecisionsIT extends AbstractPgStoreTest {
       Thread.sleep(25);
     }
     fail("no backend waited for a lock of backend " + pid + " within " + WAIT_SECONDS + " s");
+  }
+
+  private static ReportableCommit reportable(NewDecision decision, NewVersion... versions) {
+    return new ReportableCommit(
+        List.of(new ReportableDecision(decision, List.of(versions))),
+        Optional.empty(),
+        Optional.empty());
+  }
+
+  private PgReports reportsOn(Config config) {
+    return new PgReports(dataSource(), clock(), config, new PgDecisions(dataSource(), config));
+  }
+
+  /**
+   * SQL-1. The first use of a regime, a context and an endpoint must not make another unit wait for
+   * the unit that uses them first. Unit 1 runs on a connection of the test and stays uncommitted
+   * after it has written a version for a new regime, a new context and a new endpoint. Unit 2 needs
+   * the same three rows, with a lock timeout of one second: when the rows were created inside unit
+   * 1 it would wait for unit 1's commit on the insert of the first of them, and fail with 55P03
+   * after one second. It must instead find the rows, because they were committed before unit 1
+   * started, and finish while unit 1 is still open.
+   */
+  @Test
+  void aUnitThatUsesNewDictionaryRowsDoesNotMakeAnotherUnitWaitForItsCommit() throws Exception {
+    // the daily piece exists (made by a decision of another regime), so no partition is involved
+    store()
+        .commitDecisions(
+            batch(
+                decision(
+                    LedgerFixtures.body(
+                        "S0", LedgerFixtures.EMIR_REGIME, "ctxS", "dS", Outcome.REPORT, EVAL),
+                    0)));
+    DecisionContext context = LedgerFixtures.context("b-new");
+    NewDecision first =
+        decision(
+            withContext(
+                LedgerFixtures.reportBody(
+                    LedgerFixtures.MIFIR_REGIME, "N1", "ctxN", "d1", Leg.MARKET),
+                context),
+            0,
+            context);
+    NewDecision second =
+        decision(
+            withContext(
+                LedgerFixtures.reportBody(
+                    LedgerFixtures.MIFIR_REGIME, "N2", "ctxN", "d1", Leg.MARKET),
+                context),
+            0,
+            context);
+    ReportableCommit unit1 =
+        reportable(
+            first, LedgerFixtures.newVersion("N1", Leg.MARKET, "EXEC1", "TRNN1", "NEWT", "h1"));
+    ReportableCommit unit2 =
+        reportable(
+            second, LedgerFixtures.newVersion("N2", Leg.MARKET, "EXEC1", "TRNN2", "NEWT", "h1"));
+    Config config = Config.forSchema(schema());
+    PgReports held = reportsOn(config);
+    PgLedgerStore impatient =
+        new PgLedgerStore(dataSource(), clock(), config.withLockTimeout(Duration.ofSeconds(1)));
+
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection c1 = dataSource().getConnection()) {
+      Unit.begin(c1, config);
+      List<ReportableCommitted> created = held.commitReportableIn(c1, unit1);
+      assertThat(created.get(0).versions().get(0).status()).isEqualTo(VersionStatus.CREATED);
+      // unit 1 is not committed, its dictionary rows are: another session sees all three
+      assertThat(count("SELECT count(*) FROM report_version")).isZero();
+      assertThat(count("SELECT count(*) FROM regime WHERE regime = '" + MIFIR + "'")).isEqualTo(1);
+      assertThat(count("SELECT count(*) FROM decision_context WHERE body IS NOT NULL"))
+          .isEqualTo(1);
+      assertThat(count("SELECT count(*) FROM endpoint")).isEqualTo(1);
+
+      Future<List<ReportableCommitted>> other =
+          pool.submit(() -> impatient.commitReportable(unit2));
+      List<ReportableCommitted> done = other.get(20, TimeUnit.SECONDS);
+      assertThat(done.get(0).versions().get(0).status()).isEqualTo(VersionStatus.CREATED);
+      assertThat(count("SELECT count(*) FROM report_version"))
+          .as("unit 1 is still open")
+          .isEqualTo(1);
+      c1.commit();
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(count("SELECT count(*) FROM report_version")).isEqualTo(2);
+    assertThat(count("SELECT count(*) FROM regime WHERE regime = '" + MIFIR + "'")).isEqualTo(1);
+    assertThat(count("SELECT count(*) FROM endpoint")).isEqualTo(1);
+  }
+
+  /**
+   * SQL-3 and ADAPTER-3. Two workers get the same redelivery of a decision that has no version yet.
+   * Worker 1 creates the version and is held before its commit; worker 2 misses the version (it is
+   * not committed), passes the shared lock on the head and waits for the subject. After worker 1
+   * has committed, worker 2 reads the version under the subject lock and answers {@code EXISTING}
+   * with the delivery of worker 1, also when its request carries other content; it neither
+   * suppresses nor adds a second version of the decision.
+   */
+  @Test
+  void aSecondRedeliveryWaitsForTheSubjectLockAndThenAnswersExisting() throws Exception {
+    assertSecondRedeliveryAnswersExisting("RD1", "TRNRD1", "h1");
+  }
+
+  @Test
+  void aSecondRedeliveryWithOtherContentAlsoAnswersExisting() throws Exception {
+    assertSecondRedeliveryAnswersExisting("RD2", "TRNRD2", "h2");
+  }
+
+  private void assertSecondRedeliveryAnswersExisting(String event, String trn, String secondHash)
+      throws Exception {
+    Config config = Config.forSchema(schema());
+    PgLedgerStore patient =
+        new PgLedgerStore(
+            dataSource(), clock(), config.withLockTimeout(Duration.ofSeconds(WAIT_SECONDS)));
+    NewDecision decision = LedgerFixtures.reportDecision(0, event, "ctx", "d1", Leg.MARKET);
+    patient.commitDecisions(batch(decision));
+    ReportableCommit one =
+        reportable(
+            decision, LedgerFixtures.newVersion(event, Leg.MARKET, "EXEC1", trn, "NEWT", "h1"));
+    ReportableCommit other =
+        reportable(
+            decision,
+            LedgerFixtures.newVersion(event, Leg.MARKET, "EXEC1", trn, "NEWT", secondHash));
+    PgReports reports = reportsOn(config);
+
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    VersionResult createdVersion;
+    VersionResult answer;
+    try (Connection c1 = dataSource().getConnection()) {
+      Unit.begin(c1, config);
+      List<ReportableCommitted> created = reports.commitReportableIn(c1, one);
+      assertThat(created.get(0).decision().status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+      createdVersion = created.get(0).versions().get(0);
+      assertThat(createdVersion.status()).isEqualTo(VersionStatus.CREATED);
+      int pid = backendPid(c1);
+
+      Future<List<ReportableCommitted>> blocked =
+          pool.submit(() -> patient.commitReportable(other));
+      awaitBackendWaitingFor(pid);
+      assertThat(blocked.isDone()).as("worker 2 waits for the subject of worker 1").isFalse();
+      c1.commit();
+      List<ReportableCommitted> finished = blocked.get(WAIT_SECONDS, TimeUnit.SECONDS);
+      assertThat(finished.get(0).decision().status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+      answer = finished.get(0).versions().get(0);
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(answer.status()).isEqualTo(VersionStatus.EXISTING);
+    assertThat(answer.subject()).isEqualTo(createdVersion.subject());
+    assertThat(answer.versionSeq()).isEqualTo(createdVersion.versionSeq()).isEqualTo(1);
+    assertThat(answer.trn()).isEqualTo(trn);
+    assertThat(answer.delivery()).isPresent().isEqualTo(createdVersion.delivery());
+    assertThat(store().versions(createdVersion.subject())).hasSize(1);
+    assertThat(
+            count(
+                "SELECT count(*) FROM delivery WHERE subject_id = "
+                    + createdVersion.subject().value()))
+        .isEqualTo(1);
+  }
+
+  /**
+   * ADAPTER-2. The documented mixed deadlock: a unit that supersedes chain A and redelivers chain B
+   * (with a version, which takes the head of B shared) against a session that holds the head of B
+   * and then asks for the head of A. The unit waits first, so its deadlock check fires first and it
+   * is the victim (the server's {@code deadlock_timeout} of one second is below the store's lock
+   * timeout of five). It must reach the caller as {@link DecisionHeadConflictException} with the
+   * deadlock as cause, after the rollback, and leave chain A at its old head; a plain {@code
+   * LedgerException} would not be retried by type.
+   */
+  @Test
+  void aDeadlockOnTheSharedHeadReadReachesTheCallerAsAHeadConflict() throws Exception {
+    NewDecision chainA = LedgerFixtures.reportDecision(0, "MA", "ctx", "d1", Leg.MARKET);
+    NewDecision chainB = LedgerFixtures.reportDecision(0, "MB", "ctx", "d1", Leg.MARKET);
+    store().commitDecisions(batch(chainA, chainB));
+    NewDecision supersedesA = LedgerFixtures.reportDecision(1, "MA", "ctx", "d2", Leg.MARKET);
+    ReportableCommit unit =
+        new ReportableCommit(
+            List.of(
+                new ReportableDecision(supersedesA, List.of()),
+                new ReportableDecision(
+                    chainB,
+                    List.of(
+                        LedgerFixtures.newVersion(
+                            "MB", Leg.MARKET, "EXEC1", "TRNMB", "NEWT", "h1")))),
+            Optional.empty(),
+            Optional.empty());
+    String headOf =
+        " FROM decision_head WHERE regime_id = (SELECT regime_id FROM regime WHERE regime = ?)"
+            + " AND event_identity = ?";
+
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection session = raw()) {
+      session.setAutoCommit(false);
+      int pid = backendPid(session);
+      try (PreparedStatement hold =
+          session.prepareStatement(
+              "UPDATE decision_head SET decision_seq = decision_seq"
+                  + " WHERE regime_id = (SELECT regime_id FROM regime WHERE regime = ?)"
+                  + " AND event_identity = ?")) {
+        hold.setString(1, MIFIR);
+        hold.setString(2, event("MB").value());
+        assertThat(hold.executeUpdate()).isEqualTo(1);
+      }
+      Future<List<ReportableCommitted>> victim = pool.submit(() -> store().commitReportable(unit));
+      awaitBackendWaitingFor(pid);
+      // the session now asks for the head that the unit has advanced: the cycle is closed, and the
+      // unit, which has waited longer, is the one the server aborts; this statement then proceeds
+      try (PreparedStatement ask = session.prepareStatement("SELECT 1" + headOf + " FOR SHARE")) {
+        ask.setString(1, MIFIR);
+        ask.setString(2, event("MA").value());
+        try (ResultSet rows = ask.executeQuery()) {
+          assertThat(rows.next()).isTrue();
+        }
+      }
+      session.rollback();
+      Throwable failure = catchThrowable(() -> victim.get(WAIT_SECONDS, TimeUnit.SECONDS));
+      assertThat(failure).isInstanceOf(ExecutionException.class);
+      Throwable conflict = failure.getCause();
+      assertThat(conflict).isInstanceOf(DecisionHeadConflictException.class);
+      assertThat(conflict.getCause()).isInstanceOf(SQLException.class);
+      assertThat(PgErrors.classify((SQLException) conflict.getCause()))
+          .isEqualTo(PgErrors.Violation.DEADLOCK);
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(store().decisionChain(new Regime(MIFIR), event("MA"))).hasSize(1);
+    assertThat(count("SELECT count(*) FROM report_version")).isZero();
   }
 
   /** A whole batch delivered twice: every decision is a no-op and nothing is written. */

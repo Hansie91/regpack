@@ -53,9 +53,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -947,6 +949,76 @@ public interface ReportLedgerContract {
     assertThat(ledger().decisionChain(mifir(), event("E1")))
         .extracting(DecisionRecord::decisionSeq)
         .containsExactlyElementsOf(range(total));
+  }
+
+  /**
+   * A decision committed without versions (a {@code commitDecisions} unit) is redelivered to two
+   * workers at once with the same version request. Whatever the interleaving, one unit creates the
+   * version and the other answers {@code EXISTING} with the same subject, version and delivery, and
+   * one version exists. Meaningful against a real store, where both units can miss the version
+   * before either has committed; the single-lock in-memory adapter passes trivially (spec 14.1).
+   */
+  @Test
+  default void twoConcurrentRedeliveriesOfOneDecisionYieldOneCreatedAndOneExisting()
+      throws Exception {
+    for (int round = 0; round < 8; round++) {
+      redeliverAtOnce("RA" + round, "h1", "h1");
+    }
+  }
+
+  /** The same with a redelivery whose content differs: the decision already has its version. */
+  @Test
+  default void aConcurrentRedeliveryWithOtherContentIsExistingNotASecondVersion() throws Exception {
+    for (int round = 0; round < 8; round++) {
+      redeliverAtOnce("RB" + round, "h1", "h2");
+    }
+  }
+
+  private void redeliverAtOnce(String event, String firstHash, String secondHash) throws Exception {
+    NewDecision decision = reportDecision(0, event, "ctx", "d1", MARKET);
+    ledger().commitDecisions(new BatchCommit(List.of(decision), Optional.empty()));
+    CyclicBarrier barrier = new CyclicBarrier(2);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      List<Future<VersionResult>> futures = new ArrayList<>();
+      for (String hash : List.of(firstHash, secondHash)) {
+        ReportableCommit redelivery =
+            new ReportableCommit(
+                List.of(
+                    new ReportableDecision(
+                        decision,
+                        List.of(newVersion(event, MARKET, "EXEC1", "TRN" + event, "NEWT", hash)))),
+                Optional.empty(),
+                Optional.empty());
+        futures.add(
+            pool.submit(
+                () -> {
+                  barrier.await(30, TimeUnit.SECONDS);
+                  ReportableCommitted committed = ledger().commitReportable(redelivery).get(0);
+                  assertThat(committed.decision().status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+                  return committed.versions().get(0);
+                }));
+      }
+      List<VersionResult> results = new ArrayList<>();
+      for (Future<VersionResult> future : futures) {
+        results.add(future.get(60, TimeUnit.SECONDS));
+      }
+      assertThat(results)
+          .extracting(VersionResult::status)
+          .as(event)
+          .containsExactlyInAnyOrder(VersionStatus.CREATED, VersionStatus.EXISTING);
+      VersionResult first = results.get(0);
+      VersionResult second = results.get(1);
+      assertThat(second.subject()).isEqualTo(first.subject());
+      assertThat(second.versionSeq()).isEqualTo(first.versionSeq()).isEqualTo(1);
+      assertThat(second.trn()).isEqualTo(first.trn());
+      assertThat(first.delivery()).isPresent();
+      assertThat(second.delivery()).isEqualTo(first.delivery());
+      assertThat(ledger().versions(first.subject())).hasSize(1);
+      assertThat(ledger().subject(key(event, MARKET)).orElseThrow().lastVersionSeq()).isEqualTo(1);
+    } finally {
+      pool.shutdownNow();
+    }
   }
 
   private static List<Long> range(int count) {

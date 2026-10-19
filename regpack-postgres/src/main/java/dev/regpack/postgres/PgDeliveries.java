@@ -150,6 +150,23 @@ final class PgDeliveries {
       throws SQLException {
     requireCreate(delivery);
     int endpointId = PgLeases.resolveEndpoint(connection, delivery.endpoint());
+    return createDelivery(connection, createdAt, delivery, subjectId, endpointId);
+  }
+
+  /**
+   * {@link #createDelivery(Connection, Instant, NewDelivery, OptionalLong)} for an endpoint whose
+   * dictionary id is known: the reportable unit resolves its endpoints before the unit starts
+   * ({@link PgDictionaries}), so that the first delivery to a new endpoint does not hold an
+   * uncommitted endpoint row for the length of a long unit.
+   */
+  static DeliveryId createDelivery(
+      Connection connection,
+      Instant createdAt,
+      NewDelivery delivery,
+      OptionalLong subjectId,
+      int endpointId)
+      throws SQLException {
+    requireCreate(delivery);
     try (PreparedStatement statement = connection.prepareStatement(CREATE_SQL)) {
       statement.setInt(1, endpointId);
       statement.setLong(2, delivery.endpointEpoch());

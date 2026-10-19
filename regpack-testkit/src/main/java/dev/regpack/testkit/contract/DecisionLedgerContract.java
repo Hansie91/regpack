@@ -362,7 +362,7 @@ public interface DecisionLedgerContract {
   }
 
   @Test
-  default void aBatchWithAStaleHeadStoresNoContext() {
+  default void aBatchWithAStaleHeadStoresNoDecision() {
     commitOne(body("E1", "ctx", "d1", Outcome.REPORT), 0);
     DecisionContext context = LedgerFixtures.context("b1");
     DecisionBody fresh = withContext(body("E2", "x", "d1", Outcome.REPORT), context);
@@ -373,7 +373,15 @@ public interface DecisionLedgerContract {
         .isInstanceOf(DecisionHeadConflictException.class);
 
     assertThat(ledger().decisionChain(new Regime(MIFIR), event("E2"))).isEmpty();
-    assertThat(ledger().decisionContext(context.id())).isEmpty();
+    assertThat(ledger().currentDecision(new Regime(MIFIR), event("E2"))).isEmpty();
+    // Whether the context of a rolled-back batch can be read afterwards is not part of the
+    // contract:
+    // a dictionary row is resolved before the unit starts on a store that must not hold a new row
+    // uncommitted for the length of a unit (the PostgreSQL adapter), and an orphan row is harmless.
+    // What the contract fixes is that a context stored this way is the one that was supplied.
+    ledger()
+        .decisionContext(context.id())
+        .ifPresent(stored -> assertThat(stored).isEqualTo(context));
   }
 
   @Test
