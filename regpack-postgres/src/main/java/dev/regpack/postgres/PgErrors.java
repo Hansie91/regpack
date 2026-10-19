@@ -38,6 +38,12 @@ public final class PgErrors {
      * of about 2.7 KB. The model bounds the keys, so this is a safety net; never a negative answer.
      */
     LIMIT_EXCEEDED,
+    /**
+     * SQLState 55P03: a lock was not obtained within {@code lock_timeout}. The statement and so the
+     * unit failed and was rolled back; nothing was written. Only the creation of a daily partition
+     * retries it ({@link PgDecisions#ensurePartitions}); every other unit surfaces it.
+     */
+    LOCK_TIMEOUT,
     OTHER
   }
 
@@ -69,6 +75,7 @@ public final class PgErrors {
       case "57P01", "57P02", "57P03", "53300" -> Violation.CONNECTION;
       case "22021" -> Violation.INVALID_TEXT;
       case "54000" -> Violation.LIMIT_EXCEEDED;
+      case "55P03" -> Violation.LOCK_TIMEOUT;
       default -> state.startsWith("08") ? Violation.CONNECTION : Violation.OTHER;
     };
   }

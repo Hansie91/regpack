@@ -255,7 +255,8 @@ final class PgReports {
     // transaction: the unit below only reads their ids
     decisions.beforeUnit(plan.prepared());
     Map<EndpointKey, Integer> endpointIds = decisions.dictionaries().endpoints(plan.endpoints());
-    return decisions.runUnit(connection -> run(connection, plan, now, endpointIds));
+    return decisions.runUnit(
+        plan.prepared().days(), connection -> run(connection, plan, now, endpointIds));
   }
 
   /**

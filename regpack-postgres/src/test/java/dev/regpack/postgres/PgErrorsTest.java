@@ -149,6 +149,19 @@ class PgErrorsTest {
     assertThat(PgErrors.classify(new SQLException("x", "40002"))).isEqualTo(Violation.OTHER);
   }
 
+  /** FP5: an expired lock_timeout (55P03) has a class of its own, so that creation can retry it. */
+  @Test
+  void aLockTimeoutIsClassifiedAndOnlyThatState() {
+    PSQLException timeout = server("55P03", null, "canceling statement due to lock timeout", null);
+    assertThat(PgErrors.classify(timeout)).isEqualTo(Violation.LOCK_TIMEOUT);
+    assertThat(PgErrors.classify(new SQLException("x", "55P03"))).isEqualTo(Violation.LOCK_TIMEOUT);
+    assertThat(PgErrors.classify(new SQLException("batch failed", timeout)))
+        .isEqualTo(Violation.LOCK_TIMEOUT);
+    assertThat(PgErrors.classify(new SQLException("x", "55P02"))).isEqualTo(Violation.OTHER);
+    assertThat(PgErrors.wrap(timeout))
+        .hasMessage("ledger statement failed: sqlstate=55P03 constraint=none");
+  }
+
   @Test
   void noPartitionHasNoConstraintName() {
     // "no partition of relation found for row" is SQLState 23514 with no constraint field

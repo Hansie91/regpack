@@ -32,7 +32,7 @@ final class SqlSpy {
   private volatile Answers answers;
 
   /** A statement whose text contains {@code fragment} fails with {@code exception}. */
-  private record Fault(String fragment, SQLException exception) {}
+  private record Fault(String fragment, SQLException exception, AtomicInteger remaining) {}
 
   /**
    * What the fake server answers to a query: the rows (values by column, 1-based in the result set)
@@ -86,7 +86,15 @@ final class SqlSpy {
    * java.sql.BatchUpdateException}.
    */
   SqlSpy failStatementWith(String sqlFragment, SQLException exception) {
-    this.fault = new Fault(sqlFragment, exception);
+    return failStatementWith(sqlFragment, exception, Integer.MAX_VALUE);
+  }
+
+  /**
+   * Like {@link #failStatementWith(String, SQLException)}, but only the first {@code times}
+   * executions fail: the later ones are answered as if there were no fault (a transient failure).
+   */
+  SqlSpy failStatementWith(String sqlFragment, SQLException exception, int times) {
+    this.fault = new Fault(sqlFragment, exception, new AtomicInteger(times));
     return this;
   }
 
@@ -183,7 +191,10 @@ final class SqlSpy {
                 args != null && args.length > 0 && args[0] instanceof String s ? s : preparedSql;
             events.add("execute: " + sql);
             Fault failing = fault;
-            if (failing != null && sql != null && sql.contains(failing.fragment())) {
+            if (failing != null
+                && sql != null
+                && sql.contains(failing.fragment())
+                && failing.remaining().getAndUpdate(left -> Math.max(0, left - 1)) > 0) {
               throw failing.exception();
             }
             if (real == null && name.equals("executeQuery") && answers != null) {

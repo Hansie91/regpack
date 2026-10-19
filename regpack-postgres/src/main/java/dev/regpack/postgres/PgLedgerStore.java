@@ -11,6 +11,7 @@ import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.ledger.LedgerStore;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -117,6 +118,24 @@ public final class PgLedgerStore implements LedgerStore {
     this.deliveries = new PgDeliveries(dataSource, clock, config);
     // the report unit shares the decision side: its partitions cache and its head conflicts
     this.reports = new PgReports(dataSource, clock, config, decisions);
+  }
+
+  /**
+   * Pre-creation of the daily partitions of {@code decision} (FP5, ADAPTER-1): creates the
+   * partitions of the {@code days} consecutive UTC dates from {@code from} that do not exist yet,
+   * each in a transaction of its own, and returns the dates that this call created. Not a port
+   * method: a scheduler (P3d, P7a) calls it off-peak, for example every day for the next two days,
+   * so that the first batch of a UTC day finds its partition and the {@code ATTACH PARTITION} does
+   * not run on the hot path. Creation on demand stays as the fallback. It creates the partitions
+   * also when {@link Config#partitionsOnDemand()} is off. A lock timeout is retried a few times
+   * (see {@code PgDecisions#PARTITION_BACKOFF}) and then surfaces as a {@link
+   * dev.regpack.ports.ledger.LedgerException} with SQLState 55P03; calling again is safe.
+   *
+   * @throws IllegalArgumentException when {@code days} is below 1 or above 366, or a date of the
+   *     window is outside 2000-01-01 to 2200-01-01; nothing is created then
+   */
+  public List<LocalDate> ensurePartitionsAhead(LocalDate from, int days) {
+    return decisions.ensurePartitionsAhead(from, days);
   }
 
   // IngestLedger (T15)

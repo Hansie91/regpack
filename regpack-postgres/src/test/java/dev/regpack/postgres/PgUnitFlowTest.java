@@ -82,7 +82,7 @@ class PgUnitFlowTest {
    * is {@code stored} at sequence {@code headSeq}). The dictionary rows appear once their insert
    * has been executed; the version, once the subject row has been locked, exists.
    */
-  private static SqlSpy.Answers server(long headSeq, boolean inserted, DecisionBody stored) {
+  static SqlSpy.Answers server(long headSeq, boolean inserted, DecisionBody stored) {
     return (sql, events) -> {
       if (sql.equals(PgDictionaries.REGIME_SELECT_SQL)) {
         return done(events, PgDictionaries.REGIME_INSERT_SQL) ? row((short) 1) : none();
@@ -276,7 +276,7 @@ class PgUnitFlowTest {
     }
   }
 
-  private static PSQLException serverError(String sqlState) {
+  static PSQLException serverError(String sqlState) {
     return new PSQLException(new ServerErrorMessage("SERROR\0C" + sqlState + "\0Mfailure\0"));
   }
 

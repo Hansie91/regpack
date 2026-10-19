@@ -43,9 +43,12 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
@@ -342,6 +345,109 @@ class PgDecisionsIT extends AbstractPgStoreTest {
   }
 
   /**
+   * FP5 (SQL-6): the same pruning for the statement the adapter really runs, with bound values and
+   * not literals, and for a plan that is made once and reused.
+   *
+   * <ol>
+   *   <li>{@link PgDecisions#PROBE_SQL} as it stands, bound through JDBC the way {@code probe}
+   *       binds it (a {@code long} and a {@code LocalDate}), under {@code EXPLAIN (ANALYZE, COSTS
+   *       OFF)}, executed seven times on one connection: more than the five executions after which
+   *       the driver prepares a statement on the server (prepareThreshold 5) and the server may
+   *       switch to a generic plan. Only the partition of the day may be named by each plan.
+   *   <li>The same statement as a server-side prepared statement under {@code plan_cache_mode =
+   *       force_generic_plan}, executed seven times under {@code EXPLAIN (ANALYZE, COSTS OFF)
+   *       EXECUTE}: a generic plan cannot know the day when it is made, so the other partitions
+   *       must be removed when the executor starts ({@code Subplans Removed}) and only the
+   *       partition of the day may be named.
+   * </ol>
+   *
+   * A plan is printed in every failure message.
+   */
+  @Test
+  void theBoundProbeStatementTouchesOnePartitionAlsoAsAReusedAndAGenericPlan() throws SQLException {
+    long lastId = 0;
+    for (int i = 0; i < 3; i++) {
+      Instant asAt = Instant.parse("2026-10-09T09:30:00Z").plus(Duration.ofDays(i));
+      lastId = commitOne(body("P2", "d" + i, asAt), i).record().decisionId().value();
+    }
+    assertThat(partitionsOf("P2"))
+        .containsExactly("decision_p20261009", "decision_p20261010", "decision_p20261011");
+    LocalDate day = LocalDate.of(2026, 10, 11);
+
+    try (Connection connection = raw();
+        PreparedStatement explain =
+            connection.prepareStatement("EXPLAIN (ANALYZE, COSTS OFF) " + PgDecisions.PROBE_SQL)) {
+      for (int execution = 1; execution <= 7; execution++) {
+        explain.setLong(1, lastId);
+        explain.setObject(2, day);
+        String plan = planOf(explain);
+        assertThat(partitionsNamedBy(plan))
+            .as("bound statement, execution %d, plan:%n%s", execution, plan)
+            .containsExactly("decision_p20261011");
+      }
+    }
+
+    String numbered = numbered(PgDecisions.PROBE_SQL);
+    try (Connection connection = raw();
+        Statement statement = connection.createStatement()) {
+      statement.execute("SET plan_cache_mode = force_generic_plan");
+      statement.execute("PREPARE probe_generic (int8, date) AS " + numbered);
+      for (int execution = 1; execution <= 7; execution++) {
+        String plan;
+        try (ResultSet rows =
+            statement.executeQuery(
+                "EXPLAIN (ANALYZE, COSTS OFF) EXECUTE probe_generic("
+                    + lastId
+                    + ", DATE '"
+                    + day
+                    + "')")) {
+          plan = planText(rows);
+        }
+        assertThat(partitionsNamedBy(plan))
+            .as("generic plan, execution %d, plan:%n%s", execution, plan)
+            .containsExactly("decision_p20261011");
+        assertThat(plan)
+            .as("generic plan, execution %d: the other partitions are removed at start", execution)
+            .contains("Subplans Removed");
+      }
+    }
+  }
+
+  /** {@code ?} to {@code $1}, {@code $2}, ... in a statement without a literal that holds one. */
+  private static String numbered(String sql) {
+    StringBuilder out = new StringBuilder();
+    int next = 1;
+    for (int i = 0; i < sql.length(); i++) {
+      char c = sql.charAt(i);
+      out.append(c == '?' ? "$" + next++ : String.valueOf(c));
+    }
+    return out.toString();
+  }
+
+  private static String planOf(PreparedStatement explain) throws SQLException {
+    try (ResultSet rows = explain.executeQuery()) {
+      return planText(rows);
+    }
+  }
+
+  private static String planText(ResultSet rows) throws SQLException {
+    StringBuilder plan = new StringBuilder();
+    while (rows.next()) {
+      plan.append(rows.getString(1)).append('\n');
+    }
+    return plan.toString();
+  }
+
+  private static Set<String> partitionsNamedBy(String plan) {
+    Set<String> named = new HashSet<>();
+    Matcher matcher = PARTITION_NAME.matcher(plan);
+    while (matcher.find()) {
+      named.add(matcher.group());
+    }
+    return named;
+  }
+
+  /**
    * Eight stores that each know nothing of the new day race to create it: the advisory lock and the
    * {@code pg_inherits} check leave exactly one partition, and every decision lands in it.
    */
@@ -433,12 +539,14 @@ class PgDecisionsIT extends AbstractPgStoreTest {
   }
 
   /**
-   * A partition that was dropped (retention) after the adapter cached its day: the next call fails
-   * with the typed missing-partition failure and forgets the cache, so the call after it creates
-   * the partition again.
+   * A partition that was dropped (retention) after the adapter cached its day: the unit of the next
+   * call fails with the missing-partition error and is rolled back, the adapter forgets its cache,
+   * creates the partition again and runs the unit once more (FP5), so the call succeeds. (Before
+   * FP5 that call failed once and the call after it succeeded. With creation on demand switched off
+   * the failure stays typed: {@link #aMissingPartitionWithCreationOffFailsTypedAndWritesNothing}.)
    */
   @Test
-  void aDroppedPartitionFailsOnceAndIsCreatedAgain() throws SQLException {
+  void aDroppedPartitionIsCreatedAgainAndTheCallThatFoundItMissingSucceeds() throws SQLException {
     commitOne(body("D1", "d1", DAY1), 0);
     try (Connection connection = raw();
         Statement statement = connection.createStatement()) {
@@ -451,9 +559,6 @@ class PgDecisionsIT extends AbstractPgStoreTest {
       statement.execute("DROP TABLE decision_p20261009 CASCADE");
     }
     DecisionBody next = body("D2", "d1", DAY1);
-    assertThatThrownBy(() -> commitOne(next, 0))
-        .isInstanceOf(LedgerException.class)
-        .hasMessage("ledger statement failed: sqlstate=23514 constraint=none");
     assertThat(commitOne(next, 0).status()).isEqualTo(CommitStatus.INSERTED);
     assertThat(partitionsOf("D2")).containsExactly("decision_p20261009");
   }
@@ -521,6 +626,252 @@ class PgDecisionsIT extends AbstractPgStoreTest {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  /** How long {@link #creatingAPartitionDelaysNoWriterOfAnotherDayBeyondTheCreation} watches. */
+  private static final Duration OBSERVE = Duration.ofSeconds(3);
+
+  /**
+   * FP5 (SPEC-5, SQL-5). Attaching a partition to {@code decision} may take stronger locks on the
+   * tables that reference it or that it references than on {@code decision} itself ({@code
+   * report_version} through {@code report_version_decision_fk}, {@code decision_context} through
+   * {@code decision_context_fk}); the test above writes only a decision with an existing context
+   * and would not see it. Here the creating transaction stays open (after {@code CREATE TABLE} and
+   * {@code ATTACH PARTITION}, before the commit) while three writers of an existing day run: a
+   * decision with an existing context, a {@code commitReportable} that inserts a {@code
+   * report_version}, and a decision with a new context (a {@code decision_context} insert). What
+   * matters to operations is that a writer is delayed no longer than the creation takes, so the
+   * test does not assert a lock mode. It watches for {@link #OBSERVE}, prints for each writer
+   * whether it finished while the creating transaction was open together with the locks that the
+   * creator holds and the locks the waiting ones wait for, then commits the creation and requires
+   * that every writer succeeded and finished within ten seconds of that commit (no deadlock, no
+   * pile-up, no failure). A writer that was delayed names its waits in the output: then
+   * pre-creation off-peak ({@link PgLedgerStore#ensurePartitionsAhead}) is not only advice but
+   * required, and the notes say so.
+   */
+  @Test
+  void creatingAPartitionDelaysNoWriterOfAnotherDayBeyondTheCreation() throws Exception {
+    PgLedgerStore patient =
+        new PgLedgerStore(
+            dataSource(),
+            clock(),
+            Config.forSchema(schema()).withLockTimeout(Duration.ofSeconds(30)));
+    patient.commitDecisions(batch(decision(body("W0", "d0", DAY1), 0)));
+    LocalDate newDay = LocalDate.of(2026, 10, 25);
+    NewDecision reported = LedgerFixtures.reportDecision(0, "W2", "ctx", "d1", Leg.MARKET);
+    NewVersion version =
+        LedgerFixtures.newVersion("W2", Leg.MARKET, "EXEC1", "TRNW2", "NEWT", "h1");
+
+    Map<String, Callable<Long>> writers = new LinkedHashMap<>();
+    writers.put(
+        "decision with an existing context",
+        () -> {
+          patient.commitDecisions(batch(decision(body("W1", "d1", DAY1), 0)));
+          return System.nanoTime();
+        });
+    writers.put(
+        "commitReportable with a new report_version",
+        () -> {
+          ReportableCommitted done = patient.commitReportable(reportable(reported, version)).get(0);
+          assertThat(done.versions().get(0).status()).isEqualTo(VersionStatus.CREATED);
+          return System.nanoTime();
+        });
+    writers.put(
+        "decision with a new context",
+        () -> {
+          patient.commitDecisions(
+              batch(decision(bodyAt("W3", MIFIR, "ctx-new", "d1", Outcome.REPORT, EVAL, DAY1), 0)));
+          return System.nanoTime();
+        });
+
+    ExecutorService pool = Executors.newFixedThreadPool(writers.size());
+    try (Connection creator = raw()) {
+      creator.setAutoCommit(false);
+      int creatorPid = backendPid(creator);
+      try (Statement statement = creator.createStatement()) {
+        for (String sql : Partitions.createStatements(schema(), newDay)) {
+          statement.execute(sql);
+        }
+      }
+      List<String> held = locksHeldBy(creatorPid);
+      Map<String, Future<Long>> running = new LinkedHashMap<>();
+      writers.forEach((name, writer) -> running.put(name, pool.submit(writer)));
+      long until = System.nanoTime() + OBSERVE.toNanos();
+      while (System.nanoTime() < until
+          && running.values().stream().anyMatch(future -> !future.isDone())) {
+        Thread.sleep(25);
+      }
+      Set<String> finishedWhileOpen = new HashSet<>();
+      running.forEach(
+          (name, future) -> {
+            if (future.isDone()) {
+              finishedWhileOpen.add(name);
+            }
+          });
+      List<String> waiting =
+          finishedWhileOpen.size() < running.size() ? locksWaitingFor(creatorPid) : List.of();
+      creator.commit();
+      long committedAt = System.nanoTime();
+
+      String locks =
+          "locks held by the creating transaction: "
+              + held
+              + "; locks that the delayed writers wait for: "
+              + waiting;
+      for (Map.Entry<String, Future<Long>> entry : running.entrySet()) {
+        long finishedAt;
+        try {
+          finishedAt = entry.getValue().get(60, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+          throw new AssertionError(
+              "writer '" + entry.getKey() + "' failed: " + e.getCause() + "; " + locks, e);
+        }
+        boolean open = finishedWhileOpen.contains(entry.getKey());
+        long afterCommit = TimeUnit.NANOSECONDS.toMillis(finishedAt - committedAt);
+        System.out.println(
+            "creatingAPartition: '"
+                + entry.getKey()
+                + (open
+                    ? "' finished while the creating transaction was open"
+                    : "' was delayed by the creating transaction and finished "
+                        + afterCommit
+                        + " ms after its commit"));
+        if (!open) {
+          assertThat(afterCommit)
+              .as("'%s' finished this long after the creation; %s", entry.getKey(), locks)
+              .isLessThan(10_000);
+        }
+      }
+      System.out.println("creatingAPartition: " + locks);
+      assertThat(
+              strings(
+                  "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
+                      + " WHERE i.inhparent = 'decision'::regclass AND c.relname = ?",
+                  "decision_p20261025"))
+          .hasSize(1);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * FP5 (ADAPTER-1, e). The creation of a daily partition needs SHARE UPDATE EXCLUSIVE on {@code
+   * decision} (the manual for {@code ALTER TABLE ... ATTACH PARTITION}; the premise of AP-7, now
+   * measured), which conflicts with itself, and so does {@code ANALYZE} of the partitioned parent.
+   * A second connection holds {@code LOCK TABLE decision IN SHARE UPDATE EXCLUSIVE MODE} while the
+   * first batch of a new UTC day arrives: after the bounded retries the call fails with 55P03,
+   * nothing is created or written, and the same call succeeds once the lock is released.
+   */
+  @Test
+  void aHolderOfShareUpdateExclusiveOnDecisionFailsTheNewDayClosedUntilItLetsGo() throws Exception {
+    commitOne(body("H0", "d0", DAY1), 0);
+    PgLedgerStore impatient =
+        new PgLedgerStore(
+            dataSource(),
+            clock(),
+            Config.forSchema(schema()).withLockTimeout(Duration.ofMillis(500)));
+    DecisionBody candidate = body("H1", "d1", Instant.parse("2026-10-22T09:30:00Z"));
+    long regimesBefore = count("SELECT count(*) FROM regime");
+    long contextsBefore = count("SELECT count(*) FROM decision_context");
+
+    try (Connection holder = raw()) {
+      holder.setAutoCommit(false);
+      try (Statement statement = holder.createStatement()) {
+        statement.execute("LOCK TABLE decision IN SHARE UPDATE EXCLUSIVE MODE");
+      }
+      List<String> held = locksHeldBy(backendPid(holder));
+      Throwable thrown =
+          catchThrowable(() -> impatient.commitDecisions(batch(decision(candidate, 0))));
+      assertThat(thrown)
+          .as(
+              "creating a partition should wait for a SHARE UPDATE EXCLUSIVE holder on decision;"
+                  + " locks held by the holder: %s",
+              held)
+          .isInstanceOf(LedgerException.class)
+          .hasMessage("ledger statement failed: sqlstate=55P03 constraint=none");
+      assertThat(
+              strings(
+                  "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
+                      + " WHERE i.inhparent = 'decision'::regclass AND c.relname = ?",
+                  "decision_p20261022"))
+          .isEmpty();
+      assertThat(count("SELECT count(*) FROM decision")).isEqualTo(1);
+      assertThat(count("SELECT count(*) FROM regime")).isEqualTo(regimesBefore);
+      assertThat(count("SELECT count(*) FROM decision_context")).isEqualTo(contextsBefore);
+      holder.rollback();
+    }
+
+    assertThat(impatient.commitDecisions(batch(decision(candidate, 0))).get(0).status())
+        .isEqualTo(CommitStatus.INSERTED);
+    assertThat(partitionsOf("H1")).containsExactly("decision_p20261022");
+  }
+
+  /**
+   * FP5: a creation that waits for a holder of SHARE UPDATE EXCLUSIVE on {@code decision} succeeds
+   * on a retry once the holder lets go, within the bounded retries: here the pre-creation entry,
+   * for two days, while the lock is released after the first attempt has been seen waiting.
+   */
+  @Test
+  void theCreationRetriesAndSucceedsOnceTheHolderOfTheLockLetsGo() throws Exception {
+    PgLedgerStore scheduler =
+        new PgLedgerStore(
+            dataSource(),
+            clock(),
+            Config.forSchema(schema()).withLockTimeout(Duration.ofMillis(500)));
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection holder = raw()) {
+      holder.setAutoCommit(false);
+      try (Statement statement = holder.createStatement()) {
+        statement.execute("LOCK TABLE decision IN SHARE UPDATE EXCLUSIVE MODE");
+      }
+      int holderPid = backendPid(holder);
+      Future<List<LocalDate>> created =
+          pool.submit(() -> scheduler.ensurePartitionsAhead(LocalDate.of(2026, 10, 23), 2));
+      awaitBackendWaitingFor(holderPid);
+      assertThat(created.isDone()).as("the attach waits for the holder").isFalse();
+      holder.commit();
+      assertThat(created.get(60, TimeUnit.SECONDS))
+          .containsExactly(LocalDate.of(2026, 10, 23), LocalDate.of(2026, 10, 24));
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(
+            count(
+                "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
+                    + " WHERE i.inhparent = 'decision'::regclass"
+                    + " AND c.relname IN ('decision_p20261023', 'decision_p20261024')"))
+        .isEqualTo(2);
+    // asked again, the entry finds both and creates nothing
+    assertThat(scheduler.ensurePartitionsAhead(LocalDate.of(2026, 10, 23), 2)).isEmpty();
+  }
+
+  /**
+   * FP5: with the day made ahead of time, the first batch of that day needs no lock that a holder
+   * of SHARE UPDATE EXCLUSIVE on {@code decision} (an {@code ANALYZE} of the parent) can block: it
+   * finds the partition and only inserts, which is compatible with that lock.
+   */
+  @Test
+  void aPreCreatedDayIsWrittenWhileAnotherSessionHoldsShareUpdateExclusiveOnDecision()
+      throws Exception {
+    store().ensurePartitionsAhead(LocalDate.of(2026, 10, 26), 1);
+    PgLedgerStore hot =
+        new PgLedgerStore(
+            dataSource(),
+            clock(),
+            Config.forSchema(schema()).withLockTimeout(Duration.ofSeconds(2)));
+    try (Connection holder = raw()) {
+      holder.setAutoCommit(false);
+      try (Statement statement = holder.createStatement()) {
+        statement.execute("LOCK TABLE decision IN SHARE UPDATE EXCLUSIVE MODE");
+      }
+      Committed committed =
+          hot.commitDecisions(
+                  batch(decision(body("A1", "d1", Instant.parse("2026-10-26T09:30:00Z")), 0)))
+              .get(0);
+      holder.rollback();
+      assertThat(committed.status()).isEqualTo(CommitStatus.INSERTED);
+    }
+    assertThat(partitionsOf("A1")).containsExactly("decision_p20261026");
   }
 
   private static void awaitQuietly(Future<?> future) {

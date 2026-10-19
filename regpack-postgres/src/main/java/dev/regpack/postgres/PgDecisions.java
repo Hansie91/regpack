@@ -25,6 +25,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -42,6 +43,8 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 
 /**
@@ -85,7 +88,9 @@ import javax.sql.DataSource;
  * of their own, in one transaction under the partition advisory lock (Convention 12, purpose 2); a
  * day that is already listed in {@code pg_inherits} is skipped, and known days are cached. A plain
  * table of the same name makes the creation fail with 42P07 and so the call, before any decision
- * row is written.
+ * row is written. A lock timeout on the creation is retried a bounded number of times with a pause
+ * between the attempts, outside any transaction; {@link #ensurePartitionsAhead} lets a scheduler
+ * make the days off-peak so that the hot path finds them (FP5).
  *
  * <p>The head and the stored body are read back with the primary key plus the day, so a read
  * touches one partition: {@code currentDecision} is the head and one probe, {@code decisionChain}
@@ -187,15 +192,59 @@ final class PgDecisions {
           + " AND (t.reports = 0 OR (t.leg_mask & (1::int8 << s.leg::int)) = 0)"
           + " ORDER BY t.ord, s.leg";
 
+  /**
+   * The pauses between the attempts to create a daily partition (FP5): an attempt that ends in a
+   * lock timeout has been rolled back and its connection closed, then the adapter waits for the
+   * next duration of the list and tries again. {@link #PARTITION_ATTEMPTS} attempts in all, so the
+   * wait is bounded by that many lock timeouts plus the sum of the pauses (21.3 s at the default
+   * lock timeout of 5 s).
+   */
+  static final List<Duration> PARTITION_BACKOFF =
+      List.of(Duration.ofMillis(100), Duration.ofMillis(300), Duration.ofMillis(900));
+
+  /** The attempts to create one partition: the first one and one more after each pause. */
+  static final int PARTITION_ATTEMPTS = PARTITION_BACKOFF.size() + 1;
+
+  /** The longest window {@link #ensurePartitionsAhead} accepts; a larger number is a mistake. */
+  static final int MAX_DAYS_AHEAD = 366;
+
+  /** A wait between two attempts; replaced in tests so that they do not wait. */
+  @FunctionalInterface
+  interface Pause {
+    /** Waits for the duration; false when the wait was interrupted (the flag is set again). */
+    boolean pause(Duration duration);
+
+    /**
+     * A timed wait on a latch that nobody releases. It reads no clock and produces no value: the
+     * pause only spaces two attempts, outside any transaction.
+     */
+    Pause TIMED =
+        duration -> {
+          try {
+            new CountDownLatch(1).await(duration.toNanos(), TimeUnit.NANOSECONDS);
+            return true;
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+          }
+        };
+  }
+
   private final DataSource dataSource;
   private final Config config;
   private final PgDictionaries dictionaries;
+  private final Pause pause;
   private final Set<LocalDate> knownPartitions = ConcurrentHashMap.newKeySet();
 
   PgDecisions(DataSource dataSource, Config config) {
+    this(dataSource, config, Pause.TIMED);
+  }
+
+  PgDecisions(DataSource dataSource, Config config, Pause pause) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.config = Objects.requireNonNull(config, "config");
     this.dictionaries = new PgDictionaries(dataSource, config);
+    this.pause = Objects.requireNonNull(pause, "pause");
   }
 
   /** The dictionary rows (regime, context, endpoint), resolved before a unit starts. */
@@ -214,7 +263,7 @@ final class PgDecisions {
   List<Committed> commitDecisions(BatchCommit commit) {
     Prepared prepared = prepare(commit);
     beforeUnit(prepared);
-    return runUnit(connection -> commitIn(connection, prepared, WaveHook.NONE));
+    return runUnit(prepared.days(), connection -> commitIn(connection, prepared, WaveHook.NONE));
   }
 
   /**
@@ -230,18 +279,36 @@ final class PgDecisions {
   /**
    * Runs one unit whose work includes the decision steps ({@link #commitIn}) after {@link
    * #beforeUnit}: a lost race for a head, signalled by {@link HeadMismatch}, becomes the {@link
-   * DecisionHeadConflictException} of a head that is read again after the rollback; the cache of
-   * known partitions is forgotten when no partition accepted a row. The report side of T18 runs its
-   * unit through here so that it shares both.
+   * DecisionHeadConflictException} of a head that is read again after the rollback. When no
+   * partition accepted a row (one that was dropped since the adapter cached its day) the cache of
+   * known partitions is forgotten, the partitions of the {@code days} are checked and created
+   * again, and the unit, which was rolled back, runs once more (FP5); a second failure of that kind
+   * is the caller's. With creation on demand switched off nothing changes between the attempts, so
+   * there is no second one. The report side of T18 runs its unit through here so that it shares all
+   * of it.
    */
-  <T> T runUnit(Unit.Work<T> work) {
+  <T> T runUnit(Collection<LocalDate> days, Unit.Work<T> work) {
+    try {
+      return runOnce(work);
+    } catch (LedgerException first) {
+      if (!forgetPartitionsAfterMissingPartition(first) || !config.partitionsOnDemand()) {
+        throw first;
+      }
+      ensurePartitions(days);
+      try {
+        return runOnce(work);
+      } catch (LedgerException second) {
+        forgetPartitionsAfterMissingPartition(second);
+        throw second;
+      }
+    }
+  }
+
+  private <T> T runOnce(Unit.Work<T> work) {
     try {
       return Unit.inUnit(dataSource, config, work);
     } catch (HeadMismatch mismatch) {
       throw conflict(mismatch);
-    } catch (LedgerException e) {
-      forgetPartitionsAfterMissingPartition(e);
-      throw e;
     }
   }
 
@@ -775,7 +842,9 @@ final class PgDecisions {
 
   /**
    * Makes sure that a partition exists for each of the days (ascending), unless the adapter is
-   * configured not to create them. A day is created in its own transaction on its own connection.
+   * configured not to create them. A day is created in its own transaction on its own connection;
+   * this is the fallback of the hot path, and {@link #ensurePartitionsAhead} is the way to have the
+   * days made before the first batch of a day arrives.
    */
   void ensurePartitions(Collection<LocalDate> days) {
     if (!config.partitionsOnDemand()) {
@@ -789,10 +858,62 @@ final class PgDecisions {
     }
   }
 
-  private void createPartition(LocalDate day) {
+  /**
+   * Pre-creation (FP5): makes sure that the partitions of the {@code days} consecutive days from
+   * {@code from} (UTC dates, ascending) exist, each in a transaction of its own, whatever the cache
+   * knows (the server is asked, so a dropped piece is found) and whether or not the adapter creates
+   * partitions on demand. For a scheduler to call off-peak, one or two days ahead. A lock timeout
+   * is retried like on the hot path ({@link #PARTITION_BACKOFF}).
+   *
+   * @return the days that this call created, ascending; the days that were there are not listed
+   * @throws IllegalArgumentException when {@code days} is not in 1 to {@value #MAX_DAYS_AHEAD} or a
+   *     day of the window lies outside the supported range; nothing is created then
+   */
+  List<LocalDate> ensurePartitionsAhead(LocalDate from, int days) {
+    Objects.requireNonNull(from, "from");
+    if (days < 1 || days > MAX_DAYS_AHEAD) {
+      throw new IllegalArgumentException("days must be in 1 to " + MAX_DAYS_AHEAD);
+    }
+    Partitions.partitionName(from);
+    Partitions.partitionName(from.plusDays(days - 1L));
+    List<LocalDate> created = new ArrayList<>();
+    for (int offset = 0; offset < days; offset++) {
+      LocalDate day = from.plusDays(offset);
+      if (createPartition(day)) {
+        created.add(day);
+      }
+      knownPartitions.add(day);
+    }
+    return List.copyOf(created);
+  }
+
+  /**
+   * Creates the partition of the day unless it exists, retrying a lock timeout up to {@link
+   * #PARTITION_ATTEMPTS} attempts in all. A failed attempt has been rolled back and its connection
+   * closed before the pause, so nothing is held while the adapter waits. The cause is typically a
+   * conflicting lock on {@code decision} (an {@code ANALYZE} of the partitioned table, a
+   * long-running DDL), which is gone after a short while.
+   *
+   * @return whether this call created the partition
+   */
+  private boolean createPartition(LocalDate day) {
+    for (int attempt = 0; ; attempt++) {
+      try {
+        return createPartitionOnce(day);
+      } catch (LedgerException e) {
+        if (attempt >= PARTITION_BACKOFF.size()
+            || !causedBy(e, Violation.LOCK_TIMEOUT)
+            || !pause.pause(PARTITION_BACKOFF.get(attempt))) {
+          throw e;
+        }
+      }
+    }
+  }
+
+  private boolean createPartitionOnce(LocalDate day) {
     String name = Partitions.partitionName(day);
     List<String> statements = Partitions.createStatements(config.schema(), day);
-    Unit.inUnit(
+    return Unit.inUnit(
         dataSource,
         config,
         connection -> {
@@ -826,11 +947,16 @@ final class PgDecisions {
    * A partition that the cache knows may have been dropped since (retention): when no partition
    * accepts a row, the cache is forgotten so that the next call checks again.
    */
-  private void forgetPartitionsAfterMissingPartition(LedgerException e) {
-    if (e.getCause() instanceof SQLException sql
-        && PgErrors.classify(sql) == Violation.NO_PARTITION) {
+  private boolean forgetPartitionsAfterMissingPartition(LedgerException e) {
+    if (causedBy(e, Violation.NO_PARTITION)) {
       knownPartitions.clear();
+      return true;
     }
+    return false;
+  }
+
+  private static boolean causedBy(LedgerException e, Violation violation) {
+    return e.getCause() instanceof SQLException sql && PgErrors.classify(sql) == violation;
   }
 
   // ---------------------------------------------------------------------------------------------
