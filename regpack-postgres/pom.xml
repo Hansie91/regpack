@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>dev.regpack</groupId>
+    <artifactId>regpack</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>regpack-postgres</artifactId>
+  <name>regpack-postgres</name>
+  <description>PostgreSQL adapter of the ledger ports (the only module that names the JDBC driver)</description>
+  <properties>
+    <excludedGroups>mutant,capacity</excludedGroups>
+    <!-- AP-5: the only third-party runtime dependencies of the release build; versions identical to spikes/pom.xml -->
+    <postgresql.version>42.7.14</postgresql.version>
+    <checker-qual.version>3.55.1</checker-qual.version>
+  </properties>
+  <dependencies>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-model</artifactId></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-ports</artifactId></dependency>
+    <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
+    <dependency><groupId>org.checkerframework</groupId><artifactId>checker-qual</artifactId><version>${checker-qual.version}</version></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-tools</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-bench</artifactId><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>enforce-build-rules</id>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <!-- AP-5: exactly these two coordinates, appended to the root list (dev.regpack stays allowed) -->
+                  <includes combine.children="append">
+                    <include>org.postgresql:postgresql:42.7.14</include>
+                    <include>org.checkerframework:checker-qual:3.55.1</include>
+                  </includes>
+                </bannedDependencies>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

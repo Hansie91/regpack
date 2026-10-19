@@ -125,6 +125,66 @@ class RuleCircuitTest {
   }
 
   @Test
+  void closeOfAnOpenRuleRaisesTheEpochByOne() {
+    RuleCircuit circuit = new RuleCircuit(4, 50);
+    assertThat(circuit.epoch()).isZero();
+    fail(circuit, "r", 4);
+    assertThat(circuit.epoch()).as("opening does not change the epoch").isZero();
+
+    circuit.close("r");
+
+    assertThat(circuit.epoch()).isEqualTo(1);
+  }
+
+  @Test
+  void closeOfAClosedRuleDoesNotChangeTheEpoch() {
+    RuleCircuit circuit = new RuleCircuit(4, 50);
+    circuit.close("never-seen");
+    fail(circuit, "seen", 2);
+    circuit.close("seen");
+    fail(circuit, "r", 4);
+    circuit.close("r");
+    long afterOneClose = circuit.epoch();
+
+    circuit.close("r");
+    circuit.close("seen");
+    circuit.close("never-seen");
+
+    assertThat(afterOneClose).isEqualTo(1);
+    assertThat(circuit.epoch()).isEqualTo(afterOneClose);
+  }
+
+  @Test
+  void reopenAndCloseAgainRaisesItAgain() {
+    RuleCircuit circuit = new RuleCircuit(2, 5);
+    fail(circuit, "r", 2);
+    circuit.close("r");
+    fail(circuit, "r", 2);
+    assertThat(circuit.isOpen("r")).isTrue();
+    assertThat(circuit.epoch()).isEqualTo(1);
+
+    circuit.close("r");
+
+    assertThat(circuit.epoch()).isEqualTo(2);
+  }
+
+  @Test
+  void epochNeverDecreases() {
+    RuleCircuit circuit = new RuleCircuit(1, 2);
+    long previous = circuit.epoch();
+    for (int round = 0; round < 6; round++) {
+      circuit.record("a", true);
+      circuit.record("b", round % 2 == 0);
+      circuit.close("a");
+      circuit.close("b");
+      circuit.close("c");
+      assertThat(circuit.epoch()).isGreaterThanOrEqualTo(previous);
+      previous = circuit.epoch();
+    }
+    assertThat(previous).isPositive();
+  }
+
+  @Test
   void anOpenCircuitStaysOpenUntilItIsClosed() {
     RuleCircuit circuit = new RuleCircuit(2, 3);
     fail(circuit, "r", 2);

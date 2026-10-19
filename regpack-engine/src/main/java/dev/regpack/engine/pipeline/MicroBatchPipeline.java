@@ -195,7 +195,7 @@ public final class MicroBatchPipeline {
                   line.execution(),
                   new EvaluationContext(context, entry.key(), clock.now(), budget))
               .decision();
-      decisions.add(new NewDecision(body, head));
+      decisions.add(new NewDecision(body, head, Optional.of(context)));
       heads.put(identity, head + 1);
     }
     ledger.commitDecisions(new BatchCommit(decisions, Optional.of(outboxId)));

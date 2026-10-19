@@ -5,13 +5,16 @@ import static dev.regpack.testkit.contract.LedgerFixtures.checkpoint;
 import static dev.regpack.testkit.contract.LedgerFixtures.commit;
 import static dev.regpack.testkit.contract.LedgerFixtures.decision;
 import static dev.regpack.testkit.contract.LedgerFixtures.entry;
+import static dev.regpack.testkit.contract.LedgerFixtures.withContext;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
+import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DecisionLedger.BatchCommit;
@@ -303,6 +306,133 @@ public interface DecisionLedgerContract {
     for (int i = 1; i < ids.size(); i++) {
       assertThat(ids.get(i)).isGreaterThan(ids.get(i - 1));
     }
+  }
+
+  @Test
+  default void contextGivenWithTheDecisionIsStoredAndReadable() {
+    DecisionContext context = LedgerFixtures.context("b1");
+    DecisionBody b = withContext(body("E1", "x", "d1", Outcome.REPORT), context);
+    assertThat(ledger().decisionContext(context.id())).isEmpty();
+
+    commitWithContext(b, 0, context);
+
+    assertThat(ledger().decisionContext(context.id())).contains(context);
+    assertThat(ledger().decisionContext(b.decisionContextId())).contains(context);
+  }
+
+  @Test
+  default void theSameContextTwiceIsIdempotent() {
+    DecisionContext context = LedgerFixtures.context("b1");
+    DecisionBody first = withContext(body("E1", "x", "d1", Outcome.REPORT), context);
+    DecisionBody second = withContext(body("E1", "x", "d2", Outcome.DO_NOT_REPORT), context);
+    commitWithContext(first, 0, context);
+    assertThat(commitWithContext(second, 1, context).status()).isEqualTo(CommitStatus.INSERTED);
+    // a redelivery carrying the context again is a no-op for the decision and for the context
+    assertThat(commitWithContext(first, 0, context).status())
+        .isEqualTo(CommitStatus.NOOP_REDELIVERY);
+
+    assertThat(ledger().decisionContext(context.id())).contains(context);
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1"))).hasSize(2);
+  }
+
+  @Test
+  default void aContextWhoseIdDiffersFromTheBodyIsRejectedAtomically() {
+    DecisionContext good = LedgerFixtures.context("b1");
+    DecisionContext other = LedgerFixtures.context("b2");
+    DecisionBody first = withContext(body("E1", "x", "d1", Outcome.REPORT), good);
+    DecisionBody mismatched = withContext(body("E2", "x", "d1", Outcome.REPORT), good);
+    BatchCommit bad = batch(decision(first, 0, good), decision(mismatched, 0, other));
+
+    assertThatThrownBy(() -> ledger().commitDecisions(bad))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1"))).isEmpty();
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E2"))).isEmpty();
+    assertThat(ledger().decisionContext(good.id())).isEmpty();
+    assertThat(ledger().decisionContext(other.id())).isEmpty();
+  }
+
+  @Test
+  default void unknownContextIdReadsEmpty() {
+    assertThat(ledger().decisionContext(Sha256.ofUtf8("never stored"))).isEmpty();
+    // a decision committed without a context leaves its context id unreadable
+    DecisionBody b = body("E1", "ctx", "d1", Outcome.REPORT);
+    commitOne(b, 0);
+    assertThat(ledger().decisionContext(b.decisionContextId())).isEmpty();
+  }
+
+  @Test
+  default void aBatchWithAStaleHeadStoresNoDecision() {
+    commitOne(body("E1", "ctx", "d1", Outcome.REPORT), 0);
+    DecisionContext context = LedgerFixtures.context("b1");
+    DecisionBody fresh = withContext(body("E2", "x", "d1", Outcome.REPORT), context);
+    BatchCommit bad =
+        batch(decision(fresh, 0, context), decision(body("E1", "ctx", "d2", Outcome.REPORT), 0));
+
+    assertThatThrownBy(() -> ledger().commitDecisions(bad))
+        .isInstanceOf(DecisionHeadConflictException.class);
+
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E2"))).isEmpty();
+    assertThat(ledger().currentDecision(new Regime(MIFIR), event("E2"))).isEmpty();
+    // Whether the context of a rolled-back batch can be read afterwards is not part of the
+    // contract:
+    // a dictionary row is resolved before the unit starts on a store that must not hold a new row
+    // uncommitted for the length of a unit (the PostgreSQL adapter), and an orphan row is harmless.
+    // What the contract fixes is that a context stored this way is the one that was supplied.
+    ledger()
+        .decisionContext(context.id())
+        .ifPresent(stored -> assertThat(stored).isEqualTo(context));
+  }
+
+  @Test
+  default void sameEventContextAndDigestUnderTwoRegimesInsertTwoDecisions() {
+    DecisionBody mifir = LedgerFixtures.body("E1", MIFIR, "ctx", "d1", Outcome.REPORT, EVAL);
+    DecisionBody emir = LedgerFixtures.body("E1", EMIR, "ctx", "d1", Outcome.REPORT, EVAL);
+
+    Committed m = commitOne(mifir, 0);
+    Committed e = commitOne(emir, 0);
+
+    assertThat(m.status()).isEqualTo(CommitStatus.INSERTED);
+    assertThat(e.status()).isEqualTo(CommitStatus.INSERTED);
+    assertThat(e.record().decisionId()).isNotEqualTo(m.record().decisionId());
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1"))).hasSize(1);
+    assertThat(ledger().decisionChain(new Regime(EMIR), event("E1"))).hasSize(1);
+    // each regime still treats its own redelivery as a no-op
+    assertThat(commitOne(mifir, 1).status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+    assertThat(commitOne(emir, 1).status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+  }
+
+  @Test
+  default void aRedeliveryWithAStaleExpectedHeadIsNoopNotAConflict() {
+    DecisionBody b1 = body("E1", "ctx", "d1", Outcome.REPORT);
+    Committed first = commitOne(b1, 0);
+    commitOne(body("E1", "ctx", "d2", Outcome.DO_NOT_REPORT), 1);
+
+    Committed again = commitOne(b1, 0);
+
+    assertThat(again.status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+    assertThat(again.record()).isEqualTo(first.record());
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1"))).hasSize(2);
+  }
+
+  @Test
+  default void supersedesLinkIsSetInTheInsertedRow() {
+    Committed first = commitOne(body("E1", "ctx", "d1", Outcome.REPORT), 0);
+    Committed second = commitOne(body("E1", "ctx", "d2", Outcome.DO_NOT_REPORT), 1);
+
+    assertThat(second.record().supersedesDecisionId()).contains(first.record().decisionId());
+    // read back, not only echoed by the commit
+    List<DecisionRecord> chain = ledger().decisionChain(new Regime(MIFIR), event("E1"));
+    assertThat(chain.get(0).supersedesDecisionId()).isEmpty();
+    assertThat(chain.get(1).supersedesDecisionId()).contains(chain.get(0).decisionId());
+    assertThat(ledger().currentDecision(new Regime(MIFIR), event("E1")).orElseThrow())
+        .isEqualTo(second.record());
+  }
+
+  private Committed commitWithContext(DecisionBody body, long expectedHeadSeq, DecisionContext c) {
+    List<Committed> committed = ledger().commitDecisions(batch(decision(body, expectedHeadSeq, c)));
+    assertThat(committed).hasSize(1);
+    return committed.get(0);
   }
 
   @Test

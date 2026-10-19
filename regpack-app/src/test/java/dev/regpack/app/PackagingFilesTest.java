@@ -182,7 +182,8 @@ class PackagingFilesTest {
   }
 
   @Test
-  void ciWorkflowHasTheSixJobsReadOnlyPermissionsAndMatchingArtefactNames() throws IOException {
+  void ciWorkflowHasTheExpectedJobsReadOnlyPermissionsAndMatchingArtefactNames()
+      throws IOException {
     String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
 
     assertThat(ci).containsPattern("(?m)^permissions:\\n  contents: read$");
@@ -197,6 +198,8 @@ class PackagingFilesTest {
             "build",
             "determinism-compare",
             "spikes",
+            "ledger-pg",
+            "ledger-capacity",
             "smoke-linux",
             "smoke-windows",
             "smoke-kubernetes");
@@ -222,6 +225,286 @@ class PackagingFilesTest {
     // compare step reads both files of both systems and fails on a difference, an empty or a
     // missing file), with broken copies and an execution, in CiDeterminismCompareTest.
     assertThat(CiCompareStep.problems(ci)).isEmpty();
+  }
+
+  /** The lines of the job {@code job} of the workflow {@code ci}: everything below its key. */
+  private static List<String> jobLines(String ci, String job) {
+    List<String> lines = List.of(ci.split("\n", -1));
+    int start = lines.indexOf("  " + job + ":");
+    assertThat(start).as("job " + job).isNotNegative();
+    int end = lines.size();
+    for (int i = start + 1; i < lines.size(); i++) {
+      if (lines.get(i).matches("  [a-z][a-z-]*:")) {
+        end = i;
+        break;
+      }
+    }
+    return lines.subList(start + 1, end);
+  }
+
+  /**
+   * AP-6 and D-L8: the real-store job pulls one service image pinned by digest, publishes its port
+   * on the runner loopback only, runs on a GitHub-hosted runner and holds no credential anywhere in
+   * the workflow (the service uses trust authentication).
+   */
+  @Test
+  void ledgerJobUsesAPinnedServiceImageAndNoPasswordInTheWorkflow() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    List<String> job = jobLines(ci, "ledger-pg");
+
+    // no key that names a password, in any job, and no password inside the URL
+    assertThat(ci).doesNotContainPattern("(?im)^\\s*(?:-\\s*)?[a-z_]*password[a-z_]*\\s*:");
+    assertThat(ci).doesNotContainPattern("(?i)[?&]password=");
+    assertThat(ci).doesNotContainPattern("jdbc:postgresql://[^/\\s]*@");
+
+    List<String> images = job.stream().filter(l -> l.strip().startsWith("image:")).toList();
+    assertThat(images).hasSize(1);
+    assertThat(images.get(0).strip())
+        .isEqualTo(
+            "image: postgres:18.6-trixie@sha256:"
+                + "74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336");
+    assertThat(images.get(0)).containsPattern("@sha256:[0-9a-f]{64}$");
+
+    int ports = -1;
+    for (int i = 0; i < job.size(); i++) {
+      if (job.get(i).strip().equals("ports:")) {
+        ports = i;
+      }
+    }
+    assertThat(ports).as("ports: line").isNotNegative();
+    List<String> published = new java.util.ArrayList<>();
+    for (int i = ports + 1; i < job.size() && job.get(i).strip().startsWith("- "); i++) {
+      published.add(job.get(i).strip());
+    }
+    assertThat(published).isNotEmpty().allMatch(p -> p.startsWith("- 127.0.0.1:"));
+
+    List<String> runsOn = job.stream().filter(l -> l.strip().startsWith("runs-on:")).toList();
+    assertThat(runsOn).hasSize(1);
+    assertThat(runsOn.get(0).strip()).isEqualTo("runs-on: ubuntu-24.04");
+
+    // the real store is required, so a missing server fails the job instead of skipping its tests
+    assertThat(job).anyMatch(l -> l.strip().equals("REGPACK_PG_REQUIRED: 'true'"));
+    assertThat(job).anyMatch(l -> l.strip().equals("POSTGRES_HOST_AUTH_METHOD: trust"));
+    assertThat(job)
+        .anyMatch(
+            l ->
+                l.strip()
+                    .equals(
+                        "REGPACK_PG_URL:"
+                            + " jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres"));
+    // the report artefact is not the distribution
+    assertThat(job).anyMatch(l -> l.strip().equals("name: ledger-pg-reports"));
+  }
+
+  /**
+   * FP3 (TEETH-1): the steps of job ledger-pg that run the real-store suites and gate on them are
+   * given word for word, and nothing in the job skips, ignores or tolerates a failure: no job-level
+   * condition, no continue-on-error, one verify step of the exact command, the install with -pl
+   * regpack-postgres -am, the traceability step that always runs in {@code --realstore only} mode
+   * and the annotation step.
+   */
+  @Test
+  void ledgerJobRunsAndGatesOnTheRealStoreSuites() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    assertThat(CiLedgerJob.problems(ci)).isEmpty();
+  }
+
+  /** The checker has teeth: each single edit that neuters the job is reported. */
+  @Test
+  void theLedgerJobCheckerReportsEachWayOfNeuteringTheJob() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    assertThat(CiLedgerJob.problems(ci)).isEmpty();
+    String traceability =
+        CiLedgerJob.TRACEABILITY_NAME
+            + "\n        if: always()\n        shell: bash\n"
+            + CiLedgerJob.TRACEABILITY_RUN
+            + "\n";
+    String annotate =
+        CiLedgerJob.ANNOTATE_NAME
+            + "\n        if: always()\n        shell: bash\n"
+            + CiLedgerJob.ANNOTATE_RUN
+            + "\n";
+    String verify = CiLedgerJob.VERIFY + "\n";
+    java.util.Map<String, String> broken = new java.util.LinkedHashMap<>();
+    broken.put(
+        "a job-level condition",
+        inLedgerJob(
+            ci, "    runs-on: ubuntu-24.04\n", "    if: false\n    runs-on: ubuntu-24.04\n"));
+    broken.put(
+        "continue-on-error on the verify step",
+        inLedgerJob(ci, verify, verify + "        continue-on-error: true\n"));
+    broken.put(
+        "continue-on-error on the job",
+        inLedgerJob(
+            ci,
+            "    timeout-minutes: 40\n",
+            "    timeout-minutes: 40\n    continue-on-error: true\n"));
+    broken.put(
+        "test failures ignored",
+        inLedgerJob(
+            ci,
+            verify,
+            "      - run: ./mvnw verify -pl regpack-postgres -Dmaven.test.failure.ignore=true\n"));
+    broken.put(
+        "tests skipped",
+        inLedgerJob(ci, verify, "      - run: ./mvnw verify -pl regpack-postgres -DskipTests\n"));
+    broken.put(
+        "integration tests skipped",
+        inLedgerJob(ci, verify, "      - run: ./mvnw verify -pl regpack-postgres -DskipITs\n"));
+    broken.put(
+        "another module verified",
+        inLedgerJob(ci, verify, "      - run: ./mvnw verify -pl regpack-engine\n"));
+    broken.put("no verify step", inLedgerJob(ci, verify, ""));
+    broken.put("a second verify step", inLedgerJob(ci, verify, verify + verify));
+    broken.put(
+        "no -am on the install",
+        inLedgerJob(ci, "install -pl regpack-postgres -am", "install -pl regpack-postgres"));
+    broken.put("no traceability step", inLedgerJob(ci, traceability, ""));
+    broken.put(
+        "traceability in skip mode", inLedgerJob(ci, "--realstore only", "--realstore skip"));
+    broken.put("traceability in the default mode", inLedgerJob(ci, " --realstore only", ""));
+    broken.put(
+        "traceability without if always",
+        inLedgerJob(ci, traceability, traceability.replace("        if: always()\n", "")));
+    broken.put("no annotation step", inLedgerJob(ci, annotate, ""));
+    broken.put(
+        "annotation without if always",
+        inLedgerJob(ci, annotate, annotate.replace("        if: always()\n", "")));
+    broken.put(
+        "a one minute timeout", inLedgerJob(ci, "timeout-minutes: 40", "timeout-minutes: 1"));
+    broken.put(
+        "no health command", inLedgerJob(ci, "--health-cmd \"pg_isready -U postgres\" ", ""));
+    broken.put("one health retry", inLedgerJob(ci, "--health-retries 12", "--health-retries 1"));
+    broken.put(
+        "a missing server skips the tests",
+        inLedgerJob(ci, "REGPACK_PG_REQUIRED: 'true'", "REGPACK_PG_REQUIRED: 'false'"));
+    for (java.util.Map.Entry<String, String> copy : broken.entrySet()) {
+      assertThat(copy.getValue()).as(copy.getKey()).isNotEqualTo(ci);
+      assertThat(CiLedgerJob.problems(copy.getValue())).as(copy.getKey()).isNotEmpty();
+    }
+  }
+
+  /** The workflow with the first {@code from} inside job ledger-pg replaced by {@code to}. */
+  private static String inLedgerJob(String ci, String from, String to) {
+    int job = ci.indexOf("\n  ledger-pg:\n");
+    assertThat(job).as("job ledger-pg").isNotNegative();
+    int at = ci.indexOf(from, job);
+    assertThat(at).as("text in job ledger-pg: " + from).isNotNegative();
+    return ci.substring(0, at) + to + ci.substring(at + from.length());
+  }
+
+  /**
+   * T21 and AP-3, AP-6, AP-8: the capacity job runs only on a manual dispatch that sets both
+   * inputs, on a GitHub-hosted runner, pulls the one digest-pinned image of the real-store job (the
+   * same digest), publishes its port on the loopback only, holds no secret and no password, runs
+   * only the docker commands that restart and inspect its own service container (never a pull, run
+   * or login), bounds the job and every step by a timeout, and keeps its sampler files as an
+   * artefact.
+   */
+  @Test
+  void ledgerCapacityJobIsGuardedPinnedBoundedAndFreeOfCredentials() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    List<String> job = jobLines(ci, "ledger-capacity");
+    String pinned =
+        "postgres:18.6-trixie@sha256:"
+            + "74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336";
+
+    // a manual dispatch has a concurrency group of its own: a push to the branch during the long
+    // capacity run cannot cancel it, and the dispatch cannot cancel a run of the push
+    assertThat(ci)
+        .contains(
+            "group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name =="
+                + " 'workflow_dispatch' && 'manual' || 'auto' }}");
+
+    // the dispatch inputs exist and default to false
+    assertThat(ci)
+        .contains("  workflow_dispatch:\n    inputs:\n      capacity:")
+        .contains("      confirm_downloads:");
+    assertThat(job)
+        .contains(
+            "    if: github.event_name == 'workflow_dispatch' && inputs.capacity"
+                + " && inputs.confirm_downloads");
+    assertThat(job).contains("    runs-on: ubuntu-24.04");
+    assertThat(job).anyMatch(l -> l.matches("    timeout-minutes: [0-9]+"));
+
+    // the one pinned image of AP-6, the same as the real-store job, and the loopback port
+    List<String> images = job.stream().filter(l -> l.strip().startsWith("image:")).toList();
+    assertThat(images).containsExactly("        image: " + pinned);
+    assertThat(job).contains("      PG_IMAGE: " + pinned);
+    assertThat(jobLines(ci, "ledger-pg")).contains("        image: " + pinned);
+    assertThat(job).contains("          - 127.0.0.1:5432:5432");
+    assertThat(job).contains("      REGPACK_PG_REQUIRED: 'true'");
+    assertThat(job).contains("          POSTGRES_HOST_AUTH_METHOD: trust");
+
+    // no secret, no token, no password; the job reads nothing from the secret store
+    assertThat(job).noneMatch(l -> l.contains("secrets."));
+    assertThat(job).noneMatch(l -> l.toLowerCase(java.util.Locale.ROOT).contains("password"));
+    assertThat(job).noneMatch(l -> l.contains("GITHUB_TOKEN"));
+
+    // docker is used only to find, restart and inspect the job's own service container: an allow
+    // list of verbs, so that a pull, run, login, build, stop, create, cp, network or volume (or a
+    // verb behind an option) fails the test
+    java.util.regex.Matcher docker =
+        java.util.regex.Pattern.compile("(?<![\\w/.-])docker(?![\\w/.-])\\s+(\\S*)")
+            .matcher(String.join("\n", job));
+    int dockerCalls = 0;
+    while (docker.find()) {
+      dockerCalls++;
+      assertThat(docker.group(1))
+          .as("docker verb in: " + docker.group())
+          .isIn("ps", "exec", "restart", "inspect");
+    }
+    assertThat(dockerCalls).isGreaterThanOrEqualTo(4);
+    assertThat(job).anyMatch(l -> l.contains("docker restart \"$cid\""));
+    // the server settings are read with current_setting (the raw setting of pg_settings is in
+    // server units: shared_buffers of 340MB would print as 435208kB)
+    assertThat(job).anyMatch(l -> l.contains("current_setting(name)"));
+    assertThat(job).noneMatch(l -> l.contains("coalesce(unit"));
+    assertThat(job).anyMatch(l -> l.contains("ALTER SYSTEM SET shared_buffers"));
+    assertThat(job).noneMatch(l -> l.contains("sudo"));
+
+    // the variants of the plan: A no limit, B the SP-L memory and ratio, C as B without waiting
+    assertThat(job)
+        .contains(
+            "          - variant: A",
+            "          - variant: B",
+            "          - variant: C",
+            "            shared_buffers: 2GB",
+            "            shared_buffers: 340MB",
+            "            synchronous_commit: 'off'");
+    assertThat(job.stream().filter(l -> l.contains("--memory=1363m")).count()).isEqualTo(2);
+
+    // the probe is the capacity group of one class, with an explicit override of the exclusion
+    assertThat(job)
+        .anyMatch(
+            l ->
+                l.contains("-Dgroups=capacity")
+                    && l.contains("-DexcludedGroups=none")
+                    && l.contains("-Dit.test=LedgerBurstProbeIT"));
+
+    // every step is bounded by a timeout (a step starts at six spaces and a dash)
+    int stepsAt = job.indexOf("    steps:");
+    assertThat(stepsAt).as("steps: line").isNotNegative();
+    List<List<String>> steps = new java.util.ArrayList<>();
+    for (String line : job.subList(stepsAt + 1, job.size())) {
+      if (line.startsWith("      - ")) {
+        steps.add(new java.util.ArrayList<>());
+      }
+      steps.get(steps.size() - 1).add(line);
+    }
+    assertThat(steps).hasSizeGreaterThanOrEqualTo(7);
+    for (List<String> step : steps) {
+      assertThat(step)
+          .as("step starting at: " + step.get(0))
+          .anyMatch(l -> l.matches(" {8}timeout-minutes: [0-9]+"));
+    }
+
+    // the read-out and the sampler files are kept: as annotations and as an artefact
+    assertThat(job).contains("          name: ledger-capacity-${{ matrix.variant }}");
+    assertThat(job).contains("            regpack-postgres/target/capacity/");
+    assertThat(job).anyMatch(l -> l.contains("::notice title=capacity"));
+    assertThat(job).anyMatch(l -> l.contains("head -n 5"));
+    assertThat(ci).containsOnlyOnce("name: regpack-dist\n          path: |");
   }
 
   @Test

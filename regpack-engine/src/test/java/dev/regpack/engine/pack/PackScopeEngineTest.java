@@ -1,7 +1,6 @@
 package dev.regpack.engine.pack;
 
 import static dev.regpack.ports.ledger.DecisionLedger.CommitStatus.INSERTED;
-import static dev.regpack.ports.ledger.DecisionLedger.CommitStatus.NOOP_REDELIVERY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 
@@ -611,10 +610,11 @@ class PackScopeEngineTest {
   }
 
   @Test
-  void aReEvaluationAfterCloseHasTheSameContextAndDigestSoTheLedgerTreatsItAsARedelivery() {
-    // P3 must resolve this deliberately (circuit epoch in the context or an ordinal in the key);
-    // see docs/pack-format/p2a-format-notes.md hand-offs. This test pins the model as built: it
-    // does NOT supersede a decision made under an open circuit.
+  void aReEvaluationAfterCloseCarriesANewEpochSoTheLedgerSupersedes() {
+    // INTERP-3, option A (OI-2, P3a T3): RuleCircuit.close raises the circuit epoch and the epoch
+    // is part of the decision context, so the re-evaluation has a new decision_context_id and the
+    // ledger inserts a superseding row. The epoch is process-local (D-L1,
+    // docs/ledger/decisions.md).
     RuleCircuit circuit = new RuleCircuit(1, 50);
     PackRegime provider =
         regimeOf(
@@ -646,21 +646,27 @@ class PackScopeEngineTest {
     DecisionBody afterClose = decide(provider, innocent, 100);
     assertThat(afterClose.reasonCode()).isEqualTo(new ReasonCode("SAMPLE.N03.EXCLUDED"));
 
-    // nothing that the ledger keys on changed between the two decisions
-    assertThat(afterClose.decisionContextId()).isEqualTo(underOpenCircuit.decisionContextId());
+    // the close changed the context id and nothing else that the ledger keys on
+    assertThat(provider.decisionContext().circuitEpoch()).isEqualTo(1);
+    assertThat(afterClose.decisionContextId()).isNotEqualTo(underOpenCircuit.decisionContextId());
+    assertThat(afterClose.decisionContextId()).isEqualTo(provider.decisionContext().id());
     assertThat(afterClose.inputDigest()).isEqualTo(underOpenCircuit.inputDigest());
     List<DecisionLedger.Committed> second =
         ledger.commitDecisions(
             new DecisionLedger.BatchCommit(
                 List.of(new DecisionLedger.NewDecision(afterClose, 1)), Optional.empty()));
-    assertThat(second)
-        .extracting(DecisionLedger.Committed::status)
-        .containsExactly(NOOP_REDELIVERY);
+    assertThat(second).extracting(DecisionLedger.Committed::status).containsExactly(INSERTED);
+    assertThat(second.get(0).record().decisionSeq()).isEqualTo(2);
+    assertThat(second.get(0).record().supersedesDecisionId())
+        .contains(first.get(0).record().decisionId());
+    assertThat(ledger.decisionChain(provider.regime(), innocent.eventIdentity())).hasSize(2);
     assertThat(ledger.currentDecision(provider.regime(), innocent.eventIdentity()))
         .hasValueSatisfying(
-            current ->
-                assertThat(current.body().reasonCode())
-                    .isEqualTo(new ReasonCode("EXEC_CIRCUIT_OPEN")));
+            current -> {
+              assertThat(current.decisionId()).isEqualTo(second.get(0).record().decisionId());
+              assertThat(current.body().reasonCode())
+                  .isEqualTo(new ReasonCode("SAMPLE.N03.EXCLUDED"));
+            });
   }
 
   @Test

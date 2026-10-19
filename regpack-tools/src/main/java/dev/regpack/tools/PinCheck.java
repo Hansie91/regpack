@@ -16,7 +16,10 @@ import java.util.stream.Stream;
 /**
  * Supply-chain pin checks: container images are pinned by digest, workflow actions by full commit
  * SHA with a version comment, workflows declare least-privilege permissions and fixed runner
- * labels. A {@code runs-on} value is read inline (scalar, flow list, flow map) and, when the key is
+ * labels. The image rule covers service and job containers, {@code uses: docker://} steps and the
+ * image of {@code docker run|pull|create} on one line of shell text.
+ *
+ * <p>A {@code runs-on} value is read inline (scalar, flow list, flow map) and, when the key is
  * bare, from the indented block sequence or map below it; labels that come from an expression such
  * as {@code matrix.os} are not resolved.
  */
@@ -33,6 +36,82 @@ public final class PinCheck {
   private static final Pattern PULL_REQUEST_TARGET = Pattern.compile("\\bpull_request_target\\b");
   private static final Pattern RUNS_ON = Pattern.compile("^(\\s*(?:-\\s+)?)runs-on:\\s*(.*)$");
   private static final Pattern COMMENT_START = Pattern.compile("(^|\\s)#");
+  // the key may be quoted: 'image': and "image": are the same key in YAML (CI-4)
+  private static final Pattern IMAGE_KEY =
+      Pattern.compile("^\\s*(?:-\\s+)?['\"]?image['\"]?:\\s*(.*)$");
+  private static final Pattern CONTAINER_KEY =
+      Pattern.compile("^\\s*(?:-\\s+)?['\"]?container['\"]?:\\s*(\\S.*)$");
+  private static final Pattern FLOW_IMAGE =
+      Pattern.compile("[{,]\\s*['\"]?image['\"]?:\\s*([^,}]*)");
+  // docker run|pull|create (optionally "docker container run") in shell text, with its arguments
+  private static final Pattern DOCKER_COMMAND =
+      Pattern.compile("\\bdocker\\s+(?:container\\s+|image\\s+)?(run|pull|create)\\b(.*)$");
+  // the options of docker run|create|pull that take their value as the next word
+  private static final Set<String> OPTIONS_WITH_VALUE =
+      Set.of(
+          "-e",
+          "--env",
+          "--env-file",
+          "-v",
+          "--volume",
+          "--mount",
+          "-p",
+          "--publish",
+          "--name",
+          "--network",
+          "--net",
+          "-w",
+          "--workdir",
+          "-u",
+          "--user",
+          "--entrypoint",
+          "-m",
+          "--memory",
+          "--memory-swap",
+          "--shm-size",
+          "--cpus",
+          "-l",
+          "--label",
+          "--platform",
+          "--restart",
+          "--add-host",
+          "-h",
+          "--hostname",
+          "--cap-add",
+          "--cap-drop",
+          "--device",
+          "--pull",
+          "--log-driver",
+          "--log-opt",
+          "--tmpfs",
+          "--ulimit",
+          "--health-cmd",
+          "--health-interval",
+          "--health-timeout",
+          "--health-retries",
+          "--stop-signal",
+          "--stop-timeout",
+          "--cpuset-cpus",
+          "--security-opt",
+          "--group-add",
+          "--dns",
+          "--ip",
+          "--pid",
+          "--ipc",
+          "--user-ns",
+          "--cgroupns",
+          "--runtime",
+          "--gpus",
+          "--init-path",
+          "--link",
+          "--expose",
+          "-a",
+          "--attach");
+  // the tag of an image that the workflow builds itself: docker [buildx] build ... -t|--tag NAME
+  private static final Pattern DOCKER_BUILD_TAG =
+      Pattern.compile(
+          "\\bdocker\\s+(?:buildx\\s+)?build\\b[^\\n]*?\\s(?:-t|--tag)[ =]['\"]?([^\\s'\"]+)");
+  private static final Pattern IMAGE_DIGEST = Pattern.compile("@sha256:[0-9a-f]{64}$");
 
   private PinCheck() {}
 
@@ -84,6 +163,7 @@ public final class PinCheck {
   public static List<String> checkWorkflow(String name, String content) {
     List<String> problems = new ArrayList<>();
     boolean topLevelPermissions = false;
+    Set<String> builtHere = imagesBuiltHere(content);
     String[] lines = content.split("\\R", -1);
     for (int i = 0; i < lines.length; i++) {
       String line = lines[i];
@@ -94,7 +174,13 @@ public final class PinCheck {
       Matcher uses = USES.matcher(line);
       if (uses.matches()) {
         String value = unquote(uses.group(1));
-        if (!value.startsWith("./") && !value.startsWith("docker://")) {
+        if (value.startsWith("docker://")) {
+          // a container image run as a step: the digest rule of the images applies (CI-4)
+          String image = value.substring("docker://".length());
+          if (!IMAGE_DIGEST.matcher(image).find()) {
+            problems.add(where + "UNPINNED_IMAGE " + image);
+          }
+        } else if (!value.startsWith("./")) {
           if (!PINNED_ACTION.matcher(value).matches()) {
             problems.add(where + "UNPINNED_ACTION " + value);
           }
@@ -105,6 +191,8 @@ public final class PinCheck {
         continue;
       }
       String code = withoutComment(line);
+      addUnpinnedImages(problems, where, code);
+      addUnpinnedDockerCommands(problems, where, code, builtHere);
       if (WRITE_ALL.matcher(code).find()) {
         problems.add(where + "WRITE_ALL");
       }
@@ -180,6 +268,84 @@ public final class PinCheck {
       }
       addLatestRunners(problems, name + ":" + (j + 1) + ": ", next);
     }
+  }
+
+  /**
+   * Flags every container image of a workflow line that is not pinned by digest: the {@code image:}
+   * key of a service container or a {@code container:} map (block or flow form) and the scalar
+   * value of {@code container:}. A value that is not a plain reference with a lower-case SHA-256
+   * digest at its end (including an expression or a block scalar indicator) is unverifiable and
+   * flagged too.
+   */
+  private static void addUnpinnedImages(List<String> problems, String where, String code) {
+    List<String> images = new ArrayList<>();
+    Matcher image = IMAGE_KEY.matcher(code);
+    Matcher container = CONTAINER_KEY.matcher(code);
+    if (image.matches()) {
+      images.add(image.group(1));
+    } else if (container.matches() && !container.group(1).strip().startsWith("{")) {
+      images.add(container.group(1));
+    }
+    if (code.indexOf('{') >= 0) {
+      Matcher flow = FLOW_IMAGE.matcher(code);
+      while (flow.find()) {
+        images.add(flow.group(1));
+      }
+    }
+    for (String raw : images) {
+      String value = unquote(raw.strip());
+      if (!IMAGE_DIGEST.matcher(value).find()) {
+        problems.add(where + "UNPINNED_IMAGE " + value);
+      }
+    }
+  }
+
+  /**
+   * Flags the image of {@code docker run}, {@code docker pull} and {@code docker create} in the
+   * shell text of a line when it has no digest. The image is the first word after the command that
+   * is not an option or the value of an option that takes one (the list is that of {@code docker
+   * run}); a word with a variable is unverifiable and flagged. An image that the same workflow
+   * builds ({@code docker build -t NAME}) has no digest to pin and is not flagged. Only a command
+   * whose image is on the same line is seen: a line continued with a backslash hides it, and other
+   * commands that start a container ({@code docker compose}, {@code docker service}, {@code docker
+   * buildx}) are not looked at.
+   */
+  private static void addUnpinnedDockerCommands(
+      List<String> problems, String where, String code, Set<String> builtHere) {
+    Matcher command = DOCKER_COMMAND.matcher(code);
+    if (!command.find()) {
+      return;
+    }
+    String[] words = command.group(2).trim().split("\\s+");
+    boolean skipValue = false;
+    for (String word : words) {
+      if (word.isEmpty()) {
+        continue;
+      }
+      if (skipValue) {
+        skipValue = false;
+        continue;
+      }
+      if (word.startsWith("-")) {
+        skipValue = OPTIONS_WITH_VALUE.contains(word);
+        continue;
+      }
+      String value = unquote(word);
+      if (!IMAGE_DIGEST.matcher(value).find() && !builtHere.contains(value)) {
+        problems.add(where + "UNPINNED_IMAGE " + value);
+      }
+      return;
+    }
+  }
+
+  /** The tags of the images that the workflow builds with {@code docker build -t} itself. */
+  private static Set<String> imagesBuiltHere(String content) {
+    Set<String> tags = new HashSet<>();
+    Matcher build = DOCKER_BUILD_TAG.matcher(content);
+    while (build.find()) {
+      tags.add(build.group(1));
+    }
+    return tags;
   }
 
   private static void addLatestRunners(List<String> problems, String where, String labels) {

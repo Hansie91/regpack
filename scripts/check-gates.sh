@@ -10,7 +10,7 @@ gates() { "$JAVA" -cp "$TOOLS" dev.regpack.tools.Gates "$@"; }
 
 scan=(--scan .)
 if [ -n "$BUILD_ROOT" ]; then scan+=(--scan "$BUILD_ROOT"); fi
-gates traceability --file docs/traceability.md --root . "${scan[@]}"
+gates traceability --file docs/traceability.md --root . --realstore skip "${scan[@]}"
 gates pins --dockerfile packaging/container/Dockerfile --workflows .github/workflows
 # NUL-terminated names with quoting off: a tracked file whose name holds non-ASCII characters is listed
 # as itself (git would quote it and the gate would then skip or choke on the quoted name). A file that

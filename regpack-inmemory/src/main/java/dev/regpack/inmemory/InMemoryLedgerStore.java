@@ -4,18 +4,30 @@ import dev.regpack.model.BatchId;
 import dev.regpack.model.Checkpoint;
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.IngestKey;
+import dev.regpack.model.KeyText;
+import dev.regpack.model.Leg;
+import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
+import dev.regpack.model.decision.AsAtRange;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.DecisionCodec;
+import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
+import dev.regpack.model.json.Json;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DuplicateKeyException;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
+import dev.regpack.ports.ledger.LeaseLedger;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.TrnConflictException;
+import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -34,12 +46,62 @@ import java.util.Set;
 public final class InMemoryLedgerStore implements LedgerStore {
   private record SourceEvent(EventIdentity eventIdentity, String sourceId) {}
 
+  /** The spec 10 {@code ingest_event_version_key}: (event identity, source, source version). */
+  private record EventVersion(EventIdentity eventIdentity, String sourceId, long sourceVersion) {}
+
   private record StreamKey(String sourceId, String stream) {}
 
   private record ChainKey(Regime regime, EventIdentity eventIdentity) {}
 
+  /**
+   * Spec 10 scopes the decision key by regime: (regime, event identity, context, input), and the
+   * schema (D-S3, {@code decision_idem_key}) adds the UTC day of the decision's asAt.
+   */
   private record DecisionKey(
-      EventIdentity eventIdentity, Sha256 decisionContextId, Sha256 inputDigest) {}
+      Regime regime,
+      EventIdentity eventIdentity,
+      Sha256 decisionContextId,
+      Sha256 inputDigest,
+      LocalDate asAtDay) {}
+
+  /** (executing LEI, TRN): the spec 10 {@code UNIQUE (executing LEI, TRN)} of the assignment. */
+  private record TrnKey(String executingLei, String trn) {}
+
+  /** The TRN of a subject, assigned once with its first version and never changed. */
+  private record Trn(String executingLei, String trn, String keyId, Instant assignedAt) {}
+
+  /** At most one version of a subject per decision. */
+  private record DecisionSubject(DecisionId decision, SubjectId subject) {}
+
+  private static final class SubjectRow {
+    private final SubjectId id;
+    private final SubjectKey key;
+    private Optional<Trn> trn = Optional.empty();
+    private final List<VersionRow> versions = new ArrayList<>();
+
+    private SubjectRow(SubjectId id, SubjectKey key) {
+      this.id = id;
+      this.key = key;
+    }
+  }
+
+  private record VersionRow(
+      SubjectId subject,
+      long seq,
+      DecisionId decision,
+      String action,
+      Sha256 logicalHash,
+      byte[] body,
+      VersionOrigin origin,
+      DeliveryId delivery) {}
+
+  /** Deliveries whose version is not live: a later equal version is not suppressed against them. */
+  private static final Set<DeliveryState> DEAD =
+      EnumSet.of(
+          DeliveryState.REJECTED,
+          DeliveryState.IN_REPAIR,
+          DeliveryState.WITHDRAWN,
+          DeliveryState.WRITTEN_OFF);
 
   /** States in which at most one delivery per (endpoint, business key) may be (spec 11.2). */
   private static final Set<DeliveryState> IN_FLIGHT =
@@ -55,16 +117,59 @@ public final class InMemoryLedgerStore implements LedgerStore {
     NO_TAKEOVER_IN_DOUBT,
     ABA_AS_NOOP,
     IGNORE_RESTORE_EPOCH,
-    IDEMPOTENCY_KEY_IGNORES_CONTEXT
+    IDEMPOTENCY_KEY_IGNORES_CONTEXT,
+    /** A second subject may take a (executing LEI, TRN) pair that is already assigned. */
+    TRN_NOT_UNIQUE_PER_LEI,
+    /** Every version with a proposal overwrites the key id of the stored TRN. */
+    TRN_REASSIGNED_PER_VERSION,
+    /** Suppression compares with any live version of the subject, not only the latest. */
+    SUPPRESS_AGAINST_ANY_VERSION,
+    /** A reportable unit that throws leaves the decisions and subjects staged so far. */
+    NON_ATOMIC_REPORTABLE,
+    /** The subject key ignores the regime. */
+    SUBJECT_NOT_REGIME_SCOPED,
+    /** A superseding non-REPORT decision is accepted while versions exist. */
+    NO_WITHDRAWAL_GUARD,
+    /** A takeover moves the SENDING deliveries of every endpoint, not only its own. */
+    TAKEOVER_TOUCHES_OTHER_ENDPOINTS,
+    /** The outbox page limit is not applied. */
+    PAGE_UNBOUNDED,
+    /** A decision with an asAt outside [2000-01-01, 2200-01-01) UTC is accepted. */
+    AS_AT_NOT_CHECKED,
+    /** The idempotency key of a decision leaves out the UTC day of its asAt. */
+    IDEMPOTENCY_KEY_IGNORES_DAY,
+    /** A lease ttl above {@link LeaseLedger#MAX_TTL} is accepted. */
+    LEASE_TTL_UNBOUNDED,
+    /** The withdrawal guard looks at the first leg only. */
+    WITHDRAWAL_GUARD_FIRST_LEG_ONLY,
+    /** The withdrawal guard ignores the outcome: only a dropped leg counts. */
+    WITHDRAWAL_GUARD_IGNORES_OUTCOME,
+    /** The withdrawal guard also runs on a redelivered (NOOP_REDELIVERY) decision. */
+    WITHDRAWAL_GUARD_ON_REDELIVERY,
+    /** A version is accepted on a decision whose outcome is not REPORT. */
+    VERSION_ON_ANY_OUTCOME,
+    /** The highest stored version of an event is kept as the lowest one. */
+    HIGHEST_VERSION_IS_MIN,
+    /** The exact ingest key is not looked up first, only (event, source, version). */
+    EXACT_KEY_NOT_FIRST,
+    /** The pending outbox lists the items of every kind. */
+    OUTBOX_KIND_IGNORED
   }
+
+  /** Constant stand-in for the day under IDEMPOTENCY_KEY_IGNORES_DAY. */
+  private static final LocalDate NO_DAY = LocalDate.of(2000, 1, 1);
 
   /** Constant stand-in for the decision context id under IDEMPOTENCY_KEY_IGNORES_CONTEXT. */
   private static final Sha256 NO_CONTEXT = new Sha256("0".repeat(64));
+
+  /** Constant stand-in for the regime under SUBJECT_NOT_REGIME_SCOPED. */
+  private static final Regime NO_REGIME = new Regime("noregime");
 
   private final Clock clock;
   private final Flaw flaw;
   private final Object lock = new Object();
   private final Map<IngestKey, StoredIngest> ingests = new HashMap<>();
+  private final Map<EventVersion, StoredIngest> ingestsByEventVersion = new HashMap<>();
   private final Map<SourceEvent, Long> highestVersion = new HashMap<>();
   private final Map<EventIdentity, String> owningSource = new HashMap<>();
   private final Map<BatchId, Result> results = new HashMap<>();
@@ -73,7 +178,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private long nextOutboxId = 1;
   private final Map<ChainKey, List<DecisionRecord>> chains = new HashMap<>();
   private final Map<DecisionKey, DecisionRecord> decisionsByKey = new HashMap<>();
+  private final Map<Sha256, DecisionContext> contexts = new HashMap<>();
   private long nextDecisionId = 1;
+  private final Map<SubjectKey, SubjectRow> subjects = new HashMap<>();
+  private final Map<SubjectId, SubjectRow> subjectsById = new HashMap<>();
+  private final Map<TrnKey, SubjectRow> subjectsByTrn = new HashMap<>();
+  private final Map<DecisionSubject, VersionRow> versionsByDecisionSubject = new HashMap<>();
+  private long nextSubjectId = 1;
   private final Map<EndpointKey, LeaseGrant> leases = new HashMap<>();
   private final Map<EndpointKey, Long> leaseCounters = new HashMap<>();
   private long restoreEpoch = 0;
@@ -140,9 +251,21 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   /** Decides and, when the entry is new, stores it. Called only after validation. */
   private Disposition apply(Commit commit, Entry entry) {
-    StoredIngest existing = ingests.get(entry.key());
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    StoredIngest existing = flaw == Flaw.EXACT_KEY_NOT_FIRST ? null : ingests.get(entry.key());
     if (existing != null) {
       return existing.contentHash().equals(entry.contentHash())
+          ? Disposition.NOOP_SAME_VERSION_SAME_HASH
+          : Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH;
+    }
+    // spec 10 ingest_event_version_key: the same event, source and version under another record
+    // id is the same version, decided by the content hash; nothing is stored for it
+    StoredIngest sameVersion =
+        ingestsByEventVersion.get(
+            new EventVersion(
+                entry.eventIdentity(), commit.sourceId(), entry.key().sourceVersion()));
+    if (sameVersion != null) {
+      return sameVersion.contentHash().equals(entry.contentHash())
           ? Disposition.NOOP_SAME_VERSION_SAME_HASH
           : Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH;
     }
@@ -159,11 +282,18 @@ public final class InMemoryLedgerStore implements LedgerStore {
     if (flaw == Flaw.ABA_AS_NOOP && equalsEarlierVersion(commit, entry)) {
       return Disposition.NOOP_SAME_VERSION_SAME_HASH;
     }
-    ingests.put(
-        entry.key(),
-        new StoredIngest(
-            entry.key(), entry.eventIdentity(), entry.contentHash(), commit.batchId()));
-    highestVersion.put(sourceEvent, entry.key().sourceVersion());
+    StoredIngest stored =
+        new StoredIngest(entry.key(), entry.eventIdentity(), entry.contentHash(), commit.batchId());
+    ingests.put(entry.key(), stored);
+    ingestsByEventVersion.put(
+        new EventVersion(entry.eventIdentity(), commit.sourceId(), entry.key().sourceVersion()),
+        stored);
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    highestVersion.put(
+        sourceEvent,
+        flaw == Flaw.HIGHEST_VERSION_IS_MIN && highest != null
+            ? Math.min(highest, entry.key().sourceVersion())
+            : entry.key().sourceVersion());
     owningSource.put(entry.eventIdentity(), commit.sourceId());
     return Disposition.NEW_VERSION;
   }
@@ -197,8 +327,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   @Override
   public Optional<Checkpoint> latestCheckpoint(String sourceId, String stream) {
-    Objects.requireNonNull(sourceId, "sourceId");
-    Objects.requireNonNull(stream, "stream");
+    KeyText.require("sourceId", sourceId);
+    KeyText.require("stream", stream);
     synchronized (lock) {
       return Optional.ofNullable(checkpoints.get(new StreamKey(sourceId, stream)));
     }
@@ -211,12 +341,15 @@ public final class InMemoryLedgerStore implements LedgerStore {
       throw new IllegalArgumentException("max must be >= 0");
     }
     synchronized (lock) {
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      int limit = flaw == Flaw.PAGE_UNBOUNDED ? max : Math.min(max, PAGE_LIMIT);
       List<OutboxItem> pending = new ArrayList<>();
       for (OutboxItem item : outbox.values()) {
-        if (pending.size() >= max) {
+        if (pending.size() >= limit) {
           break;
         }
-        if (item.kind() == kind && item.state() == OutboxState.PENDING) {
+        if ((item.kind() == kind || flaw == Flaw.OUTBOX_KIND_IGNORED)
+            && item.state() == OutboxState.PENDING) {
           pending.add(item);
         }
       }
@@ -237,73 +370,433 @@ public final class InMemoryLedgerStore implements LedgerStore {
     Objects.requireNonNull(commit, "commit");
     synchronized (lock) {
       validate(commit);
-      // Work on copies; real state is touched only after every decision has been accepted.
-      Map<ChainKey, List<DecisionRecord>> appended = new LinkedHashMap<>();
-      Map<DecisionKey, DecisionRecord> inserted = new LinkedHashMap<>();
-      long nextId = nextDecisionId;
+      // Work on staged copies; real state is touched only after every decision has been accepted.
+      DecisionStage stage = new DecisionStage();
       List<Committed> committed = new ArrayList<>();
       for (NewDecision decision : commit.decisions()) {
-        DecisionBody body = decision.body();
-        DecisionKey decisionKey = decisionKey(body);
-        DecisionRecord known = inserted.get(decisionKey);
-        if (known == null) {
-          known = decisionsByKey.get(decisionKey);
+        Committed c = stage.stage(decision);
+        if (c.status() == CommitStatus.INSERTED || flaw == Flaw.WITHDRAWAL_GUARD_ON_REDELIVERY) {
+          requireNoWithdrawal(decision.body());
         }
-        if (known != null) {
-          committed.add(new Committed(CommitStatus.NOOP_REDELIVERY, known));
-          continue;
-        }
-        ChainKey chainKey = new ChainKey(body.regime(), body.eventIdentity());
-        List<DecisionRecord> chain = chains.getOrDefault(chainKey, List.of());
-        List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
-        long headSeq = chain.size() + added.size();
-        if (decision.expectedHeadSeq() != headSeq) {
-          // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
-          if (flaw == Flaw.NON_ATOMIC_DECISIONS) {
-            publish(appended, inserted, nextId);
-          }
-          throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
-        }
-        Optional<DecisionId> supersedes = Optional.empty();
-        if (!added.isEmpty()) {
-          supersedes = Optional.of(added.get(added.size() - 1).decisionId());
-        } else if (!chain.isEmpty()) {
-          supersedes = Optional.of(chain.get(chain.size() - 1).decisionId());
-        }
-        DecisionRecord record =
-            new DecisionRecord(new DecisionId(nextId++), headSeq + 1, supersedes, body);
-        added.add(record);
-        inserted.put(decisionKey, record);
-        committed.add(new Committed(CommitStatus.INSERTED, record));
+        committed.add(c);
       }
-      publish(appended, inserted, nextId);
-      commit
-          .completesOutbox()
-          .ifPresent(
-              id -> {
-                OutboxItem item = outbox.get(id);
-                outbox.put(id, new OutboxItem(id, item.kind(), item.subjectId(), OutboxState.DONE));
-              });
+      stage.publish();
+      completeOutbox(commit.completesOutbox());
       return List.copyOf(committed);
     }
   }
 
-  private void publish(
-      Map<ChainKey, List<DecisionRecord>> appended,
-      Map<DecisionKey, DecisionRecord> inserted,
-      long nextId) {
-    appended.forEach(
-        (chainKey, added) ->
-            chains.computeIfAbsent(chainKey, k -> new ArrayList<>()).addAll(added));
-    decisionsByKey.putAll(inserted);
-    nextDecisionId = nextId;
+  /**
+   * The decisions of one unit, staged: nothing is visible until {@link #publish()}, so a unit that
+   * throws leaves no trace.
+   */
+  private final class DecisionStage {
+    private final Map<ChainKey, List<DecisionRecord>> appended = new LinkedHashMap<>();
+    private final Map<DecisionKey, DecisionRecord> inserted = new LinkedHashMap<>();
+    private final Map<Sha256, DecisionContext> newContexts = new LinkedHashMap<>();
+    private long nextId = nextDecisionId;
+
+    Committed stage(NewDecision decision) {
+      DecisionBody body = decision.body();
+      // a context travels with a redelivery too: storing it is idempotent
+      decision.context().ifPresent(c -> newContexts.put(c.id(), c));
+      DecisionKey decisionKey = decisionKey(body);
+      DecisionRecord known = inserted.get(decisionKey);
+      if (known == null) {
+        known = decisionsByKey.get(decisionKey);
+      }
+      if (known != null) {
+        return new Committed(CommitStatus.NOOP_REDELIVERY, known);
+      }
+      ChainKey chainKey = new ChainKey(body.regime(), body.eventIdentity());
+      List<DecisionRecord> chain = chains.getOrDefault(chainKey, List.of());
+      List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
+      long headSeq = chain.size() + added.size();
+      if (decision.expectedHeadSeq() != headSeq) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
+        if (flaw == Flaw.NON_ATOMIC_DECISIONS) {
+          publishDecisions();
+        }
+        throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
+      }
+      Optional<DecisionId> supersedes = Optional.empty();
+      if (!added.isEmpty()) {
+        supersedes = Optional.of(added.get(added.size() - 1).decisionId());
+      } else if (!chain.isEmpty()) {
+        supersedes = Optional.of(chain.get(chain.size() - 1).decisionId());
+      }
+      DecisionRecord record =
+          new DecisionRecord(new DecisionId(nextId++), headSeq + 1, supersedes, body);
+      added.add(record);
+      inserted.put(decisionKey, record);
+      return new Committed(CommitStatus.INSERTED, record);
+    }
+
+    /** The head sequence of a chain including the decisions staged so far. */
+    long headSeq(ChainKey chainKey) {
+      return chains.getOrDefault(chainKey, List.of()).size()
+          + appended.getOrDefault(chainKey, List.of()).size();
+    }
+
+    void publish() {
+      publishDecisions();
+      contexts.putAll(newContexts);
+    }
+
+    private void publishDecisions() {
+      appended.forEach(
+          (chainKey, added) ->
+              chains.computeIfAbsent(chainKey, k -> new ArrayList<>()).addAll(added));
+      decisionsByKey.putAll(inserted);
+      nextDecisionId = nextId;
+    }
+  }
+
+  private void completeOutbox(Optional<OutboxId> completes) {
+    completes.ifPresent(
+        id -> {
+          OutboxItem item = outbox.get(id);
+          outbox.put(id, new OutboxItem(id, item.kind(), item.subjectId(), OutboxState.DONE));
+        });
+  }
+
+  /**
+   * Rule 8 (D-L4): an inserted decision that is not REPORT, or that omits a leg, fails closed while
+   * that leg has report versions; the withdrawal transaction belongs to the delivery state machine.
+   */
+  private void requireNoWithdrawal(DecisionBody body) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (flaw == Flaw.NO_WITHDRAWAL_GUARD) {
+      return;
+    }
+    for (Leg leg : Leg.values()) {
+      // test double only: deliberate flaws for ContractSuiteTeethTest
+      if (flaw == Flaw.WITHDRAWAL_GUARD_FIRST_LEG_ONLY && leg != Leg.values()[0]) {
+        break;
+      }
+      boolean outcomeWithdraws =
+          flaw != Flaw.WITHDRAWAL_GUARD_IGNORES_OUTCOME && body.outcome() != Outcome.REPORT;
+      SubjectRow subject =
+          subjects.get(indexKey(new SubjectKey(body.regime(), body.eventIdentity(), leg)));
+      if (subject != null
+          && !subject.versions.isEmpty()
+          && (outcomeWithdraws || !body.legs().contains(leg))) {
+        throw new WithdrawalRequiredException(
+            "the "
+                + leg
+                + " leg of "
+                + body.eventIdentity().value()
+                + " has report versions and the superseding decision does not report it");
+      }
+    }
+  }
+
+  @Override
+  public List<ReportableCommitted> commitReportable(ReportableCommit commit) {
+    Objects.requireNonNull(commit, "commit");
+    synchronized (lock) {
+      List<NewDecision> decisions = new ArrayList<>();
+      for (ReportableDecision reportable : commit.decisions()) {
+        decisions.add(reportable.decision());
+      }
+      validate(new BatchCommit(decisions, commit.completesOutbox()));
+      for (ReportableDecision reportable : commit.decisions()) {
+        validateVersions(reportable);
+      }
+      UnitLog log = new UnitLog();
+      DecisionStage stage = new DecisionStage();
+      List<ReportableCommitted> results = new ArrayList<>();
+      boolean anyCreated = false;
+      try {
+        for (ReportableDecision reportable : commit.decisions()) {
+          Committed committed = stage.stage(reportable.decision());
+          if (committed.status() == CommitStatus.INSERTED
+              || flaw == Flaw.WITHDRAWAL_GUARD_ON_REDELIVERY) {
+            requireNoWithdrawal(reportable.decision().body());
+          }
+          List<VersionResult> versionResults = new ArrayList<>();
+          for (NewVersion version : reportable.versions()) {
+            VersionResult result = applyVersion(stage, committed, version, log);
+            anyCreated |= result.status() == VersionStatus.CREATED;
+            versionResults.add(result);
+          }
+          results.add(new ReportableCommitted(committed, versionResults));
+        }
+      } catch (RuntimeException e) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
+        if (flaw == Flaw.NON_ATOMIC_REPORTABLE) {
+          stage.publish();
+        } else {
+          log.rollBack();
+        }
+        throw e;
+      }
+      stage.publish();
+      completeOutbox(commit.completesOutbox());
+      if (anyCreated) {
+        commit.sequenceBatch().ifPresent(this::ensureSequenceItem);
+      }
+      return List.copyOf(results);
+    }
+  }
+
+  /** Rule 2: checked for the whole unit before anything is written. */
+  private void validateVersions(ReportableDecision reportable) {
+    DecisionBody body = reportable.decision().body();
+    Set<Leg> seen = EnumSet.noneOf(Leg.class);
+    for (NewVersion version : reportable.versions()) {
+      SubjectKey subject = version.subject();
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (body.outcome() != Outcome.REPORT && flaw != Flaw.VERSION_ON_ANY_OUTCOME) {
+        throw new IllegalArgumentException("a version needs a REPORT decision: " + body.outcome());
+      }
+      if (!body.legs().contains(subject.leg())) {
+        throw new IllegalArgumentException(
+            "the leg " + subject.leg() + " is not a leg of the decision");
+      }
+      if (!seen.add(subject.leg())) {
+        throw new IllegalArgumentException("two versions for the leg " + subject.leg());
+      }
+      if (!subject.regime().equals(body.regime())
+          || !subject.eventIdentity().equals(body.eventIdentity())) {
+        throw new IllegalArgumentException("the subject names another regime or event");
+      }
+    }
+  }
+
+  /**
+   * Undo log of one reportable unit: the report state is changed in place and a unit that throws is
+   * rolled back in reverse order, including the counters.
+   */
+  private final class UnitLog {
+    private final List<Runnable> undo = new ArrayList<>();
+    private final long subjectMark = nextSubjectId;
+    private final long deliveryMark = nextDeliveryId;
+
+    void onRollBack(Runnable action) {
+      undo.add(action);
+    }
+
+    void rollBack() {
+      for (int i = undo.size() - 1; i >= 0; i--) {
+        undo.get(i).run();
+      }
+      nextSubjectId = subjectMark;
+      nextDeliveryId = deliveryMark;
+    }
+  }
+
+  private VersionResult applyVersion(
+      DecisionStage stage, Committed committed, NewVersion version, UnitLog log) {
+    DecisionRecord decision = committed.record();
+    SubjectRow subject = subjects.get(indexKey(version.subject()));
+    if (committed.status() == CommitStatus.NOOP_REDELIVERY) {
+      // rule 3
+      VersionRow existing =
+          subject == null
+              ? null
+              : versionsByDecisionSubject.get(
+                  new DecisionSubject(decision.decisionId(), subject.id));
+      if (existing != null) {
+        return new VersionResult(
+            subject.id,
+            subject.trn.orElseThrow().trn(),
+            existing.seq(),
+            VersionStatus.EXISTING,
+            Optional.of(existing.delivery()));
+      }
+      long head =
+          stage.headSeq(new ChainKey(decision.body().regime(), decision.body().eventIdentity()));
+      if (decision.decisionSeq() != head) {
+        throw new DecisionHeadConflictException(decision.body().eventIdentity(), head);
+      }
+    }
+    if (subject == null) {
+      SubjectRow created = new SubjectRow(new SubjectId(nextSubjectId++), version.subject());
+      subjects.put(indexKey(created.key), created);
+      subjectsById.put(created.id, created);
+      log.onRollBack(
+          () -> {
+            subjects.remove(indexKey(created.key));
+            subjectsById.remove(created.id);
+          });
+      subject = created;
+    }
+    Trn trn = assignTrn(subject, version, log);
+    // rule 7
+    for (int i = subject.versions.size() - 1; i >= 0; i--) {
+      VersionRow latest = subject.versions.get(i);
+      if (DEAD.contains(deliveries.get(latest.delivery()).state())) {
+        continue;
+      }
+      if (latest.action().equals(version.action())
+          && latest.logicalHash().equals(version.logicalHash())) {
+        return new VersionResult(
+            subject.id,
+            trn.trn(),
+            latest.seq(),
+            VersionStatus.SUPPRESSED_UNCHANGED,
+            Optional.empty());
+      }
+      // test double only: deliberate flaw for ContractSuiteTeethTest (looks at older versions too)
+      if (flaw != Flaw.SUPPRESS_AGAINST_ANY_VERSION) {
+        break;
+      }
+    }
+    // rules 4 and 6
+    long seq = subject.versions.size() + 1L;
+    NewDelivery newDelivery =
+        new NewDelivery(
+            version.endpoint(), version.endpointEpoch(), trn.executingLei() + "|" + trn.trn(), seq);
+    DeliveryId deliveryId = createDelivery(newDelivery);
+    log.onRollBack(
+        () -> {
+          deliveries.remove(deliveryId);
+          deliveryKeys.remove(newDelivery);
+        });
+    VersionRow row =
+        new VersionRow(
+            subject.id,
+            seq,
+            decision.decisionId(),
+            version.action(),
+            version.logicalHash(),
+            version.body(),
+            version.origin(),
+            deliveryId);
+    SubjectRow target = subject;
+    DecisionSubject link = new DecisionSubject(decision.decisionId(), subject.id);
+    target.versions.add(row);
+    versionsByDecisionSubject.put(link, row);
+    log.onRollBack(
+        () -> {
+          target.versions.remove(target.versions.size() - 1);
+          versionsByDecisionSubject.remove(link);
+        });
+    return new VersionResult(
+        subject.id, trn.trn(), seq, VersionStatus.CREATED, Optional.of(deliveryId));
+  }
+
+  /** Rule 5: the TRN of a subject is assigned once and then only read. */
+  private Trn assignTrn(SubjectRow subject, NewVersion version, UnitLog log) {
+    if (subject.trn.isPresent()) {
+      Trn stored = subject.trn.get();
+      if (!stored.executingLei().equals(version.executingLei())) {
+        throw new IllegalArgumentException("the executing LEI of a subject cannot change");
+      }
+      if (version.trn().isPresent() && !version.trn().get().trn().equals(stored.trn())) {
+        throw new IllegalArgumentException("a stored TRN cannot be replaced");
+      }
+      // test double only: deliberate flaw for ContractSuiteTeethTest (the TRN is assigned again)
+      if (flaw == Flaw.TRN_REASSIGNED_PER_VERSION && version.trn().isPresent()) {
+        Trn again =
+            new Trn(stored.executingLei(), stored.trn(), version.trn().get().keyId(), clock.now());
+        subject.trn = Optional.of(again);
+        log.onRollBack(() -> subject.trn = Optional.of(stored));
+        return again;
+      }
+      return stored;
+    }
+    TrnProposal proposal =
+        version.trn().orElseThrow(() -> new IllegalArgumentException("a new subject needs a TRN"));
+    TrnKey trnKey = new TrnKey(version.executingLei(), proposal.trn());
+    // test double only: deliberate flaw for ContractSuiteTeethTest (no uniqueness)
+    if (flaw != Flaw.TRN_NOT_UNIQUE_PER_LEI && subjectsByTrn.containsKey(trnKey)) {
+      throw new TrnConflictException(version.executingLei(), proposal.trn());
+    }
+    Trn assigned = new Trn(version.executingLei(), proposal.trn(), proposal.keyId(), clock.now());
+    subject.trn = Optional.of(assigned);
+    subjectsByTrn.put(trnKey, subject);
+    log.onRollBack(
+        () -> {
+          subject.trn = Optional.empty();
+          subjectsByTrn.remove(trnKey);
+        });
+    return assigned;
+  }
+
+  /** Rule 9: one {@code SEQUENCE} item per batch, unique on kind and subject. */
+  private void ensureSequenceItem(BatchId batch) {
+    for (OutboxItem item : outbox.values()) {
+      if (item.kind() == OutboxKind.SEQUENCE && item.subjectId().equals(batch.value())) {
+        return;
+      }
+    }
+    OutboxId id = new OutboxId(nextOutboxId++);
+    outbox.put(id, new OutboxItem(id, OutboxKind.SEQUENCE, batch.value(), OutboxState.PENDING));
+  }
+
+  @Override
+  public Optional<Subject> subject(SubjectKey key) {
+    Objects.requireNonNull(key, "key");
+    synchronized (lock) {
+      return Optional.ofNullable(subjects.get(indexKey(key))).map(InMemoryLedgerStore::view);
+    }
+  }
+
+  @Override
+  public Optional<Subject> subjectByTrn(String executingLei, String trn) {
+    KeyText.require("executingLei", executingLei);
+    KeyText.require("trn", trn);
+    synchronized (lock) {
+      return Optional.ofNullable(subjectsByTrn.get(new TrnKey(executingLei, trn)))
+          .map(InMemoryLedgerStore::view);
+    }
+  }
+
+  private static Subject view(SubjectRow row) {
+    return new Subject(
+        row.id,
+        row.key,
+        row.trn.map(Trn::executingLei),
+        row.trn.map(Trn::trn),
+        row.trn.map(Trn::keyId),
+        row.versions.size());
+  }
+
+  @Override
+  public List<StoredVersion> versions(SubjectId subject) {
+    Objects.requireNonNull(subject, "subject");
+    synchronized (lock) {
+      SubjectRow row = subjectsById.get(subject);
+      if (row == null) {
+        return List.of();
+      }
+      List<StoredVersion> stored = new ArrayList<>();
+      for (VersionRow version : row.versions) {
+        stored.add(
+            new StoredVersion(
+                version.subject(),
+                version.seq(),
+                version.decision(),
+                version.action(),
+                version.logicalHash(),
+                version.body(),
+                version.origin(),
+                Optional.of(version.delivery())));
+      }
+      return List.copyOf(stored);
+    }
+  }
+
+  /** The key under which a subject is indexed: the regime is dropped under the flaw. */
+  private SubjectKey indexKey(SubjectKey key) {
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    return flaw == Flaw.SUBJECT_NOT_REGIME_SCOPED
+        ? new SubjectKey(NO_REGIME, key.eventIdentity(), key.leg())
+        : key;
   }
 
   private DecisionKey decisionKey(DecisionBody body) {
     // test double only: deliberate flaw for ContractSuiteTeethTest
     Sha256 context =
         flaw == Flaw.IDEMPOTENCY_KEY_IGNORES_CONTEXT ? NO_CONTEXT : body.decisionContextId();
-    return new DecisionKey(body.eventIdentity(), context, body.inputDigest());
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    LocalDate day =
+        flaw == Flaw.IDEMPOTENCY_KEY_IGNORES_DAY
+            ? NO_DAY
+            : body.asAt().atOffset(ZoneOffset.UTC).toLocalDate();
+    return new DecisionKey(body.regime(), body.eventIdentity(), context, body.inputDigest(), day);
   }
 
   private void validate(BatchCommit commit) {
@@ -311,6 +804,25 @@ public final class InMemoryLedgerStore implements LedgerStore {
       if (decision.expectedHeadSeq() < 0) {
         throw new IllegalArgumentException("expectedHeadSeq must be >= 0");
       }
+      decision
+          .context()
+          .ifPresent(
+              c -> {
+                if (!c.id().equals(decision.body().decisionContextId())) {
+                  throw new IllegalArgumentException(
+                      "the context supplied with a decision has id "
+                          + c.id().hex()
+                          + " but the body cites "
+                          + decision.body().decisionContextId().hex());
+                }
+              });
+      // what the real store refuses before it writes: an asAt outside the daily partitions and a
+      // body without a canonical JSON form (a control character or a lone surrogate in a text)
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (flaw != Flaw.AS_AT_NOT_CHECKED) {
+        AsAtRange.dayOf(decision.body().asAt());
+      }
+      Json.canonical(DecisionCodec.bodyToMap(decision.body(), true));
     }
     commit
         .completesOutbox()
@@ -343,6 +855,14 @@ public final class InMemoryLedgerStore implements LedgerStore {
   }
 
   @Override
+  public Optional<DecisionContext> decisionContext(Sha256 contextId) {
+    Objects.requireNonNull(contextId, "contextId");
+    synchronized (lock) {
+      return Optional.ofNullable(contexts.get(contextId));
+    }
+  }
+
+  @Override
   public LeaseResult acquire(EndpointKey endpoint, String holder, Duration ttl) {
     Objects.requireNonNull(endpoint, "endpoint");
     Objects.requireNonNull(holder, "holder");
@@ -350,6 +870,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
     if (holder.isBlank()) {
       throw new IllegalArgumentException("holder must not be blank");
     }
+    KeyText.require("holder", holder);
     synchronized (lock) {
       Instant now = clock.now();
       LeaseGrant current = leases.get(endpoint);
@@ -365,7 +886,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
       if (flaw != Flaw.NO_TAKEOVER_IN_DOUBT) {
         deliveries.replaceAll(
             (id, delivery) ->
-                delivery.key().endpoint().equals(endpoint)
+                (delivery.key().endpoint().equals(endpoint)
+                            || flaw == Flaw.TAKEOVER_TOUCHES_OTHER_ENDPOINTS)
                         && delivery.state() == DeliveryState.SENDING
                     ? new Delivery(id, delivery.key(), DeliveryState.IN_DOUBT)
                     : delivery);
@@ -433,13 +955,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
     }
   }
 
-  private static void requirePositiveWholeMicros(Duration ttl) {
+  private void requirePositiveWholeMicros(Duration ttl) {
     Objects.requireNonNull(ttl, "ttl");
     if (ttl.isNegative() || ttl.isZero()) {
       throw new IllegalArgumentException("ttl must be positive: " + ttl);
     }
     if (ttl.getNano() % 1000 != 0) {
       throw new IllegalArgumentException("ttl is not whole microseconds: " + ttl);
+    }
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (flaw != Flaw.LEASE_TTL_UNBOUNDED && ttl.compareTo(LeaseLedger.MAX_TTL) > 0) {
+      throw new IllegalArgumentException("ttl is longer than " + LeaseLedger.MAX_TTL);
     }
   }
 

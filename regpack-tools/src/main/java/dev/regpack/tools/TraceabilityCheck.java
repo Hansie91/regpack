@@ -16,14 +16,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import javax.xml.XMLConstants;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
-import org.xml.sax.SAXException;
 
 /**
  * Checks the traceability file (spec 14.4): every requirement and invariant row has named evidence,
@@ -43,10 +39,36 @@ public final class TraceabilityCheck {
     }
   }
 
-  /** The outcome of a check; {@code closed} and {@code open} count rows. */
-  public record Result(List<String> problems, int rows, int closed, int open) {
+  /**
+   * Which evidence lines are evaluated. {@code ALL} is the build and the default. {@code SKIP}
+   * (build jobs that have no PostgreSQL) ignores lines with store {@code REALSTORE}: they are not
+   * looked up, do not count, and a due row of I1, I2, I9 or I10 that has such a line and no other
+   * counting line is reported as {@code REALSTORE_DEFERRED:<row>} (information, not a problem).
+   * {@code ONLY} (the real-store job) evaluates only lines with store {@code REALSTORE}; a due row
+   * of I1, I2, I9 or I10 needs one that passed, and a due row of any other id that has no such line
+   * is not evaluated and counts as open.
+   */
+  public enum Mode {
+    ALL,
+    SKIP,
+    ONLY
+  }
+
+  /**
+   * The outcome of a check; {@code closed} and {@code open} count rows. {@code deferred} lists the
+   * {@code REALSTORE_DEFERRED:<row>} information lines of mode {@code SKIP}; a deferred row is also
+   * counted in {@code open}.
+   */
+  public record Result(
+      List<String> problems, int rows, int closed, int open, List<String> deferred) {
     public Result {
       problems = List.copyOf(problems);
+      deferred = List.copyOf(deferred);
+    }
+
+    /** A result without deferred rows. */
+    public Result(List<String> problems, int rows, int closed, int open) {
+      this(problems, rows, closed, open, List.of());
     }
 
     /** True when no problem was found. */
@@ -70,7 +92,7 @@ public final class TraceabilityCheck {
   private static final Set<String> CIS = Set.of("BUILD", "NIGHTLY", "RC", "NA");
   private static final Set<String> REAL_STORE_ONLY = Set.of("I1", "I2", "I9", "I10");
   private static final Set<String> SKIPPED_DIRECTORIES = Set.of(".git", "node_modules");
-  private static final Pattern PLAN = Pattern.compile("P[0-9]+[ab]?");
+  private static final Pattern PLAN = Pattern.compile("P[0-9]+[a-d]?");
   private static final Pattern EXITED_LINE = Pattern.compile("^exited_plans:\\s*(.*)$");
   private static final Pattern SEPARATOR_CELL = Pattern.compile(":?-+:?");
   private static final Pattern STATUS_LINE = Pattern.compile("^status:\\s*(\\S+)\\s*$");
@@ -105,7 +127,20 @@ public final class TraceabilityCheck {
    * @param scanRoots directories searched for {@code TEST-*.xml} and {@code golden-audit.tsv}
    */
   public static Result check(String markdown, Path repoRoot, List<Path> scanRoots) {
+    return check(markdown, repoRoot, scanRoots, Mode.ALL);
+  }
+
+  /**
+   * Checks a traceability file in a real-store mode.
+   *
+   * @param markdown the text of the traceability file
+   * @param repoRoot the repository root; file evidence paths are relative to it
+   * @param scanRoots directories searched for {@code TEST-*.xml} and {@code golden-audit.tsv}
+   * @param mode which evidence lines are evaluated
+   */
+  public static Result check(String markdown, Path repoRoot, List<Path> scanRoots, Mode mode) {
     List<String> problems = new ArrayList<>();
+    List<String> deferred = new ArrayList<>();
     Set<String> exited = new HashSet<>();
     Map<String, Row> rows = parse(markdown, problems, exited);
     for (String id : IDS) {
@@ -122,16 +157,27 @@ public final class TraceabilityCheck {
         continue;
       }
       boolean due = exited.containsAll(row.closesIn());
-      boolean counted = checkEvidence(row, due, repoRoot, reports, problems);
+      boolean counted = checkEvidence(row, due, repoRoot, reports, problems, mode);
+      boolean needsRealStore = REAL_STORE_ONLY.contains(id);
+      boolean hasRealStoreLine = row.evidence().stream().anyMatch(e -> isRealStore(e));
       if (!due) {
         open++;
       } else if (counted) {
         closed++;
+      } else if (mode == Mode.SKIP && needsRealStore && hasRealStoreLine) {
+        deferred.add("REALSTORE_DEFERRED:" + id);
+        open++;
+      } else if (mode == Mode.ONLY && !needsRealStore && !hasRealStoreLine) {
+        open++;
       } else {
         problems.add("ROW_WITHOUT_EVIDENCE:" + id);
       }
     }
-    return new Result(problems, rows.size(), closed, open);
+    return new Result(problems, rows.size(), closed, open, deferred);
+  }
+
+  private static boolean isRealStore(Evidence e) {
+    return e.store().equals("REALSTORE");
   }
 
   private static Map<String, Row> parse(
@@ -229,12 +275,17 @@ public final class TraceabilityCheck {
     return cells.stream().allMatch(c -> SEPARATOR_CELL.matcher(c).matches());
   }
 
-  /** Reports problems of the cited artefacts and returns whether some evidence counts. */
+  /**
+   * Reports problems of the cited artefacts and returns whether some evidence counts. Lines the
+   * mode does not evaluate are neither looked up nor counted.
+   */
   private static boolean checkEvidence(
-      Row row, boolean due, Path repoRoot, Reports reports, List<String> problems) {
+      Row row, boolean due, Path repoRoot, Reports reports, List<String> problems, Mode mode) {
     boolean counted = false;
     for (Evidence e : row.evidence()) {
-      if (e.kind().equals("NONE")) {
+      if (e.kind().equals("NONE")
+          || (mode == Mode.SKIP && isRealStore(e))
+          || (mode == Mode.ONLY && !isRealStore(e))) {
         continue;
       }
       String where = row.id() + ":" + e.ref();
@@ -254,7 +305,7 @@ public final class TraceabilityCheck {
         }
         case OWNERLESS, PASS -> {}
       }
-      boolean interim = REAL_STORE_ONLY.contains(row.id()) && !e.store().equals("REALSTORE");
+      boolean interim = REAL_STORE_ONLY.contains(row.id()) && !isRealStore(e);
       if (status == Status.PASS && !interim) {
         counted = true;
       }
@@ -371,20 +422,11 @@ public final class TraceabilityCheck {
   /** An unreadable or malformed report yields no test cases, so its tests count as missing. */
   private static void readTestReport(
       Path file, Set<String> seen, Set<String> passed, Set<String> failed) {
-    Document doc;
-    try {
-      DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-      factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-      factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-      factory.setXIncludeAware(false);
-      factory.setExpandEntityReferences(false);
-      doc = factory.newDocumentBuilder().parse(file.toFile());
-    } catch (ParserConfigurationException | SAXException | IOException e) {
+    Optional<Document> parsed = XmlReports.parse(file);
+    if (parsed.isEmpty()) {
       return;
     }
+    Document doc = parsed.get();
     NodeList cases = doc.getElementsByTagName("testcase");
     for (int i = 0; i < cases.getLength(); i++) {
       Element testcase = (Element) cases.item(i);

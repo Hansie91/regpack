@@ -2,16 +2,25 @@ name: ci
 
 on:
   push:
-    branches: [main, 'p0/**', 'p1a/**', 'p2a/**']
+    branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      capacity:
+        description: Run the ledger capacity job (P3a T21; three variants of about one hour each)
+        type: boolean
+        default: false
+      confirm_downloads:
+        description: Confirm that the capacity job may pull its pinned PostgreSQL image (P3a T21)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && 'manual' || 'auto' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -121,6 +130,204 @@ jobs:
           set -euo pipefail
           ./mvnw -DskipTests -Dspotless.check.skip=true install
           ./mvnw -f spikes/pom.xml verify license:aggregate-add-third-party -DincludeTestScope=true
+
+  ledger-pg:
+    name: ledger (real PostgreSQL 18)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres
+      REGPACK_PG_REQUIRED: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - run: ./mvnw -DskipTests -Dspotless.check.skip=true install -pl regpack-postgres -am
+      - run: ./mvnw verify -pl regpack-postgres
+      - name: Real-store traceability
+        if: always()
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates traceability --file docs/traceability.md --root . --scan regpack-postgres/target --realstore only
+      - name: Test tallies and failure annotations
+        if: always()
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-postgres/target
+      - name: Upload ledger test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ledger-pg-reports
+          path: |
+            regpack-postgres/target/surefire-reports/TEST-*.xml
+            regpack-postgres/target/failsafe-reports/TEST-*.xml
+          if-no-files-found: warn
+
+  ledger-capacity:
+    name: ledger capacity (variant ${{ matrix.variant }})
+    if: github.event_name == 'workflow_dispatch' && inputs.capacity && inputs.confirm_downloads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: A
+            memory_options: ''
+            memory_limit_mb: ''
+            shared_buffers: 2GB
+            synchronous_commit: 'on'
+          - variant: B
+            memory_options: --memory=1363m --memory-swap=1363m
+            memory_limit_mb: '1363'
+            shared_buffers: 340MB
+            synchronous_commit: 'on'
+          - variant: C
+            memory_options: --memory=1363m --memory-swap=1363m
+            memory_limit_mb: '1363'
+            shared_buffers: 340MB
+            synchronous_commit: 'off'
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 12 --shm-size=1g ${{ matrix.memory_options }}
+    env:
+      PG_IMAGE: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres
+      REGPACK_PG_REQUIRED: 'true'
+      REGPACK_CAPACITY_VARIANT: ${{ matrix.variant }}
+      REGPACK_CAPACITY_MEMORY_LIMIT_MB: ${{ matrix.memory_limit_mb }}
+      REGPACK_CAPACITY_SYNCHRONOUS_COMMIT: ${{ matrix.synchronous_commit }}
+      REGPACK_CAPACITY_SECONDS: '1200'
+      REGPACK_CAPACITY_BATCH_SIZES: '5000,10000'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        timeout-minutes: 10
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Build the ledger module and its upstream modules
+        timeout-minutes: 20
+        run: ./mvnw -B -ntp -DskipTests -Dspotless.check.skip=true install -pl regpack-postgres -am
+      - name: Apply the variant settings and restart the server
+        timeout-minutes: 10
+        shell: bash
+        env:
+          SHARED_BUFFERS: ${{ matrix.shared_buffers }}
+          SYNCHRONOUS_COMMIT: ${{ matrix.synchronous_commit }}
+          SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --quiet --filter "ancestor=${PG_IMAGE}")"
+          if [ -z "$cid" ]; then cid="${SERVICE_ID}"; fi
+          if [ -z "$cid" ] || [ "$(printf '%s\n' "$cid" | wc -l)" -ne 1 ]; then
+            docker ps --all --format '{{.ID}} {{.Image}} {{.Status}}'
+            echo "::error::the service container of the pinned image was not found exactly once"
+            exit 1
+          fi
+          sql() { docker exec "$cid" psql -U postgres -v ON_ERROR_STOP=1 --no-psqlrc -At "$@"; }
+          avail="$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')"
+          if [ "$avail" -lt $((40 * 1024 * 1024 * 1024)) ]; then wal=2GB; else wal=8GB; fi
+          sql -c "ALTER SYSTEM SET shared_buffers = '${SHARED_BUFFERS}'" \
+              -c "ALTER SYSTEM SET synchronous_commit = '${SYNCHRONOUS_COMMIT}'" \
+              -c "ALTER SYSTEM SET max_wal_size = '${wal}'" \
+              -c "ALTER SYSTEM SET checkpoint_timeout = '15min'" \
+              -c "ALTER SYSTEM SET track_io_timing = on" \
+              -c "ALTER SYSTEM SET track_wal_io_timing = on"
+          docker restart "$cid"
+          ready=no
+          for _ in $(seq 1 60); do
+            if docker exec "$cid" pg_isready -h 127.0.0.1 -U postgres > /dev/null 2>&1; then ready=yes; break; fi
+            sleep 2
+          done
+          if [ "$ready" != yes ]; then
+            echo "::error::the server was not ready within two minutes after the restart"
+            exit 1
+          fi
+          mkdir -p regpack-postgres/target/capacity
+          {
+            sql -c "SELECT version()"
+            sql -c "SELECT name || ' = ' || current_setting(name) FROM pg_settings WHERE name IN ('shared_buffers','synchronous_commit','max_wal_size','checkpoint_timeout','track_io_timing','track_wal_io_timing','wal_level','fsync','full_page_writes') ORDER BY name"
+            docker inspect --format 'container memory {{.HostConfig.Memory}} memory-swap {{.HostConfig.MemorySwap}} shm {{.HostConfig.ShmSize}}' "$cid"
+            echo "runner cpus $(nproc)"
+            free -m
+            df -h /
+            lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Socket' || true
+            findmnt -T /var/lib || true
+            docker inspect --format 'network {{.HostConfig.NetworkMode}}' "$cid" || true
+            docker exec "$cid" pg_test_fsync -s 2 -f /var/lib/postgresql/data/pg_test_fsync.tmp || echo "pg_test_fsync unavailable or failed"
+            docker exec "$cid" rm -f /var/lib/postgresql/data/pg_test_fsync.tmp || true
+          } | tee "regpack-postgres/target/capacity/fixture-${REGPACK_CAPACITY_VARIANT}.txt"
+          full_id="$(docker inspect --format '{{.Id}}' "$cid")"
+          cgdir="/sys/fs/cgroup/system.slice/docker-${full_id}.scope"
+          if [ -d "$cgdir" ]; then
+            echo "REGPACK_CAPACITY_CGROUP_DIR=$cgdir" >> "$GITHUB_ENV"
+          else
+            echo "::notice title=capacity ${REGPACK_CAPACITY_VARIANT} cgroup::no container cgroup directory at ${cgdir}"
+          fi
+          settings="$(sql -c "SELECT string_agg(name || '=' || current_setting(name), ' ' ORDER BY name) FROM pg_settings WHERE name IN ('shared_buffers','synchronous_commit','max_wal_size','checkpoint_timeout','track_io_timing','track_wal_io_timing')")"
+          limits="$(docker inspect --format 'memory {{.HostConfig.Memory}} swap {{.HostConfig.MemorySwap}} shm {{.HostConfig.ShmSize}}' "$cid")"
+          echo "::notice title=capacity ${REGPACK_CAPACITY_VARIANT} server::${settings}"
+          echo "::notice title=capacity ${REGPACK_CAPACITY_VARIANT} container::${limits} (bytes, 0 means no limit); runner cpus $(nproc)"
+      - name: Run the capacity probe (information, not a verdict)
+        timeout-minutes: 80
+        run: ./mvnw -B -ntp -pl regpack-postgres verify -Dspotless.check.skip=true -Dgroups=capacity -DexcludedGroups=none -Dit.test=LedgerBurstProbeIT -Dfailsafe.failIfNoSpecifiedTests=false -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
+      - name: Capacity read-out annotations
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          files="$(find regpack-postgres/target/capacity -name 'summary-*.txt' 2>/dev/null | sort -V || true)"
+          found=0
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            found=1
+            head -n 5 "$file" | while IFS= read -r line; do
+              printf '::notice title=capacity %s::%s\n' "$REGPACK_CAPACITY_VARIANT" "${line//\%/%25}"
+            done
+          done <<< "$files"
+          if [ "$found" = 0 ]; then
+            echo "::warning title=capacity ${REGPACK_CAPACITY_VARIANT}::no read-out file was written"
+          fi
+      - name: Test tallies and failure annotations
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-postgres/target
+      - name: Upload sampler files and read-outs
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ledger-capacity-${{ matrix.variant }}
+          path: |
+            regpack-postgres/target/capacity/
+            regpack-postgres/target/failsafe-reports/TEST-*.xml
+          if-no-files-found: warn
+          retention-days: 30
 
   smoke-linux:
     name: smoke (linux, systemd)

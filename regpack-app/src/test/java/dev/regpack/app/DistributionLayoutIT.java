@@ -40,7 +40,14 @@ class DistributionLayoutIT {
           "lib/regpack-inmemory.jar",
           "lib/regpack-engine.jar");
   private static final List<String> FORBIDDEN_COMPONENT_PREFIXES =
-      List.of("junit", "assertj", "opentest4j", "apiguardian", "byte-buddy");
+      List.of(
+          "junit",
+          "assertj",
+          "opentest4j",
+          "apiguardian",
+          "byte-buddy",
+          "postgresql",
+          "checker-qual");
 
   private static Path distZip() {
     Path buildDir = Path.of(System.getProperty("regpack.build.dir"));

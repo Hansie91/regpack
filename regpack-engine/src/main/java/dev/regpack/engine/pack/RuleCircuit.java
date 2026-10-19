@@ -7,6 +7,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The per-rule poison circuit (spec 7.3, plan T17): after {@code n} failed evaluations of one rule
@@ -22,6 +23,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * no timer, no half-open probing and no automatic recovery, and a new pack is a new {@code
  * PackRegime} with a new circuit. While a rule is open nothing is counted for it, so {@link
  * #record} for an open rule changes nothing.
+ *
+ * <p>Every close of an open rule raises the {@link #epoch()}, which {@link PackRegime} puts into
+ * the decision context (INTERP-3, option A) so that the ledger supersedes a decision made under the
+ * open circuit.
  *
  * <p>The circuit is thread-safe: each rule has its own state, updated under that state's lock, so
  * no count is lost under concurrent evaluation. Which evaluation of several concurrent ones is the
@@ -44,6 +49,7 @@ public final class RuleCircuit {
   private final int m;
   private final Map<String, State> states = new ConcurrentHashMap<>();
   private final AtomicInteger openEvents = new AtomicInteger();
+  private final AtomicLong epoch = new AtomicLong();
 
   /**
    * @param n failures in one window that open the circuit of a rule
@@ -105,10 +111,24 @@ public final class RuleCircuit {
       return;
     }
     synchronized (state) {
+      if (state.open) {
+        epoch.incrementAndGet();
+      }
       state.open = false;
       state.evaluations = 0;
       state.failures = 0;
     }
+  }
+
+  /**
+   * The generation of this circuit: 0 at creation, plus 1 for every {@link #close} of a rule that
+   * was open; the close of a closed or never recorded rule changes nothing, and the value never
+   * decreases. {@link PackRegime} stamps it into the decision context (INTERP-3, option A), so a
+   * re-evaluation after a close is a different decision context. The epoch lives in this object and
+   * so in this process: a new circuit starts again at 0 (D-L1).
+   */
+  public long epoch() {
+    return epoch.get();
   }
 
   /** How many times a circuit has opened, counting a rule that was closed and opened again. */

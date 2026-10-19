@@ -9,20 +9,24 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.BatchId;
 import dev.regpack.model.Checkpoint;
+import dev.regpack.model.EventIdentity;
 import dev.regpack.model.IngestKey;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.ledger.IngestLedger.Commit;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
+import dev.regpack.ports.ledger.IngestLedger.Entry;
 import dev.regpack.ports.ledger.IngestLedger.EntryResult;
 import dev.regpack.ports.ledger.IngestLedger.Result;
 import dev.regpack.ports.ledger.IngestLedger.StoredIngest;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.OutboxLedger;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxItem;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
 import dev.regpack.testkit.clock.ManualClock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -163,6 +167,94 @@ public interface IngestLedgerContract {
     assertThat(ledger().findIngest(new IngestKey(SRC_A, "r9", 1))).isEmpty();
   }
 
+  /**
+   * The highest stored version decides, not the first, the lowest or the latest one stored: with v1
+   * and v3 stored, v2 is stale.
+   */
+  @Test
+  default void aLowerVersionBetweenTwoStoredVersionsIsStale() {
+    assertThat(
+            only(
+                ledger()
+                    .commitIngest(commit("B1", SRC_A, checkpoint(1), entry(SRC_A, "r9", 1, "A")))))
+        .isEqualTo(Disposition.NEW_VERSION);
+    assertThat(
+            only(
+                ledger()
+                    .commitIngest(commit("B2", SRC_A, checkpoint(2), entry(SRC_A, "r9", 3, "B")))))
+        .isEqualTo(Disposition.NEW_VERSION);
+    Result between =
+        ledger().commitIngest(commit("B3", SRC_A, checkpoint(3), entry(SRC_A, "r9", 2, "C")));
+    assertThat(only(between)).isEqualTo(Disposition.STALE);
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r9", 2))).isEmpty();
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r9", 1))).isPresent();
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r9", 3))).isPresent();
+    // the same with the stored versions 2 and 4 and a probe at 3 (the first stored is not it
+    // either)
+    ledger().commitIngest(commit("B4", SRC_A, checkpoint(4), entry(SRC_A, "r8", 2, "A")));
+    ledger().commitIngest(commit("B5", SRC_A, checkpoint(5), entry(SRC_A, "r8", 4, "B")));
+    assertThat(
+            only(
+                ledger()
+                    .commitIngest(commit("B6", SRC_A, checkpoint(6), entry(SRC_A, "r8", 3, "C")))))
+        .isEqualTo(Disposition.STALE);
+    // and a higher version still continues
+    assertThat(
+            only(
+                ledger()
+                    .commitIngest(commit("B7", SRC_A, checkpoint(7), entry(SRC_A, "r8", 5, "C")))))
+        .isEqualTo(Disposition.NEW_VERSION);
+  }
+
+  /** The same inside one commit: v1, v3, v2 gives NEW_VERSION, NEW_VERSION, STALE. */
+  @Test
+  default void aLowerVersionBetweenTwoVersionsOfOneCommitIsStale() {
+    Result result =
+        ledger()
+            .commitIngest(
+                commit(
+                    "B1",
+                    SRC_A,
+                    checkpoint(1),
+                    entry(SRC_A, "r9", 1, "A"),
+                    entry(SRC_A, "r9", 3, "B"),
+                    entry(SRC_A, "r9", 2, "C")));
+    assertThat(result.entries())
+        .extracting(EntryResult::disposition)
+        .containsExactly(Disposition.NEW_VERSION, Disposition.NEW_VERSION, Disposition.STALE);
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r9", 1))).isPresent();
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r9", 2))).isEmpty();
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r9", 3))).isPresent();
+  }
+
+  /**
+   * The exact key (source, record id, version) is decided first, even when the event identity of
+   * the entry differs from the stored one (a source that re-sends a record with a corrected
+   * identity): the hash decides, and nothing is stored or poisoned.
+   */
+  @Test
+  default void theExactKeyIsDecidedFirstEvenWhenTheEventIdentityDiffers() {
+    ledger().commitIngest(commit("B1", SRC_A, checkpoint(1), entry(SRC_A, "r1", 1, "A")));
+    IngestKey key = new IngestKey(SRC_A, "r1", 1);
+    EventIdentity corrected = EventIdentity.of("LEI1", "XPAR", "r1-corrected");
+
+    Result same =
+        ledger()
+            .commitIngest(
+                commit("B2", SRC_A, checkpoint(2), new Entry(key, corrected, Sha256.ofUtf8("A"))));
+    assertThat(only(same)).isEqualTo(Disposition.NOOP_SAME_VERSION_SAME_HASH);
+    Result different =
+        ledger()
+            .commitIngest(
+                commit("B3", SRC_A, checkpoint(3), new Entry(key, corrected, Sha256.ofUtf8("B"))));
+    assertThat(only(different)).isEqualTo(Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH);
+
+    StoredIngest stored = ledger().findIngest(key).orElseThrow();
+    assertThat(stored.eventIdentity()).isEqualTo(EventIdentity.of("LEI1", "XPAR", "r1"));
+    assertThat(stored.contentHash()).isEqualTo(Sha256.ofUtf8("A"));
+    assertThat(stored.batchId()).isEqualTo(batchId("B1"));
+  }
+
   @Test
   default void abaProducesThreeVersions() {
     Result v1 =
@@ -202,6 +294,114 @@ public interface IngestLedgerContract {
     assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 10)).isEmpty();
     assertThat(ledger().ingestResult(bad.batchId())).isEmpty();
     assertThat(ledger().findIngest(new IngestKey(SRC_A, "r2", 1))).isEmpty();
+  }
+
+  /** M35: an entry of another source than the commit's is an error, and nothing is written. */
+  @Test
+  default void anEntryOfAnotherSourceThanTheCommitIsRejectedBeforeAnyWrite() {
+    Commit bad =
+        commit(
+            "B1",
+            SRC_A,
+            checkpoint(1),
+            entry(SRC_A, "r1", 1, "A"),
+            entry(SRC_B, "r2", 1, "A"),
+            entry(SRC_A, "r3", 1, "A"));
+    assertThatThrownBy(() -> ledger().commitIngest(bad))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(ledger().ingestResult(bad.batchId())).isEmpty();
+    assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 10)).isEmpty();
+    assertThat(ledger().latestCheckpoint(SRC_A, "trades")).isEmpty();
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r1", 1))).isEmpty();
+    assertThat(ledger().findIngest(new IngestKey(SRC_B, "r2", 1))).isEmpty();
+    assertThat(ledger().findIngest(new IngestKey(SRC_A, "r3", 1))).isEmpty();
+    // the rejected batch id is not burnt: the corrected commit under it is applied
+    Result good =
+        ledger().commitIngest(commit("B1", SRC_A, checkpoint(1), entry(SRC_A, "r1", 1, "A")));
+    assertThat(good.redelivery()).isFalse();
+  }
+
+  /** M39: a blank commit source id is an error, and nothing is written. */
+  @Test
+  default void aBlankCommitSourceIdIsRejected() {
+    for (String blank : new String[] {"", " ", "\t"}) {
+      Commit bad = new Commit(batchId("B1"), blank, List.of(), Optional.of(checkpoint(1)));
+      assertThatThrownBy(() -> ledger().commitIngest(bad))
+          .as("source id '" + blank + "'")
+          .isInstanceOf(IllegalArgumentException.class);
+      assertThat(ledger().ingestResult(bad.batchId())).isEmpty();
+      assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 10)).isEmpty();
+    }
+  }
+
+  /**
+   * Spec 10 {@code ingest_event_version_key}: the same event identity, source and source version
+   * under another record id is one version, decided by the content hash. Nothing is stored for the
+   * second record id.
+   */
+  @Test
+  default void sameEventSourceAndVersionUnderAnotherRecordIdIsDecidedByHash() {
+    EventIdentity event = EventIdentity.of("LEI1", "XPAR", "e1");
+    IngestKey first = new IngestKey(SRC_A, "rec-1", 1);
+    IngestKey second = new IngestKey(SRC_A, "rec-2", 1);
+    Result created =
+        ledger()
+            .commitIngest(
+                commit("B1", SRC_A, checkpoint(1), new Entry(first, event, Sha256.ofUtf8("A"))));
+    assertThat(only(created)).isEqualTo(Disposition.NEW_VERSION);
+
+    Result same =
+        ledger()
+            .commitIngest(
+                commit("B2", SRC_A, checkpoint(2), new Entry(second, event, Sha256.ofUtf8("A"))));
+    assertThat(only(same)).isEqualTo(Disposition.NOOP_SAME_VERSION_SAME_HASH);
+
+    Result different =
+        ledger()
+            .commitIngest(
+                commit("B3", SRC_A, checkpoint(3), new Entry(second, event, Sha256.ofUtf8("B"))));
+    assertThat(only(different)).isEqualTo(Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH);
+
+    assertThat(ledger().findIngest(second)).isEmpty();
+    StoredIngest stored = ledger().findIngest(first).orElseThrow();
+    assertThat(stored.contentHash()).isEqualTo(Sha256.ofUtf8("A"));
+    assertThat(stored.batchId()).isEqualTo(batchId("B1"));
+    // another version of the same event under the other record id is a different key
+    Result next =
+        ledger()
+            .commitIngest(
+                commit(
+                    "B4",
+                    SRC_A,
+                    checkpoint(4),
+                    new Entry(new IngestKey(SRC_A, "rec-2", 2), event, Sha256.ofUtf8("B"))));
+    assertThat(only(next)).isEqualTo(Disposition.NEW_VERSION);
+  }
+
+  /** M115/M116: one call returns at most {@link OutboxLedger#PAGE_LIMIT} items, oldest first. */
+  @Test
+  default void pendingOutboxReturnsAtMostPageLimitItems() {
+    assertThat(OutboxLedger.PAGE_LIMIT).isEqualTo(1_000);
+    int batches = OutboxLedger.PAGE_LIMIT + 1;
+    List<BatchId> ids = new ArrayList<>();
+    for (int i = 0; i < batches; i++) {
+      Result result =
+          ledger()
+              .commitIngest(commit("P" + i, SRC_A, checkpoint(i), entry(SRC_A, "p" + i, 1, "A")));
+      ids.add(result.batchId());
+    }
+    for (int max : new int[] {OutboxLedger.PAGE_LIMIT, batches, 5_000, Integer.MAX_VALUE}) {
+      List<OutboxItem> page = ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, max);
+      assertThat(page).as("max " + max).hasSize(OutboxLedger.PAGE_LIMIT);
+      assertThat(page.get(0).subjectId()).isEqualTo(ids.get(0).value());
+      assertThat(page.get(page.size() - 1).subjectId())
+          .isEqualTo(ids.get(OutboxLedger.PAGE_LIMIT - 1).value());
+    }
+    assertThat(ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, 3))
+        .extracting(OutboxItem::subjectId)
+        .containsExactly(ids.get(0).value(), ids.get(1).value(), ids.get(2).value());
+    assertThatThrownBy(() -> ledger().pendingOutbox(OutboxKind.DECIDE_BATCH, -1))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

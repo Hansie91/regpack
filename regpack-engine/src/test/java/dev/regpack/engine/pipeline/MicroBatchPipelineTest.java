@@ -81,6 +81,21 @@ class MicroBatchPipelineTest {
   }
 
   @Test
+  void theDecisionContextIsStoredWithTheFirstDecision() {
+    InMemorySourceConnector source = ToyBatches.standardSource();
+    Sha256 contextId = WalkingSkeletonRegime.skeletonContext().id();
+    assertThat(ledger.decisionContext(contextId)).isEmpty();
+
+    try (BatchStream stream = source.read(ToyBatches.fromStart())) {
+      assertThat(pipeline.pump(stream, ToyBatches.SOURCE_ID, 1)).isEqualTo(1);
+    }
+
+    assertThat(chain(ToyBatches.T1)).isNotEmpty();
+    assertThat(chain(ToyBatches.T1).get(0).body().decisionContextId()).isEqualTo(contextId);
+    assertThat(ledger.decisionContext(contextId)).contains(WalkingSkeletonRegime.skeletonContext());
+  }
+
+  @Test
   void twoVersionsOfOneIdentityInOneBatchChainInOrder() {
     byte[] both =
         ToyBatches.payload(

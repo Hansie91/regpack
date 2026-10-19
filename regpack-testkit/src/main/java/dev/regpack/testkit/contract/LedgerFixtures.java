@@ -10,16 +10,25 @@ import dev.regpack.model.ReasonCode;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.ports.ledger.DecisionLedger;
 import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.IngestLedger;
 import dev.regpack.ports.ledger.LeaseLedger;
+import dev.regpack.ports.ledger.ReportLedger;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
 /** Helpers shared by the ledger contract suites. */
 public final class LedgerFixtures {
+  /** The regime that the report builders use unless a regime is given. */
+  public static final String MIFIR_REGIME = "mifir.eu.rts22";
+
+  /** A second regime for the tests of the regime scope. */
+  public static final String EMIR_REGIME = "emir.eu";
+
   private LedgerFixtures() {}
 
   /**
@@ -82,6 +91,27 @@ public final class LedgerFixtures {
       Outcome outcome,
       Instant evaluatedAt,
       Instant asAt) {
+    return decisionBody(
+        event,
+        regime,
+        contextTag,
+        digestTag,
+        outcome,
+        evaluatedAt,
+        asAt,
+        outcome == Outcome.REPORT ? List.of(Leg.MARKET) : List.of());
+  }
+
+  /** The one place where the fixed components of a test decision body are spelled out. */
+  private static DecisionBody decisionBody(
+      String event,
+      String regime,
+      String contextTag,
+      String digestTag,
+      Outcome outcome,
+      Instant evaluatedAt,
+      Instant asAt,
+      List<Leg> legs) {
     return new DecisionBody(
         EventIdentity.of("LEI1", "XPAR", event),
         new Regime(regime),
@@ -95,13 +125,159 @@ public final class LedgerFixtures {
         List.of(),
         List.of(),
         List.of(),
-        outcome == Outcome.REPORT ? List.of(Leg.MARKET) : List.of(),
+        legs,
         Sha256.ofUtf8(digestTag));
   }
 
   /** A new decision that expects the chain head to be at {@code expectedHeadSeq}. */
   public static DecisionLedger.NewDecision decision(DecisionBody body, long expectedHeadSeq) {
     return new DecisionLedger.NewDecision(body, expectedHeadSeq);
+  }
+
+  /** A new decision that carries its decision context (stored in the same unit). */
+  public static DecisionLedger.NewDecision decision(
+      DecisionBody body, long expectedHeadSeq, DecisionContext context) {
+    return new DecisionLedger.NewDecision(body, expectedHeadSeq, Optional.of(context));
+  }
+
+  /**
+   * A decision context whose engine build is {@code engineTag}; every other component is fixed.
+   * Different tags give different context ids.
+   */
+  public static DecisionContext context(String engineTag) {
+    return new DecisionContext(
+        Sha256.ofUtf8("pack"),
+        Optional.empty(),
+        List.of("pin-1"),
+        List.of("ref-1"),
+        List.of(),
+        "fp-1",
+        "map-1",
+        engineTag,
+        "interpreter");
+  }
+
+  /** The same body with {@code decisionContextId} set to the id of {@code context}. */
+  public static DecisionBody withContext(DecisionBody body, DecisionContext context) {
+    return new DecisionBody(
+        body.eventIdentity(),
+        body.regime(),
+        context.id(),
+        body.asAt(),
+        body.evaluatedAt(),
+        body.outcome(),
+        body.flags(),
+        body.reasonCode(),
+        body.node(),
+        body.ruleIdsHit(),
+        body.path(),
+        body.citations(),
+        body.legs(),
+        body.inputDigest(),
+        body.attributes());
+  }
+
+  /**
+   * A REPORT decision body for event {@code LEI1|XPAR|event} in {@code regime}, context id {@code
+   * SHA-256(ctxTag)}, input digest {@code SHA-256(digestTag)} and exactly the given {@code legs};
+   * everything else as {@link #body}.
+   */
+  public static DecisionBody reportBody(
+      String regime, String event, String ctxTag, String digestTag, Leg... legs) {
+    return decisionBody(
+        event,
+        regime,
+        ctxTag,
+        digestTag,
+        Outcome.REPORT,
+        Instant.parse("2026-10-09T10:00:00Z"),
+        Instant.parse("2026-10-09T09:30:00Z"),
+        List.of(legs));
+  }
+
+  /**
+   * A body of any outcome that names exactly the given {@code legs}, in particular a non-REPORT
+   * body that still lists legs (which {@link #body} never builds); everything else as {@link
+   * #reportBody}.
+   */
+  public static DecisionBody bodyWithLegs(
+      String regime, String event, String ctxTag, String digestTag, Outcome outcome, Leg... legs) {
+    return decisionBody(
+        event,
+        regime,
+        ctxTag,
+        digestTag,
+        outcome,
+        Instant.parse("2026-10-09T10:00:00Z"),
+        Instant.parse("2026-10-09T09:30:00Z"),
+        List.of(legs));
+  }
+
+  /** A REPORT decision in {@link #MIFIR_REGIME} that expects an empty chain (head 0). */
+  public static DecisionLedger.NewDecision reportDecision(
+      String event, String ctxTag, String digestTag, Leg... legs) {
+    return reportDecision(0, event, ctxTag, digestTag, legs);
+  }
+
+  /** A REPORT decision in {@link #MIFIR_REGIME} that expects the chain head {@code expected}. */
+  public static DecisionLedger.NewDecision reportDecision(
+      long expectedHeadSeq, String event, String ctxTag, String digestTag, Leg... legs) {
+    return decision(reportBody(MIFIR_REGIME, event, ctxTag, digestTag, legs), expectedHeadSeq);
+  }
+
+  /** The key of the report subject of a leg of {@code LEI1|XPAR|event} in {@code regime}. */
+  public static ReportLedger.SubjectKey subjectKey(String regime, String event, Leg leg) {
+    return new ReportLedger.SubjectKey(
+        new Regime(regime), EventIdentity.of("LEI1", "XPAR", event), leg);
+  }
+
+  /**
+   * A version request in {@link #MIFIR_REGIME} for {@code leg} of {@code LEI1|XPAR|event} that
+   * proposes {@code trn} under key id {@code KEY-1}, for the endpoint {@code endpoint("EP1")} in
+   * epoch 1; the logical hash is {@code SHA-256(hashTag)} and the body the UTF-8 of {@code "body-"
+   * + hashTag}.
+   */
+  public static ReportLedger.NewVersion newVersion(
+      String event, Leg leg, String executingLei, String trn, String action, String hashTag) {
+    return newVersion(
+        subjectKey(MIFIR_REGIME, event, leg),
+        executingLei,
+        Optional.of(new ReportLedger.TrnProposal(trn, "KEY-1")),
+        action,
+        hashTag,
+        endpoint("EP1"),
+        1);
+  }
+
+  /** Like {@link #newVersion(String, Leg, String, String, String, String)} with a subject key. */
+  public static ReportLedger.NewVersion newVersion(
+      ReportLedger.SubjectKey subject,
+      String executingLei,
+      Optional<ReportLedger.TrnProposal> trn,
+      String action,
+      String hashTag) {
+    return newVersion(subject, executingLei, trn, action, hashTag, endpoint("EP1"), 1);
+  }
+
+  /** The general form: every component of a version request is given. */
+  public static ReportLedger.NewVersion newVersion(
+      ReportLedger.SubjectKey subject,
+      String executingLei,
+      Optional<ReportLedger.TrnProposal> trn,
+      String action,
+      String hashTag,
+      LeaseLedger.EndpointKey endpoint,
+      long endpointEpoch) {
+    return new ReportLedger.NewVersion(
+        subject,
+        executingLei,
+        trn,
+        action,
+        Sha256.ofUtf8(hashTag),
+        ("body-" + hashTag).getBytes(StandardCharsets.UTF_8),
+        ReportLedger.VersionOrigin.SOURCE,
+        endpoint,
+        endpointEpoch);
   }
 
   /** The endpoint {@code ("SIMULATOR", "ARM", "LEI-" + name, "NCA-" + name)}. */

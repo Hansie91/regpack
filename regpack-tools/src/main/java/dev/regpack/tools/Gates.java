@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 /** Entry point of the build and CI gates. */
 public final class Gates {
@@ -30,11 +31,17 @@ public final class Gates {
 
   /** Runs a gate that may read a list of paths from {@code in}. */
   static int run(String[] args, InputStream in, PrintStream out, PrintStream err) {
+    return run(args, in, out, err, System.getenv());
+  }
+
+  /** Runs a gate with an explicit environment (the tests pass one). */
+  static int run(
+      String[] args, InputStream in, PrintStream out, PrintStream err, Map<String, String> env) {
     if (args.length > 0) {
       List<String> rest = Arrays.asList(args).subList(1, args.length);
       switch (args[0]) {
         case "traceability" -> {
-          return traceability(rest, out, err);
+          return traceability(rest, out, err, env);
         }
         case "pins" -> {
           return pins(rest, out, err);
@@ -51,22 +58,65 @@ public final class Gates {
         case "entry" -> {
           return entry(rest, out, err);
         }
+        case "annotate" -> {
+          return annotate(rest, out, err);
+        }
         default -> {
           // falls through to the usage message
         }
       }
     }
-    err.println("usage: Gates <traceability|pins|eol|g3|isolation|entry>");
+    err.println("usage: Gates <traceability|pins|eol|g3|isolation|entry|annotate>");
+    return 2;
+  }
+
+  /**
+   * The {@code annotate} command: {@code --scan <dir> [--scan <dir> ...]}. Prints the workflow
+   * commands for the test reports found under the directories (see {@link Annotations}).
+   */
+  private static int annotate(List<String> args, PrintStream out, PrintStream err) {
+    List<Path> scans = new ArrayList<>();
+    for (int i = 0; i < args.size(); i += 2) {
+      if (i + 1 >= args.size() || !args.get(i).equals("--scan")) {
+        return annotateUsage(err);
+      }
+      scans.add(Path.of(args.get(i + 1)));
+    }
+    if (scans.isEmpty()) {
+      return annotateUsage(err);
+    }
+    for (Path scan : scans) {
+      if (!Files.isDirectory(scan)) {
+        err.println("annotate: scan directory not found: " + scan);
+        return 2;
+      }
+    }
+    Annotations.render(scans).forEach(out::println);
+    return 0;
+  }
+
+  private static int annotateUsage(PrintStream err) {
+    err.println("usage: Gates annotate --scan <dir> [--scan <dir> ...]");
     return 2;
   }
 
   /**
    * The {@code traceability} gate: {@code --file <file> [--root <dir>] --scan <dir> [--scan <dir>
-   * ...]}. A relative file or scan directory is resolved against the root.
+   * ...] [--realstore all|skip|only] [--annotate]}. A relative file or scan directory is resolved
+   * against the root. The mode (default {@code all}) is described at {@link
+   * TraceabilityCheck.Mode}; with {@code skip} the deferred rows are printed as information and the
+   * OK line gains {@code deferred=<n>}. When the check fails and {@code --annotate} is given, or
+   * the environment says it runs in GitHub Actions ({@code GITHUB_ACTIONS=true}), each problem is
+   * also printed as an {@code ::error} workflow command (at most ten), so that the reason of a red
+   * step is in the annotation listing and not only in the log (CI-1).
    */
-  private static int traceability(List<String> args, PrintStream out, PrintStream err) {
+  private static int traceability(
+      List<String> arguments, PrintStream out, PrintStream err, Map<String, String> env) {
+    boolean annotate = "true".equals(env.get("GITHUB_ACTIONS")) || arguments.contains("--annotate");
+    List<String> args = arguments.stream().filter(a -> !a.equals("--annotate")).toList();
     String file = null;
     String root = ".";
+    TraceabilityCheck.Mode mode = TraceabilityCheck.Mode.ALL;
     List<String> scans = new ArrayList<>();
     for (int i = 0; i < args.size(); i += 2) {
       if (i + 1 >= args.size()) {
@@ -77,6 +127,16 @@ public final class Gates {
         case "--file" -> file = value;
         case "--root" -> root = value;
         case "--scan" -> scans.add(value);
+        case "--realstore" -> {
+          switch (value) {
+            case "all" -> mode = TraceabilityCheck.Mode.ALL;
+            case "skip" -> mode = TraceabilityCheck.Mode.SKIP;
+            case "only" -> mode = TraceabilityCheck.Mode.ONLY;
+            default -> {
+              return traceabilityUsage(err);
+            }
+          }
+        }
         default -> {
           return traceabilityUsage(err);
         }
@@ -100,7 +160,9 @@ public final class Gates {
       return 2;
     }
     TraceabilityCheck.Result result =
-        TraceabilityCheck.check(markdown, repoRoot, scans.stream().map(repoRoot::resolve).toList());
+        TraceabilityCheck.check(
+            markdown, repoRoot, scans.stream().map(repoRoot::resolve).toList(), mode);
+    result.deferred().forEach(d -> out.println("traceability: INFO " + d));
     if (result.ok()) {
       out.println(
           "traceability: OK rows="
@@ -108,16 +170,23 @@ public final class Gates {
               + " closed="
               + result.closed()
               + " open="
-              + result.open());
+              + result.open()
+              + (mode == TraceabilityCheck.Mode.SKIP
+                  ? " deferred=" + result.deferred().size()
+                  : ""));
       return 0;
     }
     result.problems().forEach(p -> out.println("traceability: PROBLEM " + p));
+    if (annotate) {
+      Annotations.problemErrors("traceability", result.problems()).forEach(out::println);
+    }
     return 1;
   }
 
   private static int traceabilityUsage(PrintStream err) {
     err.println(
-        "usage: Gates traceability --file <file> [--root <dir>] --scan <dir> [--scan <dir> ...]");
+        "usage: Gates traceability --file <file> [--root <dir>] --scan <dir> [--scan <dir> ...]"
+            + " [--realstore all|skip|only] [--annotate]");
     return 2;
   }
 
