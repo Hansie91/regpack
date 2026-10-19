@@ -446,7 +446,10 @@ class SpikeWorkflowTest {
   void ciPushFilterNamesTheWorkBranches() throws IOException {
     List<String> push = block(ci(), "  push:");
     assertThat(push)
-        .anyMatch(l -> l.strip().equals("branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**', 'p3b/**']"));
+        .anyMatch(
+            l ->
+                l.strip()
+                    .equals("branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**', 'p3b/**']"));
     List<String> pullRequest = block(ci(), "  pull_request:");
     assertThat(pullRequest).anyMatch(l -> l.strip().equals("branches: [main]"));
   }
