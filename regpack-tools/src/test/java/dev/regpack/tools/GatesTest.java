@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -73,6 +74,106 @@ class GatesTest {
     assertThat(run(append(base, "--realstore")).rc()).isEqualTo(2);
   }
 
+  /**
+   * A table whose first {@code missing} rows cite a test that no report holds (two problems each).
+   */
+  private void tableWithMissingTests(int missing) throws IOException {
+    StringBuilder md = new StringBuilder("exited_plans: P3\n\n");
+    int cited = 0;
+    for (int i = 1; i <= 24; i++) {
+      String id = i <= 14 ? "R" + i : "I" + (i - 14);
+      if (cited < missing) {
+        cited++;
+        md.append("| ").append(id).append(" | P3 | TEST | a.B#it").append(cited);
+        md.append(" | REALSTORE | BUILD | n |\n");
+      } else {
+        md.append("| ").append(id).append(" | P9 | NONE | - | NA | NA | n |\n");
+      }
+    }
+    Files.writeString(repo.resolve("traceability.md"), md.toString(), StandardCharsets.UTF_8);
+  }
+
+  private Outcome runWithEnvironment(Map<String, String> env, String... args) {
+    var outBytes = new ByteArrayOutputStream();
+    var errBytes = new ByteArrayOutputStream();
+    int rc =
+        Gates.run(
+            args,
+            new ByteArrayInputStream(new byte[0]),
+            new PrintStream(outBytes, true, StandardCharsets.UTF_8),
+            new PrintStream(errBytes, true, StandardCharsets.UTF_8),
+            env);
+    return new Outcome(
+        rc, outBytes.toString(StandardCharsets.UTF_8), errBytes.toString(StandardCharsets.UTF_8));
+  }
+
+  @Test
+  void aFailedTraceabilityCheckIsAnErrorAnnotationWithTheReason() throws IOException {
+    tableWithMissingTests(1);
+    String[] base = {
+      "traceability", "--file", "traceability.md", "--root", repo.toString(), "--scan", "."
+    };
+
+    // without the flag and outside GitHub Actions: the PROBLEM line only
+    var plain = run(base);
+    assertThat(plain.rc()).isEqualTo(1);
+    assertThat(plain.out()).contains("traceability: PROBLEM ARTEFACT_MISSING:R1:a.B#it1");
+    assertThat(plain.out()).doesNotContain("::error");
+
+    // with the flag: the same line and one error annotation that names the row and the test
+    var flagged = run(append(base, "--annotate"));
+    assertThat(flagged.rc()).isEqualTo(1);
+    assertThat(flagged.out().lines().toList())
+        .containsExactly(
+            "traceability: PROBLEM ARTEFACT_MISSING:R1:a.B#it1",
+            "traceability: PROBLEM ROW_WITHOUT_EVIDENCE:R1",
+            "::error title=traceability::ARTEFACT_MISSING:R1:a.B#it1",
+            "::error title=traceability::ROW_WITHOUT_EVIDENCE:R1");
+
+    // in GitHub Actions the step needs no flag, so that the workflow file does not change
+    var inActions = runWithEnvironment(Map.of("GITHUB_ACTIONS", "true"), base);
+    assertThat(inActions.out()).contains("::error title=traceability::ARTEFACT_MISSING:R1:a.B#it1");
+    var elsewhere = runWithEnvironment(Map.of("GITHUB_ACTIONS", "false"), base);
+    assertThat(elsewhere.out()).doesNotContain("::error");
+
+    // a clean check prints no annotation, flag or not
+    String clean = table(true);
+    var ok =
+        run(
+            "traceability",
+            "--file",
+            clean,
+            "--root",
+            repo.toString(),
+            "--scan",
+            ".",
+            "--annotate");
+    assertThat(ok.rc()).isZero();
+    assertThat(ok.out()).doesNotContain("::error");
+  }
+
+  @Test
+  void manyTraceabilityProblemsAreAtMostTenAnnotations() throws IOException {
+    tableWithMissingTests(12);
+    var outcome =
+        run(
+            "traceability",
+            "--file",
+            "traceability.md",
+            "--root",
+            repo.toString(),
+            "--scan",
+            ".",
+            "--annotate");
+    var errors = outcome.out().lines().filter(l -> l.startsWith("::error")).toList();
+    assertThat(errors).hasSize(10);
+    assertThat(errors.get(0)).isEqualTo("::error title=traceability::ARTEFACT_MISSING:R1:a.B#it1");
+    assertThat(errors.get(9))
+        .isEqualTo("::error title=traceability::and 15 more problems, see the log");
+    assertThat(outcome.out().lines().filter(l -> l.startsWith("traceability: PROBLEM")).count())
+        .isEqualTo(24);
+  }
+
   @Test
   void realStoreSkipPrintsDeferredRowsAndExitsWithZero() throws IOException {
     Path file = repo.resolve("traceability.md");
@@ -118,7 +219,7 @@ class GatesTest {
     assertThat(outcome.rc()).isZero();
     assertThat(outcome.out().lines().toList())
         .contains(
-            "::notice title=tally::class=a.B run=2 failed=1 errors=0 skipped=0",
+            "::notice title=tally-classes::classes=1 class=a.B run=2 failed=1 errors=0 skipped=0",
             "::notice title=tally-total::classes=1 run=2 failed=1 errors=0 skipped=0",
             "::error title=a.B#f::boom");
     assertThat(outcome.out().lines().findFirst().orElseThrow())

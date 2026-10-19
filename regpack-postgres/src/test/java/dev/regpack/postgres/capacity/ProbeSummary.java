@@ -32,12 +32,28 @@ final class ProbeSummary {
   private static final long NANOS_PER_MILLI = 1_000_000L;
   private static final long WINDOW_NANOS = 60 * NANOS_PER_SECOND;
 
-  /** The difference from SP-L in the server: one server, no standby, no replica, no archiving. */
-  static final String SERVER_DIFFERENCE =
-      "fixture differences from SP-L: one PostgreSQL server in a service container on a"
-          + " GitHub-hosted runner, with no standby and no replica and no WAL archiving; a commit"
-          + " waits for the local WAL flush only (SP-L: primary, quorum standby and replica on one VM,"
-          + " archiving on)";
+  /**
+   * The differences from SP-L in the server and its host. The sentence about the commit follows the
+   * commit mode: with {@code synchronous_commit = off} a commit waits for nothing.
+   *
+   * @param synchronousCommitForced whether the adapter set {@code synchronous_commit = on}
+   */
+  static String serverDifference(boolean synchronousCommitForced) {
+    String commit =
+        synchronousCommitForced
+            ? "a commit waits for the local WAL flush only"
+            : "the server setting of synchronous_commit decides whether a commit waits for the"
+                + " local WAL flush (see the commit mode line)";
+    return "fixture differences from SP-L: one PostgreSQL server in a service container on a"
+        + " GitHub-hosted runner, with no standby and no replica and no WAL archiving; "
+        + commit
+        + " (SP-L: primary, quorum standby and replica on one VM, archiving on); the client reaches"
+        + " the server through a published loopback port, not the host network of SP-L; the data is"
+        + " on the Docker volume of the root disk, not on the spike disk of SP-L; in the variants B"
+        + " and C swap is off (--memory-swap equal to --memory); the variants run on different VMs"
+        + " with their own CPU model and disk; the batch sizes run in sequence on one server, the"
+        + " first before the second, with no CHECKPOINT or pause between them";
+  }
 
   /** The difference from SP-L in the load: the adapter and the layout. */
   static final String LOAD_DIFFERENCE =
@@ -94,8 +110,44 @@ final class ProbeSummary {
    * @param decisionRows the rows of the decision table
    * @param decisionBytes {@code pg_total_relation_size} of its partitions
    * @param ledgerBytes {@code pg_total_relation_size} of all tables of the ledger schema
+   * @param unavailable empty when the sizes were read; otherwise why they could not be (the sizes
+   *     are then -1 and the read-out says so)
    */
-  record Sizes(long decisionRows, long decisionBytes, long ledgerBytes) {}
+  record Sizes(long decisionRows, long decisionBytes, long ledgerBytes, String unavailable) {
+    Sizes {
+      Objects.requireNonNull(unavailable, "unavailable");
+    }
+
+    /** Sizes that were read. */
+    Sizes(long decisionRows, long decisionBytes, long ledgerBytes) {
+      this(decisionRows, decisionBytes, ledgerBytes, "");
+    }
+
+    /** Sizes that could not be read, with the reason in words (see {@link #unavailable}). */
+    static Sizes unavailable(String reason) {
+      return new Sizes(-1, -1, -1, reason);
+    }
+
+    boolean known() {
+      return unavailable.isEmpty();
+    }
+  }
+
+  /**
+   * The words for something that could not be read after the run: {@code <what> unavailable
+   * (sqlstate=...)} for a {@code SQLException} (its message is not carried: server text can hold
+   * values), otherwise with {@link #describe}.
+   */
+  static String unavailable(String what, Throwable failure) {
+    if (failure instanceof java.sql.SQLException sql) {
+      String state = sql.getSQLState();
+      return what
+          + " unavailable (sqlstate="
+          + (state == null || state.isBlank() ? "none" : state)
+          + ")";
+    }
+    return what + " unavailable (" + describe(failure) + ")";
+  }
 
   /**
    * The memory that the ratio is taken against.
@@ -118,11 +170,79 @@ final class ProbeSummary {
    * @param name its file name
    * @param rows the rows the sampler wrote
    * @param failures the samples that could not be taken
+   * @param rowsWithViews the rows whose view columns (wal, checkpointer, io) were read shortly
+   *     before the row
    */
-  record SamplerFile(String name, long rows, long failures) {
+  record SamplerFile(String name, long rows, long failures, long rowsWithViews) {
     SamplerFile {
       Objects.requireNonNull(name, "name");
     }
+
+    /** A file all of whose rows hold fresh views. */
+    SamplerFile(String name, long rows, long failures) {
+      this(name, rows, failures, rows);
+    }
+  }
+
+  /**
+   * Why the sampler file cannot serve as evidence, or empty when it can: fewer rows than half of
+   * the seconds the slice covers, or no row with fresh view columns (CAPACITY-1). The probe fails
+   * after it wrote the read-out when this is present.
+   */
+  static Optional<String> samplerProblem(SamplerFile sampler, long coveredSeconds) {
+    List<String> problems = new ArrayList<>();
+    if (sampler.rows() * 2 < coveredSeconds) {
+      problems.add(
+          "the sampler wrote " + sampler.rows() + " rows for about " + coveredSeconds + " s");
+    }
+    if (sampler.rowsWithViews() == 0) {
+      problems.add("no row has fresh view columns");
+    }
+    return problems.isEmpty() ? Optional.empty() : Optional.of(String.join("; ", problems));
+  }
+
+  /** The message of the error of a run whose sampler file cannot serve as evidence. */
+  static String samplerStoppedMessage(String tag, String problem) {
+    return "the sampler did not record the run (see summary-" + tag + ".txt): " + problem;
+  }
+
+  /** The CSV header of the per-batch observations file. */
+  private static final String BATCH_HEADER =
+      "index,source,arrival_ns,start_ns,end_ns,generate_ns,ingest_ns,reportable_ns,records,"
+          + "executions,batched_rows";
+
+  /**
+   * The per-batch observations as CSV lines (nanoseconds after the start of the run; -1 for a start
+   * or an end that never happened), so that the figures of a run that failed survive it.
+   */
+  static List<String> batchLines(List<Batch> batches) {
+    List<String> out = new ArrayList<>(batches.size() + 1);
+    out.add(BATCH_HEADER);
+    for (Batch b : batches) {
+      out.add(
+          b.index()
+              + ","
+              + b.source()
+              + ","
+              + b.arrivalNanos()
+              + ","
+              + b.startNanos()
+              + ","
+              + b.endNanos()
+              + ","
+              + b.generateNanos()
+              + ","
+              + b.ingestNanos()
+              + ","
+              + b.reportableNanos()
+              + ","
+              + b.records()
+              + ","
+              + b.executions()
+              + ","
+              + b.batchedRows());
+    }
+    return out;
   }
 
   /**
@@ -140,6 +260,7 @@ final class ProbeSummary {
    * @param synchronousCommitForced whether the adapter set {@code synchronous_commit = on}
    * @param sampler the kept sampler file
    * @param stopped the cause (see {@link #describe}) when the run stopped on an error
+   * @param cpuModel the CPU model of the runner from {@code /proc/cpuinfo}, or empty
    */
   record Inputs(
       String variant,
@@ -152,13 +273,43 @@ final class ProbeSummary {
       Memory memory,
       boolean synchronousCommitForced,
       SamplerFile sampler,
-      Optional<String> stopped) {
+      Optional<String> stopped,
+      String cpuModel) {
     Inputs {
       Objects.requireNonNull(variant, "variant");
       Objects.requireNonNull(sizes, "sizes");
       Objects.requireNonNull(memory, "memory");
       Objects.requireNonNull(sampler, "sampler");
       Objects.requireNonNull(stopped, "stopped");
+      Objects.requireNonNull(cpuModel, "cpuModel");
+    }
+
+    /** Inputs of a runner whose CPU model is not known. */
+    Inputs(
+        String variant,
+        int batchSize,
+        int writers,
+        long offeredRecordsPerSecond,
+        long scheduledBatches,
+        long coveredNanos,
+        Sizes sizes,
+        Memory memory,
+        boolean synchronousCommitForced,
+        SamplerFile sampler,
+        Optional<String> stopped) {
+      this(
+          variant,
+          batchSize,
+          writers,
+          offeredRecordsPerSecond,
+          scheduledBatches,
+          coveredNanos,
+          sizes,
+          memory,
+          synchronousCommitForced,
+          sampler,
+          stopped,
+          "");
     }
 
     int sources() {
@@ -209,6 +360,7 @@ final class ProbeSummary {
   private final Inputs inputs;
   private final double[] windows;
   private final long[] commitNanosSorted;
+  private final long[] arrivalToEndNanosSorted;
   private final long completedBatches;
   private final long completedRecords;
   private final long finishedAfterTheSlice;
@@ -232,6 +384,7 @@ final class ProbeSummary {
     long executions = 0;
     long batchedRows = 0;
     List<Long> commits = new ArrayList<>();
+    List<Long> arrivalToEnd = new ArrayList<>();
     List<Long> generates = new ArrayList<>();
     for (Batch batch : batches) {
       if (!batch.started()) {
@@ -249,6 +402,7 @@ final class ProbeSummary {
       executions += batch.executions();
       batchedRows += batch.batchedRows();
       commits.add(batch.commitNanos());
+      arrivalToEnd.add(Math.max(0, batch.endNanos() - batch.arrivalNanos()));
       generates.add(batch.generateNanos());
       if (batch.endNanos() > covered) {
         late++;
@@ -271,6 +425,8 @@ final class ProbeSummary {
       windows[i] = windowRecords[i] / 60.0;
     }
     this.commitNanosSorted = commits.stream().mapToLong(Long::longValue).sorted().toArray();
+    this.arrivalToEndNanosSorted =
+        arrivalToEnd.stream().mapToLong(Long::longValue).sorted().toArray();
     long[] generateSorted = generates.stream().mapToLong(Long::longValue).sorted().toArray();
     this.generateMillisMedian = nearestRank(generateSorted, 0.50) / (double) NANOS_PER_MILLI;
   }
@@ -324,6 +480,19 @@ final class ProbeSummary {
     return Math.round(nearestRank(commitNanosSorted, 1.0) / (double) NANOS_PER_MILLI);
   }
 
+  /** The time from the scheduled arrival of a batch to its end, nearest-rank median, in ms. */
+  long arrivalToEndP50Millis() {
+    return Math.round(nearestRank(arrivalToEndNanosSorted, 0.50) / (double) NANOS_PER_MILLI);
+  }
+
+  long arrivalToEndP99Millis() {
+    return Math.round(nearestRank(arrivalToEndNanosSorted, 0.99) / (double) NANOS_PER_MILLI);
+  }
+
+  long arrivalToEndMaxMillis() {
+    return Math.round(nearestRank(arrivalToEndNanosSorted, 1.0) / (double) NANOS_PER_MILLI);
+  }
+
   /**
    * The largest age of a queued arrival, in seconds: for a batch that was taken, the time from its
    * due time to its start; for one that never started, the time from its due time to the end of the
@@ -353,7 +522,7 @@ final class ProbeSummary {
 
   /** Bytes a row of the decision table takes, with its indexes and its out-of-line storage. */
   double decisionRowBytes() {
-    return inputs.sizes().decisionRows() == 0
+    return !inputs.sizes().known() || inputs.sizes().decisionRows() == 0
         ? 0.0
         : inputs.sizes().decisionBytes() / (double) inputs.sizes().decisionRows();
   }
@@ -370,7 +539,9 @@ final class ProbeSummary {
 
   /** Bytes of all ledger tables per completed record. */
   double ledgerBytesPerRecord() {
-    return completedRecords == 0 ? 0.0 : inputs.sizes().ledgerBytes() / (double) completedRecords;
+    return completedRecords == 0 || !inputs.sizes().known()
+        ? 0.0
+        : inputs.sizes().ledgerBytes() / (double) completedRecords;
   }
 
   /**
@@ -401,7 +572,7 @@ final class ProbeSummary {
 
   /** The ratio of this run, or 0 when the memory of the server is not known. */
   double ratio() {
-    if (inputs.memory().bytes().isEmpty()) {
+    if (inputs.memory().bytes().isEmpty() || !inputs.sizes().known()) {
       return 0.0;
     }
     return achievedRatio(
@@ -434,14 +605,22 @@ final class ProbeSummary {
             + windowCount()
             + " windows (offered "
             + inputs.offeredRecordsPerSecond()
-            + "); completed "
+            + "; a window moves in steps of "
+            + one(windowStep())
+            + " records/s); completed "
             + percent(completedFraction())
             + " of "
             + scheduledRecords
             + " scheduled records");
     out.add(
         prefix
-            + "batch commit ms (ingest and reportable) p50 "
+            + "batch ms from scheduled arrival to end p50 "
+            + arrivalToEndP50Millis()
+            + ", p99 "
+            + arrivalToEndP99Millis()
+            + ", max "
+            + arrivalToEndMaxMillis()
+            + "; commit ms p50 "
             + commitP50Millis()
             + ", p99 "
             + commitP99Millis()
@@ -455,13 +634,17 @@ final class ProbeSummary {
             + finishedAfterTheSlice
             + " finished after the slice");
     out.add(ratioLine(prefix));
+    String row =
+        inputs.sizes().known()
+            ? "decision row "
+                + Math.round(decisionRowBytes())
+                + " bytes (rows "
+                + inputs.sizes().decisionRows()
+                + "; band of spec 5.6 is 300 to 500 bytes); "
+            : "decision row size unknown (" + inputs.sizes().unavailable() + "); ";
     out.add(
         prefix
-            + "decision row "
-            + Math.round(decisionRowBytes())
-            + " bytes (rows "
-            + inputs.sizes().decisionRows()
-            + "; band of spec 5.6 is 300 to 500 bytes); "
+            + row
             + inputs.writers()
             + " writers, "
             + inputs.sources()
@@ -469,7 +652,14 @@ final class ProbeSummary {
             + one(statementsPerBatch())
             + " JDBC executions and "
             + one(batchedRowsPerBatch())
-            + " batched rows per batch");
+            + " batched rows per batch; sampler rows "
+            + inputs.sampler().rows()
+            + " of about "
+            + coveredSeconds()
+            + " s, missed "
+            + inputs.sampler().failures()
+            + ", with views "
+            + inputs.sampler().rowsWithViews());
     if (inputs.stopped().isPresent()) {
       // the cause of a run that stopped comes before the fixture sentence, which stays in the file
       out.add(
@@ -487,7 +677,31 @@ final class ProbeSummary {
     return out;
   }
 
+  /**
+   * The per-batch file next to the sampler file: {@code sampler-X.csv} goes with {@code
+   * batches-X.csv}.
+   */
+  private String batchesFileHint() {
+    String name = inputs.sampler().name();
+    return name.startsWith("sampler-") ? "batches-" + name.substring("sampler-".length()) : name;
+  }
+
+  /** The seconds the slice covers, as the sampler's rows are counted against. */
+  private long coveredSeconds() {
+    return Math.round(inputs.coveredNanos() / (double) NANOS_PER_SECOND);
+  }
+
+  /** The records a second by which a window moves when one more batch falls into it. */
+  private double windowStep() {
+    return inputs.batchSize() / 60.0;
+  }
+
   private String ratioLine(String prefix) {
+    if (!inputs.sizes().known()) {
+      return prefix
+          + inputs.sizes().unavailable()
+          + ", table-to-memory ratio not computed; SP-L 2.82; comparable to SP-L: no";
+    }
     String size = one(ledgerBytesPerRecord()) + " bytes a record in all ledger tables";
     if (inputs.memory().bytes().isEmpty()) {
       return prefix
@@ -530,9 +744,13 @@ final class ProbeSummary {
 
   private List<String> detail() {
     List<String> out = new ArrayList<>();
-    out.add(SERVER_DIFFERENCE);
+    out.add(serverDifference(inputs.synchronousCommitForced()));
     out.add(LOAD_DIFFERENCE);
     out.add(LIMIT);
+    out.add(
+        "runner cpu: "
+            + (inputs.cpuModel().isEmpty() ? "not known" : inputs.cpuModel())
+            + " (the variants run on different VMs; compare it across the read-outs)");
     out.add(
         "commit mode: "
             + (inputs.synchronousCommitForced()
@@ -548,6 +766,17 @@ final class ProbeSummary {
             + " s; batch generation median "
             + one(generateMillisMedian)
             + " ms, outside the commit times and inside the writer's busy time");
+    out.add(
+        "latency: 'from scheduled arrival' is the time from the due time of a batch to the end of"
+            + " its reportable commit (it grows with a queue); 'commit ms' is the service time of"
+            + " the two commits of the batch (ingest and reportable) and does not");
+    out.add(
+        "quantisation: a batch of "
+            + inputs.batchSize()
+            + " records counts whole in the 60 s window of its end, so a window moves in steps of "
+            + one(windowStep())
+            + " records/s; the minimum, the median above the offered rate and any dip of that size"
+            + " are arithmetic of whole batches, not a dip of the ledger");
     StringBuilder perWindow = new StringBuilder("records/s per window:");
     for (double window : windows) {
       perWindow.append(' ').append(one(window));
@@ -559,8 +788,19 @@ final class ProbeSummary {
             + ": "
             + inputs.sampler().rows()
             + " rows, "
+            + inputs.sampler().rowsWithViews()
+            + " with fresh view columns, "
             + inputs.sampler().failures()
-            + " samples missed; the rows are kept for the cause of the shortfall (H-4)");
+            + " samples missed; "
+            + (inputs.sampler().rows() > 0
+                ? "the rows are kept for the cause of the shortfall (H-4); the counters of"
+                    + " pg_stat_io and pg_stat_wal may be published by a backend only at the end"
+                    + " of its transaction, so the differences of two rows can be zero and then"
+                    + " a burst"
+                : "no sampler row was written, so the cause of a shortfall cannot be read from"
+                    + " the sampler file"));
+    out.add(
+        "batch observations (arrival, start, end, durations of every batch): " + batchesFileHint());
     out.add(
         "the ratio uses the sum of pg_total_relation_size of the ledger tables over the completed"
             + " records; a result is comparable to SP-L's L-4 runs only if the ratio is within"

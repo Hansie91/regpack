@@ -22,26 +22,37 @@ import org.w3c.dom.NodeList;
 /**
  * Turns the {@code TEST-*.xml} reports of surefire and failsafe into GitHub workflow commands, so
  * that the counts and the failures of a run can be read from the unauthenticated check-run
- * annotation listing without downloading an artefact or reading a log (P3a plan, D-L6). The output
- * holds one {@code tally-total} notice first (GitHub keeps only about ten notices per level and
- * step, so the total must not be the one that is cut), then one {@code tally} notice per test
- * class, one {@code skipped} warning for all skipped cases, at most ten error annotations (the
- * first failed case of each distinct class first, then the rest in report order) and, when more
- * cases failed, one final notice with the names of the rest.
+ * annotation listing without downloading an artefact or reading a log (P3a plan, D-L6). GitHub
+ * keeps only about ten annotations per level and step and cuts the notices first, so nothing that
+ * must be read is a notice but the tallies. The output holds one {@code tally-total} notice first,
+ * at most ten error annotations (the first failed case of each distinct class first, then the rest
+ * in report order; when more than ten cases failed, the tenth error is {@code more-failures} and
+ * names all the cases that have no annotation of their own), one {@code skipped} warning for all
+ * skipped cases and one {@code tally-classes} notice with the counts of every class (cut at 60,000
+ * characters).
  *
  * <p>Only the first line of a failure message is used. Credentials are redacted before the message
- * is cut to 300 characters. Titles and messages are escaped as workflow command data, so a test
- * name or a message cannot start another command.
+ * is cut to 300 characters, in linear time whatever the shape of the line. Titles and messages are
+ * escaped as workflow command data, so a test name or a message cannot start another command.
  */
 public final class Annotations {
   private static final int MAX_ERRORS = 10;
   private static final int MAX_MESSAGE = 300;
+
+  /**
+   * The longest first line that is redacted: a failure message of megabytes is bounded before the
+   * patterns run, whatever their cost (CI-3). The result is cut to {@link #MAX_MESSAGE} anyway.
+   */
+  private static final int MAX_REDACTED_INPUT = 100_000;
+
   private static final int MAX_LIST = 60_000;
   private static final String REDACTED = "[REDACTED]";
   private static final Set<String> SKIPPED_DIRECTORIES = Set.of(".git", "node_modules");
   private static final Pattern SECRET =
       Pattern.compile("(?i)(password|passwd|secret|token|apikey|api_key)\\s*[=:]\\s*\\S+");
-  private static final Pattern USERINFO = Pattern.compile("://[^/\\s@]*:[^/\\s@]*@");
+  // the user name stops at its first colon and the password is read possessively, so that a run
+  // of colons without an "@" is scanned once for each "://" and not once for each colon (CI-3)
+  private static final Pattern USERINFO = Pattern.compile("://[^/\\s@:]*:[^/\\s@]*+@");
   private static final Pattern LINE_END = Pattern.compile("\\R");
 
   private Annotations() {}
@@ -86,7 +97,8 @@ public final class Annotations {
    * Renders the workflow commands for the reports found under the scan roots. A report that cannot
    * be read or parsed contributes nothing; a root listed twice (or nested in another) is read once.
    *
-   * @return the command lines, in the order total, tallies, warning, errors, final notice
+   * @return the command lines, in the order total, errors (the last one may be {@code
+   *     more-failures}), warning, class tallies
    */
   public static List<String> render(List<Path> scanRoots) {
     List<Case> cases = new ArrayList<>();
@@ -100,26 +112,16 @@ public final class Annotations {
       total.add(c.outcome());
     }
     List<String> lines = new ArrayList<>();
-    // The total comes first: GitHub keeps only about ten notices per level and step, and a job
-    // with more test classes than that would otherwise lose the total.
+    // The total comes first: GitHub keeps only about ten notices per level and step.
     lines.add("::notice title=tally-total::classes=" + perClass.size() + " " + total.counts());
-    perClass.forEach(
-        (className, tally) ->
-            lines.add(
-                "::notice title=tally::"
-                    + escapeMessage("class=" + className + " " + tally.counts())));
-    List<Case> skipped = cases.stream().filter(c -> c.outcome() == Outcome.SKIPPED).toList();
-    if (!skipped.isEmpty()) {
-      String names = String.join(", ", skipped.stream().map(Case::id).toList());
-      lines.add(
-          "::warning title=skipped::"
-              + escapeMessage(cut("skipped=" + skipped.size() + " " + names, MAX_LIST)));
-    }
     List<Case> failed =
         cases.stream()
             .filter(c -> c.outcome() == Outcome.FAILED || c.outcome() == Outcome.ERRORED)
             .toList();
-    List<Case> shown = pickErrors(failed);
+    // The names of the failed cases are errors, which GitHub keeps apart from the notices: with
+    // more than ten failures the tenth error names the cases that have none of their own (CI-2).
+    boolean summarised = failed.size() > MAX_ERRORS;
+    List<Case> shown = pickErrors(failed, summarised ? MAX_ERRORS - 1 : MAX_ERRORS);
     for (Case c : shown) {
       lines.add("::error title=" + escapeTitle(c.id()) + "::" + escapeMessage(c.message()));
     }
@@ -127,23 +129,66 @@ public final class Annotations {
     if (!rest.isEmpty()) {
       String names = String.join(", ", rest.stream().map(Case::id).toList());
       lines.add(
-          "::notice title=more-failures::"
+          "::error title=more-failures::"
               + escapeMessage(cut("remaining=" + rest.size() + " " + names, MAX_LIST)));
+    }
+    List<Case> skipped = cases.stream().filter(c -> c.outcome() == Outcome.SKIPPED).toList();
+    if (!skipped.isEmpty()) {
+      String names = String.join(", ", skipped.stream().map(Case::id).toList());
+      lines.add(
+          "::warning title=skipped::"
+              + escapeMessage(cut("skipped=" + skipped.size() + " " + names, MAX_LIST)));
+    }
+    if (!perClass.isEmpty()) {
+      List<String> tallies = new ArrayList<>();
+      perClass.forEach(
+          (className, tally) -> tallies.add("class=" + className + " " + tally.counts()));
+      lines.add(
+          "::notice title=tally-classes::"
+              + escapeMessage(
+                  cut("classes=" + perClass.size() + " " + String.join("; ", tallies), MAX_LIST)));
+    }
+    return List.copyOf(lines);
+  }
+
+  /**
+   * Workflow error commands for the problems of a gate (such as the traceability check), so that
+   * the reason of a failed step is in the annotation listing and not only in a log: one {@code
+   * ::error title=<title>::<problem>} each, escaped and cut to 300 characters, at most ten; with
+   * more problems the tenth names how many are not shown (CI-1).
+   */
+  static List<String> problemErrors(String title, List<String> problems) {
+    List<String> lines = new ArrayList<>();
+    boolean summarised = problems.size() > MAX_ERRORS;
+    int shown = summarised ? MAX_ERRORS - 1 : problems.size();
+    for (int i = 0; i < shown; i++) {
+      lines.add(
+          "::error title="
+              + escapeTitle(title)
+              + "::"
+              + escapeMessage(cut(problems.get(i), MAX_MESSAGE)));
+    }
+    if (summarised) {
+      lines.add(
+          "::error title="
+              + escapeTitle(title)
+              + "::"
+              + escapeMessage("and " + (problems.size() - shown) + " more problems, see the log"));
     }
     return List.copyOf(lines);
   }
 
   /** The first failed case of each distinct class, then the rest in report order, at most ten. */
-  private static List<Case> pickErrors(List<Case> failed) {
+  private static List<Case> pickErrors(List<Case> failed, int limit) {
     List<Case> picked = new ArrayList<>();
     Set<String> classes = new HashSet<>();
     for (Case c : failed) {
-      if (picked.size() < MAX_ERRORS && classes.add(c.className())) {
+      if (picked.size() < limit && classes.add(c.className())) {
         picked.add(c);
       }
     }
     for (Case c : failed) {
-      if (picked.size() < MAX_ERRORS && !picked.contains(c)) {
+      if (picked.size() < limit && !picked.contains(c)) {
         picked.add(c);
       }
     }
@@ -233,7 +278,7 @@ public final class Annotations {
       raw = "";
     }
     String firstLine = LINE_END.split(raw.stripLeading(), 2)[0];
-    return cut(redact(firstLine), MAX_MESSAGE);
+    return cut(redact(cut(firstLine, MAX_REDACTED_INPUT)), MAX_MESSAGE);
   }
 
   private static String redact(String text) {
@@ -246,7 +291,7 @@ public final class Annotations {
   }
 
   /** Escapes a workflow command message: {@code %}, CR and LF. */
-  private static String escapeMessage(String text) {
+  static String escapeMessage(String text) {
     return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A");
   }
 

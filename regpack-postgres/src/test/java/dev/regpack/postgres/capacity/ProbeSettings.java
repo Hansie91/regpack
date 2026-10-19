@@ -1,8 +1,11 @@
 package dev.regpack.postgres.capacity;
 
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.regex.Pattern;
 
@@ -20,6 +23,8 @@ import java.util.regex.Pattern;
  * @param memoryLimitBytes the memory limit of the server container, when there is one
  * @param forceSynchronousCommit whether the adapter sets {@code synchronous_commit = on}; only the
  *     diagnostic variant C turns it off, so that the server setting applies
+ * @param cgroupDirectory the cgroup (version 2) directory whose {@code memory.current} and {@code
+ *     memory.events} the sampler reads when they exist; the default is the cgroup of the process
  */
 record ProbeSettings(
     String variant,
@@ -28,7 +33,8 @@ record ProbeSettings(
     long ratePerSecond,
     long seconds,
     OptionalLong memoryLimitBytes,
-    boolean forceSynchronousCommit) {
+    boolean forceSynchronousCommit,
+    Path cgroupDirectory) {
   static final String VARIANT = "REGPACK_CAPACITY_VARIANT";
   static final String BATCH_SIZES = "REGPACK_CAPACITY_BATCH_SIZES";
   static final String SECONDS = "REGPACK_CAPACITY_SECONDS";
@@ -36,11 +42,33 @@ record ProbeSettings(
   static final String WRITERS = "REGPACK_CAPACITY_WRITERS";
   static final String MEMORY_LIMIT_MB = "REGPACK_CAPACITY_MEMORY_LIMIT_MB";
   static final String SYNCHRONOUS_COMMIT = "REGPACK_CAPACITY_SYNCHRONOUS_COMMIT";
+  static final String CGROUP_DIRECTORY = "REGPACK_CAPACITY_CGROUP_DIR";
 
   private static final Pattern VARIANT_SHAPE = Pattern.compile("[A-Za-z0-9_-]{1,16}");
 
   ProbeSettings {
     batchSizes = List.copyOf(batchSizes);
+    Objects.requireNonNull(cgroupDirectory, "cgroupDirectory");
+  }
+
+  /** Settings that read the cgroup of the process. */
+  ProbeSettings(
+      String variant,
+      List<Integer> batchSizes,
+      int writers,
+      long ratePerSecond,
+      long seconds,
+      OptionalLong memoryLimitBytes,
+      boolean forceSynchronousCommit) {
+    this(
+        variant,
+        batchSizes,
+        writers,
+        ratePerSecond,
+        seconds,
+        memoryLimitBytes,
+        forceSynchronousCommit,
+        Sampler.DEFAULT_CGROUP_DIRECTORY);
   }
 
   /** Reads the settings from an environment map (the process environment in the real run). */
@@ -65,7 +93,20 @@ record ProbeSettings(
         optionalNumber(environment, RATE, 1, 1_000_000, 3_470),
         optionalNumber(environment, SECONDS, 1, 7_200, 1_200),
         mb < 0 ? OptionalLong.empty() : OptionalLong.of(mb * 1024L * 1024L),
-        commit.equals("on"));
+        commit.equals("on"),
+        cgroup(environment));
+  }
+
+  private static Path cgroup(Map<String, String> environment) {
+    String value = environment.get(CGROUP_DIRECTORY);
+    if (value == null || value.isBlank()) {
+      return Sampler.DEFAULT_CGROUP_DIRECTORY;
+    }
+    try {
+      return Path.of(value.strip());
+    } catch (InvalidPathException e) {
+      throw refused(CGROUP_DIRECTORY, "a directory path");
+    }
   }
 
   private static String text(Map<String, String> environment, String name, String fallback) {

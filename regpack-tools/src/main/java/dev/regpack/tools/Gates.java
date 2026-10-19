@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 /** Entry point of the build and CI gates. */
 public final class Gates {
@@ -30,11 +31,17 @@ public final class Gates {
 
   /** Runs a gate that may read a list of paths from {@code in}. */
   static int run(String[] args, InputStream in, PrintStream out, PrintStream err) {
+    return run(args, in, out, err, System.getenv());
+  }
+
+  /** Runs a gate with an explicit environment (the tests pass one). */
+  static int run(
+      String[] args, InputStream in, PrintStream out, PrintStream err, Map<String, String> env) {
     if (args.length > 0) {
       List<String> rest = Arrays.asList(args).subList(1, args.length);
       switch (args[0]) {
         case "traceability" -> {
-          return traceability(rest, out, err);
+          return traceability(rest, out, err, env);
         }
         case "pins" -> {
           return pins(rest, out, err);
@@ -95,12 +102,18 @@ public final class Gates {
 
   /**
    * The {@code traceability} gate: {@code --file <file> [--root <dir>] --scan <dir> [--scan <dir>
-   * ...] [--realstore all|skip|only]}. A relative file or scan directory is resolved against the
-   * root. The mode (default {@code all}) is described at {@link TraceabilityCheck.Mode}; with
-   * {@code skip} the deferred rows are printed as information and the OK line gains {@code
-   * deferred=<n>}.
+   * ...] [--realstore all|skip|only] [--annotate]}. A relative file or scan directory is resolved
+   * against the root. The mode (default {@code all}) is described at {@link
+   * TraceabilityCheck.Mode}; with {@code skip} the deferred rows are printed as information and the
+   * OK line gains {@code deferred=<n>}. When the check fails and {@code --annotate} is given, or
+   * the environment says it runs in GitHub Actions ({@code GITHUB_ACTIONS=true}), each problem is
+   * also printed as an {@code ::error} workflow command (at most ten), so that the reason of a red
+   * step is in the annotation listing and not only in the log (CI-1).
    */
-  private static int traceability(List<String> args, PrintStream out, PrintStream err) {
+  private static int traceability(
+      List<String> arguments, PrintStream out, PrintStream err, Map<String, String> env) {
+    boolean annotate = "true".equals(env.get("GITHUB_ACTIONS")) || arguments.contains("--annotate");
+    List<String> args = arguments.stream().filter(a -> !a.equals("--annotate")).toList();
     String file = null;
     String root = ".";
     TraceabilityCheck.Mode mode = TraceabilityCheck.Mode.ALL;
@@ -164,13 +177,16 @@ public final class Gates {
       return 0;
     }
     result.problems().forEach(p -> out.println("traceability: PROBLEM " + p));
+    if (annotate) {
+      Annotations.problemErrors("traceability", result.problems()).forEach(out::println);
+    }
     return 1;
   }
 
   private static int traceabilityUsage(PrintStream err) {
     err.println(
         "usage: Gates traceability --file <file> [--root <dir>] --scan <dir> [--scan <dir> ...]"
-            + " [--realstore all|skip|only]");
+            + " [--realstore all|skip|only] [--annotate]");
     return 2;
   }
 

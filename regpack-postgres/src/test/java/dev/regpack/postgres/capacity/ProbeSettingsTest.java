@@ -45,6 +45,21 @@ class ProbeSettingsTest {
   }
 
   @Test
+  void theCgroupDirectoryDefaultsToTheProcessAndCanBePointedAtTheContainer() {
+    assertThat(ProbeSettings.parse(Map.of()).cgroupDirectory())
+        .isEqualTo(Sampler.DEFAULT_CGROUP_DIRECTORY);
+    assertThat(
+            ProbeSettings.parse(
+                    Map.of(
+                        "REGPACK_CAPACITY_CGROUP_DIR",
+                        " /sys/fs/cgroup/system.slice/docker-abc.scope "))
+                .cgroupDirectory())
+        .isEqualTo(java.nio.file.Path.of("/sys/fs/cgroup/system.slice/docker-abc.scope"));
+    assertThat(ProbeSettings.parse(Map.of("REGPACK_CAPACITY_CGROUP_DIR", " ")).cgroupDirectory())
+        .isEqualTo(Sampler.DEFAULT_CGROUP_DIRECTORY);
+  }
+
+  @Test
   void anEmptyValueIsTheSameAsUnset() {
     ProbeSettings settings =
         ProbeSettings.parse(

@@ -168,10 +168,132 @@ class PinCheckTest {
   }
 
   @Test
-  void localAndDockerActionsAreIgnored() {
+  void localActionsAreIgnored() {
     assertThat(PinCheck.checkWorkflow("ci.yml", workflow("uses: ./.github/actions/setup", "")))
         .isEmpty();
+  }
+
+  @Test
+  void aDockerStepWithoutADigestIsAnUnpinnedImage() {
+    // a "uses: docker://image" step runs a container image, so the image rule applies to it (CI-4)
     assertThat(PinCheck.checkWorkflow("ci.yml", workflow("uses: docker://alpine:3.20", "")))
+        .containsExactly("ci.yml:9: UNPINNED_IMAGE alpine:3.20");
+    assertThat(PinCheck.checkWorkflow("ci.yml", workflow("uses: docker://postgres:18", "")))
+        .containsExactly("ci.yml:9: UNPINNED_IMAGE postgres:18");
+    assertThat(PinCheck.checkWorkflow("ci.yml", workflow("uses: 'docker://alpine'", "")))
+        .containsExactly("ci.yml:9: UNPINNED_IMAGE alpine");
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml", workflow("uses: docker://alpine:3.20@sha256:" + "A".repeat(64), "")))
+        .hasSize(1);
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml", workflow("uses: docker://alpine:3.20@" + DIGEST + " # 3.20", "")))
+        .isEmpty();
+    assertThat(PinCheck.checkWorkflow("ci.yml", workflow("uses: docker://alpine@" + DIGEST, "")))
+        .isEmpty();
+  }
+
+  @Test
+  void dockerPullRunAndCreateInRunTextNeedADigestToo() {
+    for (String command :
+        List.of(
+            "run: docker run --rm postgres:latest true",
+            "run: docker pull postgres:18",
+            "run: docker create --name x postgres:18",
+            "run: docker container run -d postgres",
+            "run: sudo docker run -e A=b -p 5432:5432 -v /a:/b --network host --memory 1g postgres:18",
+            "run: docker run --rm --env=A=b \"postgres:18\" true",
+            "run: docker run --rm \"$IMAGE\" true")) {
+      List<String> problems = PinCheck.checkWorkflow("ci.yml", workflow(command, ""));
+      assertThat(problems).as(command).hasSize(1);
+      assertThat(problems.get(0)).as(command).startsWith("ci.yml:9: UNPINNED_IMAGE ");
+    }
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml", workflow("run: docker run --rm postgres:latest true", "")))
+        .containsExactly("ci.yml:9: UNPINNED_IMAGE postgres:latest");
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml",
+                workflow("run: docker run -e A=b --name x --memory 1g postgres:18 true", "")))
+        .containsExactly("ci.yml:9: UNPINNED_IMAGE postgres:18");
+  }
+
+  @Test
+  void dockerCommandsWithADigestOrWithoutAnImageArePinned() {
+    for (String command :
+        List.of(
+            "run: docker run --rm postgres:18@" + DIGEST + " true",
+            "run: docker pull \"postgres@" + DIGEST + "\"",
+            "run: docker ps --filter ancestor=postgres:18",
+            "run: docker exec abc psql -U postgres",
+            "run: docker restart abc",
+            "run: docker inspect --format '{{.State}}' abc",
+            "run: docker run --help",
+            "run: echo docker is not run here",
+            "run: docker run --rm postgres:18 # a comment about postgres:latest")) {
+      List<String> problems = PinCheck.checkWorkflow("ci.yml", workflow(command, ""));
+      if (command.contains("postgres:18 #")) {
+        assertThat(problems).as(command).hasSize(1);
+      } else {
+        assertThat(problems).as(command).isEmpty();
+      }
+    }
+  }
+
+  @Test
+  void anImageThatTheWorkflowBuildsItselfHasNoDigestToPin() {
+    // the image smoke job of ci.yml: docker build -t regpack:ci, then docker run regpack:ci
+    String run =
+        "name: ci\non: push\npermissions:\n  contents: read\njobs:\n  b:\n"
+            + "    runs-on: ubuntu-24.04\n    steps:\n      - run: |\n"
+            + "          docker build -t regpack:ci image-ctx\n"
+            + "          docker run --rm --entrypoint java regpack:ci --list-modules\n";
+    assertThat(PinCheck.checkWorkflow("ci.yml", run)).isEmpty();
+    // only the tag that is built is exempt, and the build must be in the same workflow
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml",
+                run.replace("docker run --rm", "docker run --rm -v a:b")
+                    .replace("regpack:ci --list", "postgres:18 --list")))
+        .containsExactly("ci.yml:11: UNPINNED_IMAGE postgres:18");
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml",
+                run.replace("docker build -t regpack:ci image-ctx", "docker build image-ctx")))
+        .containsExactly("ci.yml:11: UNPINNED_IMAGE regpack:ci");
+    assertThat(PinCheck.checkWorkflow("ci.yml", run.replace("-t regpack:ci", "--tag=regpack:ci")))
+        .isEmpty();
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml", run.replace("docker build -t", "docker buildx build --load -t")))
+        .isEmpty();
+  }
+
+  @Test
+  void aQuotedImageKeyIsReadLikeAPlainOne() {
+    for (String key : List.of("'image'", "\"image\"")) {
+      assertThat(
+              PinCheck.checkWorkflow(
+                  "ci.yml", withServiceImage("postgres:18").replace("image:", key + ":")))
+          .as(key)
+          .containsExactly("ci.yml:10: UNPINNED_IMAGE postgres:18");
+    }
+    String container =
+        "name: ci\non: push\npermissions:\n  contents: read\njobs:\n  b:\n"
+            + "    runs-on: ubuntu-24.04\n    'container': node:22\n    steps:\n      - run: true\n";
+    assertThat(PinCheck.checkWorkflow("ci.yml", container))
+        .containsExactly("ci.yml:8: UNPINNED_IMAGE node:22");
+    String flow =
+        "name: ci\non: push\npermissions:\n  contents: read\njobs:\n  b:\n"
+            + "    runs-on: ubuntu-24.04\n    container: { 'image': node:22, options: --init }\n"
+            + "    steps:\n      - run: true\n";
+    assertThat(PinCheck.checkWorkflow("ci.yml", flow))
+        .containsExactly("ci.yml:8: UNPINNED_IMAGE node:22");
+    assertThat(
+            PinCheck.checkWorkflow(
+                "ci.yml", withServiceImage("postgres@" + DIGEST).replace("image:", "'image':")))
         .isEmpty();
   }
 
