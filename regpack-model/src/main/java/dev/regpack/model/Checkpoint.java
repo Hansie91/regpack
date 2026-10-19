@@ -8,6 +8,7 @@ public record Checkpoint(String stream, byte[] state) {
     if (stream == null || stream.isBlank()) {
       throw new IllegalArgumentException("Checkpoint stream must not be blank");
     }
+    KeyText.require("Checkpoint stream", stream);
     state = state.clone();
   }
 

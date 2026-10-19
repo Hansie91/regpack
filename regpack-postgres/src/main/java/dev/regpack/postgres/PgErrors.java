@@ -27,6 +27,17 @@ public final class PgErrors {
     DEADLOCK,
     /** A lost or refused connection: never to be read as a negative answer. */
     CONNECTION,
+    /**
+     * SQLState 22021: the server refused a text (a NUL byte, or bytes that are not valid in the
+     * database encoding). The model refuses such texts before a write ({@code KeyText}), so this is
+     * a safety net; it is never a negative answer and the same batch fails again on a redelivery.
+     */
+    INVALID_TEXT,
+    /**
+     * SQLState 54000: a program limit of the server, for example an index row above the btree limit
+     * of about 2.7 KB. The model bounds the keys, so this is a safety net; never a negative answer.
+     */
+    LIMIT_EXCEEDED,
     OTHER
   }
 
@@ -56,6 +67,8 @@ public final class PgErrors {
       case "40001" -> Violation.SERIALIZATION;
       case "40P01" -> Violation.DEADLOCK;
       case "57P01", "57P02", "57P03", "53300" -> Violation.CONNECTION;
+      case "22021" -> Violation.INVALID_TEXT;
+      case "54000" -> Violation.LIMIT_EXCEEDED;
       default -> state.startsWith("08") ? Violation.CONNECTION : Violation.OTHER;
     };
   }

@@ -133,6 +133,50 @@ class CanonicalExecutionCodecTest {
         .satisfies(e -> assertThat(e.getMessage().length()).isLessThan(200));
   }
 
+  private static Map<String, Object> mapWithExecutionId(String venueExecutionId) {
+    Map<String, Object> map =
+        new LinkedHashMap<>(CanonicalExecutionCodec.toMap(execution(Optional.empty())));
+    map.put("venueExecutionId", venueExecutionId);
+    return map;
+  }
+
+  @Test
+  void anIdentityPartWithAControlCharacterOrALoneSurrogateIsRefusedWithoutEchoingIt() {
+    String nul = String.valueOf((char) 0);
+    String tab = String.valueOf((char) 9);
+    String high = String.valueOf((char) 0xD800);
+    String low = String.valueOf((char) 0xDC00);
+    for (String bad :
+        new String[] {"EX" + nul + "1", "EX" + tab + "1", "EX" + high + "1", "EX" + low}) {
+      Map<String, Object> map = mapWithExecutionId(bad);
+      assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageStartingWith("field venueExecutionId must be")
+          .message()
+          .doesNotContain(bad);
+    }
+  }
+
+  @Test
+  void anIdentityLongerThanTheBoundIsRefusedAsAWhole() {
+    // firmLei (20), "|", venueMic (4) and "|" take 26 chars: 486 more is the longest identity
+    Map<String, Object> longest = mapWithExecutionId("x".repeat(486));
+    assertThat(CanonicalExecutionCodec.fromMap(longest).eventIdentity().value()).hasSize(512);
+    Map<String, Object> tooLong = mapWithExecutionId("x".repeat(487));
+    assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(tooLong))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("512");
+  }
+
+  @Test
+  void aTradeTimeOutsideTheLedgerRangeIsStillAValidExecution() {
+    // the range of the asAt is the rule of the ledger, not of the codec (a 1970 default is valid)
+    Map<String, Object> map = mapWithExecutionId("EX-1");
+    map.put("tradedAt", Instant.parse("1970-01-01T00:00:00Z"));
+    assertThat(CanonicalExecutionCodec.fromMap(map).tradedAt())
+        .isEqualTo(Instant.parse("1970-01-01T00:00:00Z"));
+  }
+
   @Test
   void blankClientLeiIsRejected() {
     for (String blank : new String[] {"", "   "}) {

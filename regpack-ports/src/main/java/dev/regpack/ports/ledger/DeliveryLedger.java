@@ -1,5 +1,6 @@
 package dev.regpack.ports.ledger;
 
+import dev.regpack.model.KeyText;
 import dev.regpack.model.Sha256;
 import java.util.Optional;
 
@@ -29,12 +30,31 @@ public interface DeliveryLedger {
 
   record AttemptId(long value) {}
 
+  /**
+   * A delivery to create. A {@code businessKey} that is not null must be a key text ({@link
+   * KeyText}: no control character, no unpaired surrogate, at most {@link
+   * KeyText#MAX_BUSINESS_KEY_CHARS} chars), else {@link IllegalArgumentException}; a blank one is
+   * refused by {@code createDelivery} (M49).
+   */
   record NewDelivery(
-      LeaseLedger.EndpointKey endpoint, long endpointEpoch, String businessKey, long versionSeq) {}
+      LeaseLedger.EndpointKey endpoint, long endpointEpoch, String businessKey, long versionSeq) {
+    public NewDelivery {
+      if (businessKey != null) {
+        KeyText.require("businessKey", businessKey, KeyText.MAX_BUSINESS_KEY_CHARS);
+      }
+    }
+  }
 
   record Delivery(DeliveryId id, NewDelivery key, DeliveryState state) {}
 
-  record AttemptIntent(Sha256 artifactSha256, String fileName) {}
+  /** The file name is a key text ({@link KeyText}) when it is not null. */
+  record AttemptIntent(Sha256 artifactSha256, String fileName) {
+    public AttemptIntent {
+      if (fileName != null) {
+        KeyText.require("fileName", fileName);
+      }
+    }
+  }
 
   record Attempt(
       AttemptId id,

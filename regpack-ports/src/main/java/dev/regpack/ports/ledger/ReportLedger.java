@@ -2,6 +2,7 @@ package dev.regpack.ports.ledger;
 
 import dev.regpack.model.BatchId;
 import dev.regpack.model.EventIdentity;
+import dev.regpack.model.KeyText;
 import dev.regpack.model.Leg;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
@@ -72,7 +73,7 @@ public interface ReportLedger {
 
   /**
    * A proposed TRN. {@code trn}: 1 to 52 characters (the MiFIR limit; the pack-declared TRN policy
-   * owns it) of {@code [A-Za-z0-9]}; {@code keyId}: not blank.
+   * owns it) of {@code [A-Za-z0-9]}; {@code keyId}: not blank and a key text ({@link KeyText}).
    */
   record TrnProposal(String trn, String keyId) {
     private static final Pattern TRN = Pattern.compile("[A-Za-z0-9]{1,52}");
@@ -84,6 +85,7 @@ public interface ReportLedger {
       if (keyId == null || keyId.isBlank()) {
         throw new IllegalArgumentException("keyId must not be blank");
       }
+      KeyText.require("keyId", keyId);
     }
   }
 
@@ -96,7 +98,9 @@ public interface ReportLedger {
   /**
    * A requested report version. {@code body} is copied on the way in and on the way out; {@code
    * action} is the regime-owned vocabulary (for example NEWT, CANC) and not blank; {@code
-   * executingLei} is not blank.
+   * executingLei} is not blank; both are key texts ({@link KeyText}: no control character, no
+   * unpaired surrogate, at most {@link KeyText#MAX_CHARS} chars), else {@link
+   * IllegalArgumentException}.
    */
   record NewVersion(
       SubjectKey subject,
@@ -117,6 +121,8 @@ public interface ReportLedger {
       if (action == null || action.isBlank()) {
         throw new IllegalArgumentException("action must not be blank");
       }
+      KeyText.require("executingLei", executingLei);
+      KeyText.require("action", action);
       Objects.requireNonNull(logicalHash, "logicalHash");
       body = Objects.requireNonNull(body, "body").clone();
       Objects.requireNonNull(origin, "origin");

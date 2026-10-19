@@ -1,6 +1,7 @@
 package dev.regpack.model.canonical;
 
 import dev.regpack.model.EventIdentity;
+import dev.regpack.model.KeyText;
 import dev.regpack.model.json.Json;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -41,13 +42,25 @@ public final class CanonicalExecutionCodec {
 
   /**
    * An execution that decodes but could not be given an identity or canonical JSON (a '|' in an
-   * identity part, a {@code tradedAt} finer than a microsecond or outside the years 0000..9999) is
-   * refused here, early, with a bounded message that names the field and never echoes it.
+   * identity part, a control character such as U+0000 or an unpaired surrogate in one, an identity
+   * over {@value KeyText#MAX_EVENT_IDENTITY_CHARS} characters, a {@code tradedAt} finer than a
+   * microsecond or outside the years 0000..9999) is refused here, early, with a bounded message
+   * that names the field and never echoes it. The range of {@code asAt} that a ledger supports is
+   * not checked here: it is the rule of the ledger ({@code AsAtRange}).
    */
   private static void requireRepresentable(CanonicalExecution e) {
     requireIdentityPart("firmLei", e.firmLei());
     requireIdentityPart("venueMic", e.venueMic());
     requireIdentityPart("venueExecutionId", e.venueExecutionId());
+    try {
+      e.eventIdentity();
+    } catch (IllegalArgumentException ex) {
+      throw new IllegalArgumentException(
+          "the identity of firmLei, venueMic and venueExecutionId is longer than "
+              + KeyText.MAX_EVENT_IDENTITY_CHARS
+              + " characters",
+          ex);
+    }
     try {
       Json.canonical(Map.of("tradedAt", e.tradedAt()));
     } catch (IllegalArgumentException ex) {
@@ -66,7 +79,13 @@ public final class CanonicalExecutionCodec {
       EventIdentity.of(value);
     } catch (IllegalArgumentException ex) {
       throw new IllegalArgumentException(
-          "field " + field + " must be non-blank and free of '|'", ex);
+          "field "
+              + field
+              + " must be non-blank, free of '|' and free of control characters and unpaired"
+              + " surrogates, and at most "
+              + KeyText.MAX_EVENT_IDENTITY_CHARS
+              + " characters",
+          ex);
     }
   }
 

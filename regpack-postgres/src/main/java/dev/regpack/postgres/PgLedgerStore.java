@@ -90,6 +90,10 @@ public final class PgLedgerStore implements LedgerStore {
         throw new IllegalArgumentException(
             name + " must be a positive whole number of milliseconds");
       }
+      // lock_timeout and statement_timeout are 32-bit millisecond settings of the server
+      if (millis > Integer.MAX_VALUE) {
+        throw new IllegalArgumentException(name + " is out of range");
+      }
     }
   }
 

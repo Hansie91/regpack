@@ -1,5 +1,6 @@
 package dev.regpack.model.decision;
 
+import dev.regpack.model.KeyText;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.json.Json;
 import java.util.List;
@@ -14,6 +15,10 @@ import java.util.Optional;
  * re-evaluation after the close have different context ids and the ledger supersedes instead of
  * treating the re-evaluation as a redelivery. Epoch 0 is omitted from the canonical form, so every
  * context id that existed before the epoch is unchanged. The epoch is process-local (D-L1).
+ *
+ * <p>{@code engineBuild} has a text column of its own in the real store, so it is a key text
+ * ({@link KeyText}); every other text is part of the canonical JSON, which refuses an unpaired
+ * surrogate.
  */
 public record DecisionContext(
     Sha256 packDigest,
@@ -60,6 +65,8 @@ public record DecisionContext(
     Objects.requireNonNull(firmProfileVersion, "firmProfileVersion");
     Objects.requireNonNull(mappingVersion, "mappingVersion");
     Objects.requireNonNull(engineBuild, "engineBuild");
+    // stored in a text column of its own (not only inside the canonical JSON): a key text
+    KeyText.require("engineBuild", engineBuild);
     Objects.requireNonNull(executor, "executor");
     if (circuitEpoch < 0) {
       throw new IllegalArgumentException("circuitEpoch must not be negative: " + circuitEpoch);

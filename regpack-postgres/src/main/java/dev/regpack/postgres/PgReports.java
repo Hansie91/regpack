@@ -1,6 +1,7 @@
 package dev.regpack.postgres;
 
 import dev.regpack.model.EventIdentity;
+import dev.regpack.model.KeyText;
 import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
@@ -667,8 +668,8 @@ final class PgReports {
   }
 
   Optional<Subject> subjectByTrn(String executingLei, String trn) {
-    Objects.requireNonNull(executingLei, "executingLei");
-    Objects.requireNonNull(trn, "trn");
+    KeyText.require("executingLei", executingLei);
+    KeyText.require("trn", trn);
     return Unit.inUnit(
         dataSource,
         config,

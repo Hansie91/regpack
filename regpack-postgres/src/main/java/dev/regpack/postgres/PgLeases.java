@@ -1,7 +1,9 @@
 package dev.regpack.postgres;
 
+import dev.regpack.model.KeyText;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
+import dev.regpack.ports.ledger.LeaseLedger;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseGrant;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseResult;
@@ -344,6 +346,7 @@ final class PgLeases {
     if (holder.isBlank()) {
       throw new IllegalArgumentException("holder must not be blank");
     }
+    KeyText.require("holder", holder);
   }
 
   static void requirePositiveWholeMicros(Duration ttl) {
@@ -353,6 +356,9 @@ final class PgLeases {
     }
     if (ttl.getNano() % 1000 != 0) {
       throw new IllegalArgumentException("ttl is not whole microseconds: " + ttl);
+    }
+    if (ttl.compareTo(LeaseLedger.MAX_TTL) > 0) {
+      throw new IllegalArgumentException("ttl is longer than " + LeaseLedger.MAX_TTL);
     }
   }
 

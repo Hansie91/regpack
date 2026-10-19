@@ -7,6 +7,7 @@ import dev.regpack.testkit.contract.FencingScenarioContract;
 import dev.regpack.testkit.contract.IngestLedgerContract;
 import dev.regpack.testkit.contract.LeaseDeliveryLedgerContract;
 import dev.regpack.testkit.contract.ReportLedgerContract;
+import dev.regpack.testkit.contract.StorableValuesLedgerContract;
 
 /**
  * The binding of the ledger contract suites to the PostgreSQL adapter (Convention 4): every test
@@ -22,7 +23,8 @@ public abstract class AbstractPgLedgerContract extends AbstractPgStoreTest
         LeaseDeliveryLedgerContract,
         FencingScenarioContract,
         ReportLedgerContract,
-        ExitFixturesContract {
+        ExitFixturesContract,
+        StorableValuesLedgerContract {
   @Override
   public LedgerStore ledger() {
     return store();

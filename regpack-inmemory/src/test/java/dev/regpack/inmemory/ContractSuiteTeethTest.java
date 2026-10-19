@@ -4,9 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClass;
 
 import dev.regpack.inmemory.mutants.AbaAsNoopLedgerContractTest;
+import dev.regpack.inmemory.mutants.AsAtNotCheckedLedgerContractTest;
 import dev.regpack.inmemory.mutants.IdempotencyIgnoresContextLedgerContractTest;
+import dev.regpack.inmemory.mutants.IdempotencyIgnoresDayLedgerContractTest;
 import dev.regpack.inmemory.mutants.IgnoreLeaseTokenLedgerContractTest;
 import dev.regpack.inmemory.mutants.IgnoreRestoreEpochLedgerContractTest;
+import dev.regpack.inmemory.mutants.LeaseTtlUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoInFlightGuardLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoTakeoverInDoubtLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoWithdrawalGuardLedgerContractTest;
@@ -110,6 +113,16 @@ class ContractSuiteTeethTest {
         Set.of("takeoverMovesSendingDeliveriesToInDoubtAndFencesTheOldHolder"));
     expected.put(
         PageUnboundedLedgerContractTest.class, Set.of("pendingOutboxReturnsAtMostPageLimitItems"));
+    // FP2: the values the real store cannot hold, and the day of the idempotency key
+    expected.put(
+        AsAtNotCheckedLedgerContractTest.class,
+        Set.of("anAsAtOutsideTheSupportedRangeIsRejectedBeforeAnyWrite"));
+    expected.put(
+        IdempotencyIgnoresDayLedgerContractTest.class,
+        Set.of("aSameKeyOnAnotherUtcDayIsANewDecisionNotARedelivery"));
+    expected.put(
+        LeaseTtlUnboundedLedgerContractTest.class,
+        Set.of("aLeaseTtlBeyondTheMaximumIsRejectedAndTheMaximumIsGranted"));
 
     List<String> misses = new ArrayList<>();
     expected.forEach(

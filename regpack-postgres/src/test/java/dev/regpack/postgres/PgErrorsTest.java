@@ -57,6 +57,47 @@ class PgErrorsTest {
     assertThat(PgErrors.classify(new SQLException("x", "ZZZZZ"))).isEqualTo(Violation.OTHER);
   }
 
+  /**
+   * FP2 safety net: a text the server refuses (22021) and a program limit such as the btree row
+   * size (54000) have a class of their own; neither is a negative answer, and the wrapped message
+   * carries the SQLState and nothing of the server text (which could hold the value).
+   */
+  @Test
+  void aRefusedTextAndAProgramLimitAreClassifiedAndNeverEchoTheServerText() {
+    PSQLException invalidText =
+        server(
+            "22021", null, "invalid byte sequence for encoding \"UTF8\": 0x00", "secret-record-id");
+    assertThat(PgErrors.classify(invalidText)).isEqualTo(Violation.INVALID_TEXT);
+    assertThat(PgErrors.classify(new SQLException("x", "22021"))).isEqualTo(Violation.INVALID_TEXT);
+    assertThat(PgErrors.wrap(invalidText).getMessage())
+        .isEqualTo("ledger statement failed: sqlstate=22021 constraint=none")
+        .doesNotContain("secret");
+
+    PSQLException tooBig =
+        server(
+            "54000",
+            null,
+            "index row size 3000 exceeds btree version 4 maximum 2704 for index \"ingest_pk\"",
+            "Index row references tuple (0,1) in relation \"ingest\".");
+    assertThat(PgErrors.classify(tooBig)).isEqualTo(Violation.LIMIT_EXCEEDED);
+    assertThat(PgErrors.classify(new SQLException("x", "54000")))
+        .isEqualTo(Violation.LIMIT_EXCEEDED);
+    assertThat(PgErrors.wrap(tooBig).getMessage())
+        .isEqualTo("ledger statement failed: sqlstate=54000 constraint=none");
+
+    // near misses keep their old class
+    assertThat(PgErrors.classify(new SQLException("x", "22001"))).isEqualTo(Violation.OTHER);
+    assertThat(PgErrors.classify(new SQLException("x", "54001"))).isEqualTo(Violation.OTHER);
+    // and a refused text is neither of the classes a caller reads as an answer or a retry
+    assertThat(Violation.INVALID_TEXT)
+        .isNotIn(
+            Violation.UNIQUE,
+            Violation.CONNECTION,
+            Violation.SERIALIZATION,
+            Violation.DEADLOCK,
+            Violation.NO_PARTITION);
+  }
+
   @Test
   void constraintNameIsReadFromTheServerErrorMessage() {
     // the text of the message names another constraint; only the server field counts

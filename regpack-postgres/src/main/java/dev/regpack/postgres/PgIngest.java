@@ -4,6 +4,7 @@ import dev.regpack.model.BatchId;
 import dev.regpack.model.Checkpoint;
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.IngestKey;
+import dev.regpack.model.KeyText;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.ledger.IngestLedger.Commit;
@@ -179,8 +180,8 @@ final class PgIngest {
   }
 
   Optional<Checkpoint> latestCheckpoint(String sourceId, String stream) {
-    Objects.requireNonNull(sourceId, "sourceId");
-    Objects.requireNonNull(stream, "stream");
+    KeyText.require("sourceId", sourceId);
+    KeyText.require("stream", stream);
     return Unit.inUnit(
         dataSource,
         config,

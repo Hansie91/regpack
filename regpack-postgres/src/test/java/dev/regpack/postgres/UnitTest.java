@@ -162,6 +162,35 @@ class UnitTest {
         .hasMessage("bad input");
   }
 
+  /**
+   * lock_timeout and statement_timeout are 32-bit millisecond settings: a larger value would be
+   * refused by the server at the first unit (SQLSTATE 22023), so the Config refuses it at once.
+   */
+  @Test
+  void theConfigRefusesATimeoutAboveTheThirtyTwoBitMillisecondRange() {
+    Duration largest = Duration.ofMillis(Integer.MAX_VALUE);
+    assertThat(CONFIG.withLockTimeout(largest).lockTimeout()).isEqualTo(largest);
+    assertThat(CONFIG.withStatementTimeout(largest).statementTimeout()).isEqualTo(largest);
+    for (Duration tooLong :
+        new Duration[] {
+          largest.plusMillis(1),
+          Duration.ofDays(30),
+          Duration.ofSeconds(Long.MAX_VALUE),
+          Duration.ofSeconds(Long.MAX_VALUE, 999_000_000)
+        }) {
+      assertThatThrownBy(() -> CONFIG.withLockTimeout(tooLong))
+          .as("lockTimeout %s", tooLong)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("lockTimeout");
+      assertThatThrownBy(() -> CONFIG.withStatementTimeout(tooLong))
+          .as("statementTimeout %s", tooLong)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("statementTimeout");
+      assertThatThrownBy(() -> new Config("t1_1", true, true, tooLong, Duration.ofSeconds(1)))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+  }
+
   @Test
   void theConfigRefusesABadSchemaAndTimeoutsThatAreNotPositiveWholeMilliseconds() {
     assertThat(CONFIG.partitionsOnDemand()).isTrue();

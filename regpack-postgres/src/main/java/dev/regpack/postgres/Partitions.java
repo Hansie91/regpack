@@ -1,8 +1,8 @@
 package dev.regpack.postgres;
 
+import dev.regpack.model.decision.AsAtRange;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 
@@ -13,11 +13,11 @@ import java.util.Objects;
  * or locale.
  */
 public final class Partitions {
-  /** The first supported day (inclusive). */
-  static final LocalDate FIRST_DAY = LocalDate.of(2000, 1, 1);
+  /** The first supported day (inclusive); the range of the model, {@link AsAtRange}. */
+  static final LocalDate FIRST_DAY = AsAtRange.FIRST_DAY;
 
   /** The first day that is no longer supported (exclusive). */
-  static final LocalDate END_DAY = LocalDate.of(2200, 1, 1);
+  static final LocalDate END_DAY = AsAtRange.END_DAY;
 
   private static final String PREFIX = "decision_p";
 
@@ -30,12 +30,7 @@ public final class Partitions {
    *     nothing yet
    */
   public static LocalDate dateOf(Instant asAt) {
-    Objects.requireNonNull(asAt, "asAt");
-    if (asAt.isBefore(FIRST_DAY.atStartOfDay().toInstant(ZoneOffset.UTC))
-        || !asAt.isBefore(END_DAY.atStartOfDay().toInstant(ZoneOffset.UTC))) {
-      throw new IllegalArgumentException("asAt is outside the supported range 2000 to 2199 (UTC)");
-    }
-    return asAt.atOffset(ZoneOffset.UTC).toLocalDate();
+    return AsAtRange.dayOf(asAt);
   }
 
   /** {@code decision_p20261009} for 2026-10-09. */

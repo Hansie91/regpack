@@ -351,20 +351,27 @@ class PackCommandsTest {
         .isLessThanOrEqualTo(PackCommands.MAX_OUTPUT_LINE + PackCommands.CUT_MARKER.length());
   }
 
+  /**
+   * FP2: the identity of an event is a key text, so the codec now refuses a control character such
+   * as ESC and an identity over 512 characters (the next test); the characters it still allows (a
+   * C1 control, a right-to-left override) are escaped, and the line is cut at the bound after
+   * escaping, as before.
+   */
   @Test
   void explainEventEscapesAndBoundsTheEventIdentity() throws IOException {
-    String hostile = "LEI" + ESC + "[31m" + RLO + "X";
+    String hostile = "LEI" + CSI + "[31m" + RLO + "X";
     Path event = temp.resolve("hostile-event.json");
-    // the identity is JSON-escaped in the file; the long id is far over any line bound
+    // the identity is JSON-escaped in the file; 300 override characters take 1,800 characters once
+    // escaped, far over the line bound, while the identity itself stays inside its own bound
     Files.writeString(
-        event, EVENT.replace("LEI-FIRM-0001", jsonEscaped(hostile) + "L".repeat(500_000)), UTF_8);
+        event, EVENT.replace("LEI-FIRM-0001", jsonEscaped(hostile + RLO.repeat(300))), UTF_8);
 
     int exit = run("pack", "explain", pack.toString(), "--event", event.toString());
 
     assertThat(exit).isZero();
-    assertThat(stdout()).contains("Decision 0 (seq 1) for LEI\\u001b[31m\\u202eXLLL");
+    assertThat(stdout()).contains("Decision 0 (seq 1) for LEI\\u009b[31m\\u202eX\\u202e\\u202e");
     assertThat(stdout()).contains(PackCommands.CUT_MARKER);
-    assertThat(stdout()).doesNotContain(ESC).doesNotContain(RLO);
+    assertThat(stdout()).doesNotContain(CSI).doesNotContain(RLO);
     assertThat(stdout().length()).isLessThan(20_000);
     assertSafeOutput(stdout(), "explain --event, firmLei");
     assertThat(stderr()).isEmpty();
@@ -372,12 +379,34 @@ class PackCommandsTest {
     // the same for the execution id, which comes last on the identity line
     outBytes.reset();
     Files.writeString(
-        event, EVENT.replace("EX-1", jsonEscaped("EX" + ESC + RLO) + "9".repeat(500_000)), UTF_8);
+        event, EVENT.replace("EX-1", jsonEscaped("EX" + CSI + RLO + RLO.repeat(300))), UTF_8);
 
     assertThat(run("pack", "explain", pack.toString(), "--event", event.toString())).isZero();
-    assertThat(stdout()).contains("for LEI-FIRM-0001|XPAR|EX\\u001b\\u202e999");
+    assertThat(stdout()).contains("for LEI-FIRM-0001|XPAR|EX\\u009b\\u202e\\u202e\\u202e");
     assertThat(stdout()).contains(PackCommands.CUT_MARKER);
     assertSafeOutput(stdout(), "explain --event, venueExecutionId");
+  }
+
+  /** FP2: an identity with a C0 control character or over 512 characters is not an execution. */
+  @Test
+  void explainEventRefusesAControlCharacterAndAnOverLongIdentity() throws IOException {
+    Path event = temp.resolve("refused-event.json");
+    String[] refused = {
+      jsonEscaped("LEI" + ESC + "[31m"), jsonEscaped("LEI" + (char) 0 + "X"), "L".repeat(500_000)
+    };
+    for (String firmLei : refused) {
+      outBytes.reset();
+      errBytes.reset();
+      Files.writeString(event, EVENT.replace("LEI-FIRM-0001", firmLei), UTF_8);
+
+      int exit = run("pack", "explain", pack.toString(), "--event", event.toString());
+
+      assertThat(exit).isEqualTo(2);
+      assertThat(stdout()).isEmpty();
+      assertThat(stderr()).contains("the event file is not a canonical execution");
+      assertThat(stderr()).doesNotContain(ESC);
+      assertSafeOutput(stderr(), "explain --event, refused identity");
+    }
   }
 
   @Test
@@ -398,6 +427,7 @@ class PackCommandsTest {
 
   private static final String ESC = String.valueOf((char) 0x1B);
   private static final String RLO = new String(Character.toChars(0x202E));
+  private static final String CSI = String.valueOf((char) 0x9B);
 
   /** The text as the body of a JSON string: every non-printable character as a JSON escape. */
   private static String jsonEscaped(String text) {

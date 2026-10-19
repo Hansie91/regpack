@@ -4,23 +4,30 @@ import dev.regpack.model.BatchId;
 import dev.regpack.model.Checkpoint;
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.IngestKey;
+import dev.regpack.model.KeyText;
 import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
+import dev.regpack.model.decision.AsAtRange;
 import dev.regpack.model.decision.DecisionBody;
+import dev.regpack.model.decision.DecisionCodec;
 import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
+import dev.regpack.model.json.Json;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DuplicateKeyException;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
+import dev.regpack.ports.ledger.LeaseLedger;
 import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.ports.ledger.TrnConflictException;
 import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -46,9 +53,16 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   private record ChainKey(Regime regime, EventIdentity eventIdentity) {}
 
-  /** Spec 10 scopes the decision key by regime: (regime, event identity, context, input). */
+  /**
+   * Spec 10 scopes the decision key by regime: (regime, event identity, context, input), and the
+   * schema (D-S3, {@code decision_idem_key}) adds the UTC day of the decision's asAt.
+   */
   private record DecisionKey(
-      Regime regime, EventIdentity eventIdentity, Sha256 decisionContextId, Sha256 inputDigest) {}
+      Regime regime,
+      EventIdentity eventIdentity,
+      Sha256 decisionContextId,
+      Sha256 inputDigest,
+      LocalDate asAtDay) {}
 
   /** (executing LEI, TRN): the spec 10 {@code UNIQUE (executing LEI, TRN)} of the assignment. */
   private record TrnKey(String executingLei, String trn) {}
@@ -119,8 +133,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
     /** A takeover moves the SENDING deliveries of every endpoint, not only its own. */
     TAKEOVER_TOUCHES_OTHER_ENDPOINTS,
     /** The outbox page limit is not applied. */
-    PAGE_UNBOUNDED
+    PAGE_UNBOUNDED,
+    /** A decision with an asAt outside [2000-01-01, 2200-01-01) UTC is accepted. */
+    AS_AT_NOT_CHECKED,
+    /** The idempotency key of a decision leaves out the UTC day of its asAt. */
+    IDEMPOTENCY_KEY_IGNORES_DAY,
+    /** A lease ttl above {@link LeaseLedger#MAX_TTL} is accepted. */
+    LEASE_TTL_UNBOUNDED
   }
+
+  /** Constant stand-in for the day under IDEMPOTENCY_KEY_IGNORES_DAY. */
+  private static final LocalDate NO_DAY = LocalDate.of(2000, 1, 1);
 
   /** Constant stand-in for the decision context id under IDEMPOTENCY_KEY_IGNORES_CONTEXT. */
   private static final Sha256 NO_CONTEXT = new Sha256("0".repeat(64));
@@ -284,8 +307,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   @Override
   public Optional<Checkpoint> latestCheckpoint(String sourceId, String stream) {
-    Objects.requireNonNull(sourceId, "sourceId");
-    Objects.requireNonNull(stream, "stream");
+    KeyText.require("sourceId", sourceId);
+    KeyText.require("stream", stream);
     synchronized (lock) {
       return Optional.ofNullable(checkpoints.get(new StreamKey(sourceId, stream)));
     }
@@ -684,8 +707,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   @Override
   public Optional<Subject> subjectByTrn(String executingLei, String trn) {
-    Objects.requireNonNull(executingLei, "executingLei");
-    Objects.requireNonNull(trn, "trn");
+    KeyText.require("executingLei", executingLei);
+    KeyText.require("trn", trn);
     synchronized (lock) {
       return Optional.ofNullable(subjectsByTrn.get(new TrnKey(executingLei, trn)))
           .map(InMemoryLedgerStore::view);
@@ -739,7 +762,12 @@ public final class InMemoryLedgerStore implements LedgerStore {
     // test double only: deliberate flaw for ContractSuiteTeethTest
     Sha256 context =
         flaw == Flaw.IDEMPOTENCY_KEY_IGNORES_CONTEXT ? NO_CONTEXT : body.decisionContextId();
-    return new DecisionKey(body.regime(), body.eventIdentity(), context, body.inputDigest());
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    LocalDate day =
+        flaw == Flaw.IDEMPOTENCY_KEY_IGNORES_DAY
+            ? NO_DAY
+            : body.asAt().atOffset(ZoneOffset.UTC).toLocalDate();
+    return new DecisionKey(body.regime(), body.eventIdentity(), context, body.inputDigest(), day);
   }
 
   private void validate(BatchCommit commit) {
@@ -759,6 +787,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
                           + decision.body().decisionContextId().hex());
                 }
               });
+      // what the real store refuses before it writes: an asAt outside the daily partitions and a
+      // body without a canonical JSON form (a control character or a lone surrogate in a text)
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (flaw != Flaw.AS_AT_NOT_CHECKED) {
+        AsAtRange.dayOf(decision.body().asAt());
+      }
+      Json.canonical(DecisionCodec.bodyToMap(decision.body(), true));
     }
     commit
         .completesOutbox()
@@ -806,6 +841,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
     if (holder.isBlank()) {
       throw new IllegalArgumentException("holder must not be blank");
     }
+    KeyText.require("holder", holder);
     synchronized (lock) {
       Instant now = clock.now();
       LeaseGrant current = leases.get(endpoint);
@@ -890,13 +926,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
     }
   }
 
-  private static void requirePositiveWholeMicros(Duration ttl) {
+  private void requirePositiveWholeMicros(Duration ttl) {
     Objects.requireNonNull(ttl, "ttl");
     if (ttl.isNegative() || ttl.isZero()) {
       throw new IllegalArgumentException("ttl must be positive: " + ttl);
     }
     if (ttl.getNano() % 1000 != 0) {
       throw new IllegalArgumentException("ttl is not whole microseconds: " + ttl);
+    }
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (flaw != Flaw.LEASE_TTL_UNBOUNDED && ttl.compareTo(LeaseLedger.MAX_TTL) > 0) {
+      throw new IllegalArgumentException("ttl is longer than " + LeaseLedger.MAX_TTL);
     }
   }
 

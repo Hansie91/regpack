@@ -9,6 +9,7 @@ import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.DeliveryLedger.NewDelivery;
+import dev.regpack.ports.ledger.LeaseLedger;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.postgres.PgLedgerStore.Config;
@@ -53,6 +54,32 @@ class PgFencingTest {
     for (Duration bad :
         new Duration[] {
           Duration.ZERO, Duration.ofSeconds(-1), Duration.ofNanos(1_500), Duration.ofNanos(1)
+        }) {
+      assertThatThrownBy(() -> leases.acquire(EP, "A", bad))
+          .as("ttl " + bad)
+          .isInstanceOf(IllegalArgumentException.class);
+      assertThatThrownBy(() -> leases.renew(EP, TOKEN, bad))
+          .as("renew ttl " + bad)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    assertThat(spy.events()).isEmpty();
+  }
+
+  @Test
+  void aHostileHolderAndATtlBeyondTheMaximumAreRefusedBeforeAnyConnection() {
+    String nul = String.valueOf((char) 0);
+    String lone = String.valueOf((char) 0xD800);
+    for (String hostile : new String[] {"a" + nul + "b", "a" + lone, "a	b", "h".repeat(257)}) {
+      assertThatThrownBy(() -> leases.acquire(EP, hostile, TTL))
+          .as("holder of %d chars", hostile.length())
+          .isInstanceOf(IllegalArgumentException.class)
+          .message()
+          .doesNotContain(hostile);
+    }
+    Duration beyond = LeaseLedger.MAX_TTL.plus(Duration.ofNanos(1_000));
+    for (Duration bad :
+        new Duration[] {
+          beyond, Duration.ofDays(200_000_000L), Duration.ofSeconds(Long.MAX_VALUE)
         }) {
       assertThatThrownBy(() -> leases.acquire(EP, "A", bad))
           .as("ttl " + bad)

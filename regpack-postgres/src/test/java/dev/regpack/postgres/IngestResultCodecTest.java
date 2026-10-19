@@ -43,7 +43,11 @@ class IngestResultCodecTest {
         List.of(
             result("a", 0, Disposition.NEW_VERSION),
             result("b", Long.MAX_VALUE, Disposition.STALE),
-            result("x".repeat(70_000), 127, Disposition.SOURCE_CONFLICT),
+            // FP2: a record id is at most 256 chars (768 bytes), so its length takes two varint
+            // bytes at most; the lengths around the one-byte limit of 127 are the boundary
+            result("x".repeat(127), 127, Disposition.SOURCE_CONFLICT),
+            result("y".repeat(128), 127, Disposition.SOURCE_CONFLICT),
+            result("€".repeat(256), 127, Disposition.SOURCE_CONFLICT),
             result("128", 128, Disposition.NOOP_SAME_VERSION_SAME_HASH),
             result("16384", 16_384, Disposition.CONFLICT_SAME_VERSION_DIFFERENT_HASH));
     assertThat(IngestResultCodec.decode(SRC, IngestResultCodec.encode(extremes)))

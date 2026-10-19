@@ -19,6 +19,7 @@ public record BatchId(String value) {
     if (value == null || value.isBlank()) {
       throw new IllegalArgumentException("BatchId must not be blank");
     }
+    KeyText.require("BatchId", value);
   }
 
   public static BatchId of(Sha256 landingDigest, int slice) {
