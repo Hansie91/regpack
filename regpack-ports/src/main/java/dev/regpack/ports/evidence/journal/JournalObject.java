@@ -29,11 +29,12 @@ import java.util.Set;
  * payload_sha256}, plus {@code seq} (class b) or {@code subject_id} and {@code ordinal} (class a).
  *
  * <p>This constructor checks the key against the type (the type must allow the class of the key and
- * a class (a) key names its own type), the schema version (at least 1), the clock instant
- * (microsecond precision, year 0000 to 9999) and the shape of the payload (text, boolean, integer,
- * decimal, instant, list and text-keyed map only; integers widen to {@link Long}). The payload
- * schemas of the types are checked in addition by {@code JournalSchemas}. The payload is copied
- * deeply and is immutable. Messages never echo a value.
+ * a class (a) key names its own type), the schema version (at least 1, and 1 for the schemas), the
+ * clock instant (microsecond precision, year 0000 to 9999) and the shape of the payload (text,
+ * boolean, integer, decimal, instant, list and text-keyed map only; integers widen to {@link
+ * Long}). The payload schemas of the types are checked in addition by {@link JournalSchemas}, so an
+ * object that breaks its schema cannot be built. The payload is copied deeply and is immutable.
+ * Messages never echo a value.
  */
 public record JournalObject(
     JournalKey key,
@@ -73,6 +74,7 @@ public record JournalObject(
     @SuppressWarnings("unchecked")
     Map<String, Object> copy = (Map<String, Object>) copyValue(payload);
     payload = copy;
+    JournalSchemas.validate(type, schemaVersion, key.journalClass(), key.scope(), payload);
   }
 
   /** The hash of the canonical payload text (UTF-8): the {@code payload_sha256} of the envelope. */
@@ -128,6 +130,7 @@ public record JournalObject(
       JournalScope scope = new JournalScope(string(envelope, "endpoint"));
       long epoch = number(envelope, "restore_epoch");
       JournalType type = JournalType.ofWire(string(envelope, "type"));
+      payload = withInstants(type, payload);
       long version = number(envelope, "schema_version");
       if (version < 1 || version > Integer.MAX_VALUE) {
         throw malformed("schema_version is out of range");
@@ -155,6 +158,26 @@ public record JournalObject(
       // the cause is dropped on purpose: parser messages can repeat parts of the input
       throw malformed("the text cannot be read");
     }
+  }
+
+  /**
+   * The parser yields text for an instant: the instant-typed payload fields of the type are
+   * converted back (the canonical comparison at the end of {@code fromBytes} refuses any rendering
+   * but the canonical one).
+   */
+  private static Map<String, Object> withInstants(JournalType type, Map<String, Object> payload) {
+    String field =
+        switch (type) {
+          case TRANSPORT_RESULT -> "observed_at";
+          case FEEDBACK_RECEIVED -> "received_at";
+          default -> "";
+        };
+    if (field.isEmpty() || !(payload.get(field) instanceof String text)) {
+      return payload;
+    }
+    Map<String, Object> converted = new LinkedHashMap<>(payload);
+    converted.put(field, Instant.parse(text));
+    return converted;
   }
 
   private static Set<String> withCommon(String... more) {

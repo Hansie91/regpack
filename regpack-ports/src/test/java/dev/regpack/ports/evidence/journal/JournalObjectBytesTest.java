@@ -1,11 +1,13 @@
 package dev.regpack.ports.evidence.journal;
 
+import static dev.regpack.ports.evidence.journal.JournalFixtures.AT;
+import static dev.regpack.ports.evidence.journal.JournalFixtures.SCOPE;
+import static dev.regpack.ports.evidence.journal.JournalFixtures.SCOPE_TEXT;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.Sha256;
-import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -15,28 +17,29 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class JournalObjectBytesTest {
-  private static final JournalScope SCOPE =
-      JournalScope.of(new EndpointKey("PRODUCTION", "ARM-ONE", "5493001KJTIIGC8Y1R12", "FCA"));
-  private static final String SCOPE_TEXT = "PRODUCTION,ARM-ONE,5493001KJTIIGC8Y1R12,FCA";
-  private static final Instant AT = Instant.parse("2026-10-19T12:00:00.123456Z");
   private static final String MARKER = "SECRET MARKER 7";
 
+  // the canonical payload text of the golden objects, written by hand: sorted keys, no whitespace;
+  // the hashes are those of the seeds "logical", "artifact", "context-1" and "context-2"
+  private static final String INTENT_PAYLOAD =
+      "{\"action\":\"NEWT\","
+          + "\"artifact_sha256\":\"c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c\","
+          + "\"attempt_id\":42,\"business_key\":\"TRADE-1\",\"context_ids\":["
+          + "\"9bf558cf47fd57b0ad02a89e8b135c1ef619ddf5b842ac1746bc8a8a271cd460\","
+          + "\"e1b5609251224d45c0b3a0d5b5cb2b02506881bfebb37aaf40101767a63652ca\"],"
+          + "\"delivery_id\":17,\"file_name\":\"report-1.xml\","
+          + "\"logical_hash\":\"ac7f39a1e0b7bcd03a4d2c83b773ae28ba3befa34bbfd0341e3fef15dfdfad84\","
+          + "\"trn\":\"TRN0000000000000000001\",\"version_seq\":2}";
+  private static final String RESULT_PAYLOAD =
+      "{\"attempt_id\":42,\"detail\":\"http 202\","
+          + "\"observed_at\":\"2026-10-19T12:00:01.500000Z\",\"status\":\"ACCEPTED\"}";
+
   private static JournalObject intent() {
-    return new JournalObject(
-        new JournalKey.ClassA(SCOPE, 3, JournalType.DELIVERY_INTENT, "42", 1),
-        JournalType.DELIVERY_INTENT,
-        1,
-        AT,
-        Map.of("attempt_id", 42L, "note", "x"));
+    return JournalFixtures.object(JournalType.DELIVERY_INTENT);
   }
 
   private static JournalObject transportResult() {
-    return new JournalObject(
-        new JournalKey.ClassB(SCOPE, 3, 10_001),
-        JournalType.TRANSPORT_RESULT,
-        1,
-        AT,
-        Map.of("attempt_id", 42L, "observed_at", "x"));
+    return JournalFixtures.object(JournalType.TRANSPORT_RESULT);
   }
 
   private static String text(JournalObject object) {
@@ -45,16 +48,18 @@ class JournalObjectBytesTest {
 
   @Test
   void classAEnvelopeHasTheDocumentedFields() {
-    // the payload hash is the sha256 of {"attempt_id":42,"note":"x"}, computed outside the code
+    // the payload hash is the sha256 of INTENT_PAYLOAD, computed outside the code (sha256sum)
     assertThat(text(intent()))
         .isEqualTo(
             "{\"envelope\":{\"clock_instant\":\"2026-10-19T12:00:00.123456Z\","
                 + "\"endpoint\":\""
                 + SCOPE_TEXT
                 + "\",\"ordinal\":1,"
-                + "\"payload_sha256\":\"80441ad8cd848f135a3fe248a4beb1d42f9609f652b0f0961bb17cbe459d4bb5\","
+                + "\"payload_sha256\":\"78facdebbceaf2a512fa1c77235dbbc6608bc4054383f3e3a305612d357b6bb9\","
                 + "\"restore_epoch\":3,\"schema_version\":1,\"subject_id\":\"42\","
-                + "\"type\":\"DeliveryIntent\"},\"payload\":{\"attempt_id\":42,\"note\":\"x\"}}");
+                + "\"type\":\"DeliveryIntent\"},\"payload\":"
+                + INTENT_PAYLOAD
+                + "}");
   }
 
   @Test
@@ -66,52 +71,66 @@ class JournalObjectBytesTest {
                 + "\"endpoint\":\""
                 + SCOPE_TEXT
                 + "\","
-                + "\"payload_sha256\":\"40dfa139f28a4f047e3326e996c96844b1abeb6e5cefe23ba498c83c0821b363\","
+                + "\"payload_sha256\":\"c16a69090065d1af87884de1e62d723f12b73549ae8396b535457f4e8af534bb\","
                 + "\"restore_epoch\":3,\"schema_version\":1,\"seq\":10001,"
                 + "\"type\":\"TransportResult\"},"
-                + "\"payload\":{\"attempt_id\":42,\"observed_at\":\"x\"}}");
+                + "\"payload\":"
+                + RESULT_PAYLOAD
+                + "}");
     assertThat(text).doesNotContain("subject_id").doesNotContain("ordinal");
   }
 
   @Test
   void bytesRoundTrip() {
-    Map<String, Object> payload = new LinkedHashMap<>();
-    payload.put("list", List.of("a", 1L, true, Map.of("k", "v")));
-    payload.put("nested", Map.of("deep", Map.of("deeper", List.of())));
-    payload.put("text", "café 😀 \"quoted\" \\ \n tab\t");
-    payload.put("flag", false);
-    payload.put("n", 9_007_199_254_740_993L);
-    for (JournalObject object :
-        List.of(
-            intent(),
-            transportResult(),
-            new JournalObject(
-                new JournalKey.ClassA(
-                    JournalScope.control(), 0, JournalType.BATCH_ADMITTED, "b:1", 2),
-                JournalType.BATCH_ADMITTED,
-                1,
-                AT,
-                payload))) {
+    for (JournalType type : JournalType.values()) {
+      JournalObject object = JournalFixtures.object(type);
       JournalObject back = JournalObject.fromBytes(object.toBytes());
-      assertThat(back).isEqualTo(object);
-      assertThat(back.toBytes()).isEqualTo(object.toBytes());
+      assertThat(back).as(type.wireName()).isEqualTo(object);
+      assertThat(back.toBytes()).as(type.wireName()).isEqualTo(object.toBytes());
     }
+    // both instant-typed fields come back as Instant, not as text
+    assertThat(JournalObject.fromBytes(transportResult().toBytes()).payload().get("observed_at"))
+        .isEqualTo(JournalFixtures.OBSERVED);
+    assertThat(
+            JournalObject.fromBytes(JournalFixtures.object(JournalType.FEEDBACK_RECEIVED).toBytes())
+                .payload()
+                .get("received_at"))
+        .isEqualTo(JournalFixtures.OBSERVED);
+  }
+
+  @Test
+  void textWithSpecialCharactersRoundTrips() {
+    Map<String, Object> payload =
+        new LinkedHashMap<>(JournalFixtures.payload(JournalType.OPERATOR_ACTION, JournalClass.A));
+    payload.put("detail", "café 😀 \"quoted\" \\ \n tab\t");
+    JournalObject object =
+        new JournalObject(
+            new JournalKey.ClassA(SCOPE, 3, JournalType.OPERATOR_ACTION, "op-1", 2),
+            JournalType.OPERATOR_ACTION,
+            1,
+            AT,
+            payload);
+    JournalObject back = JournalObject.fromBytes(object.toBytes());
+    assertThat(back).isEqualTo(object);
+    assertThat(back.payload().get("detail")).isEqualTo("café 😀 \"quoted\" \\ \n tab\t");
   }
 
   @Test
   void payloadSha256IsTheHashOfTheCanonicalPayload() {
-    assertThat(intent().payloadSha256())
-        .isEqualTo(Sha256.ofUtf8("{\"attempt_id\":42,\"note\":\"x\"}"));
+    assertThat(intent().payloadSha256()).isEqualTo(Sha256.ofUtf8(INTENT_PAYLOAD));
     // key order does not matter: the canonical form sorts
+    List<Map.Entry<String, Object>> entries = new ArrayList<>(intent().payload().entrySet());
+    java.util.Collections.reverse(entries);
     Map<String, Object> reordered = new LinkedHashMap<>();
-    reordered.put("note", "x");
-    reordered.put("attempt_id", 42L);
+    for (Map.Entry<String, Object> entry : entries) {
+      reordered.put(entry.getKey(), entry.getValue());
+    }
     JournalObject other =
         new JournalObject(intent().key(), JournalType.DELIVERY_INTENT, 1, AT, reordered);
     assertThat(other.payloadSha256()).isEqualTo(intent().payloadSha256());
     assertThat(other.toBytes()).isEqualTo(intent().toBytes());
     Map<String, Object> changed = new LinkedHashMap<>(reordered);
-    changed.put("note", "y");
+    changed.put("action", "CANC");
     assertThat(
             new JournalObject(intent().key(), JournalType.DELIVERY_INTENT, 1, AT, changed)
                 .payloadSha256())
@@ -143,11 +162,14 @@ class JournalObjectBytesTest {
     bad.add(good.replace("\"payload\":{", "\"extra\":{},\"payload\":{").getBytes(UTF_8));
     bad.add(good.replace("\"subject_id\":\"42\"", "\"subject_id\":\"042\"").getBytes(UTF_8));
     bad.add(good.replace("\"schema_version\":1", "\"schema_version\":0").getBytes(UTF_8));
+    bad.add(good.replace("\"schema_version\":1", "\"schema_version\":2").getBytes(UTF_8));
     bad.add(good.replace("\"restore_epoch\":3", "\"restore_epoch\":-3").getBytes(UTF_8));
     bad.add(good.replace("\"restore_epoch\":3", "\"restore_epoch\":\"3\"").getBytes(UTF_8));
     bad.add(good.replace("\"DeliveryIntent\"", "\"Nope\"").getBytes(UTF_8));
     bad.add(good.replace(".123456Z", ".123Z").getBytes(UTF_8)); // not the canonical rendering
     bad.add(good.replace("T12:00:00.123456Z", "T12:00:00.123456+00:00").getBytes(UTF_8));
+    bad.add(good.replace("\"action\":\"NEWT\",", "").getBytes(UTF_8)); // missing payload key
+    bad.add(good.replace("\"attempt_id\":42", "\"attempt_id\":\"42\"").getBytes(UTF_8));
     bad.add((good + "\n").getBytes(UTF_8)); // trailing bytes
     bad.add((good + " ").getBytes(UTF_8));
     bad.add((good + "x").getBytes(UTF_8));
@@ -166,6 +188,20 @@ class JournalObjectBytesTest {
           .as(new String(bytes, UTF_8))
           .isInstanceOf(IllegalArgumentException.class);
     }
+    // an instant that is not microsecond text, a number, or sub-microsecond is refused too
+    String result = text(transportResult());
+    for (String instant :
+        List.of(
+            "\"2026-10-19T12:00:01.5Z\"",
+            "\"2026-10-19T12:00:01.500000+00:00\"",
+            "\"2026-10-19T12:00:01.5000001Z\"",
+            "\"nonsense\"",
+            "5")) {
+      byte[] bytes = result.replace("\"2026-10-19T12:00:01.500000Z\"", instant).getBytes(UTF_8);
+      assertThatThrownBy(() -> JournalObject.fromBytes(bytes))
+          .as(instant)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
     // the control: the untouched text is accepted
     assertThat(JournalObject.fromBytes(good.getBytes(UTF_8))).isEqualTo(intent());
   }
@@ -176,27 +212,41 @@ class JournalObjectBytesTest {
     JournalObject read = JournalObject.fromBytes(first);
     assertThat(read.toBytes()).isEqualTo(first);
     // the same ledger event rebuilt later gives the same bytes: the clock instant is the event time
+    List<Map.Entry<String, Object>> entries = new ArrayList<>(intent().payload().entrySet());
+    java.util.Collections.reverse(entries);
+    Map<String, Object> reordered = new LinkedHashMap<>();
+    for (Map.Entry<String, Object> entry : entries) {
+      reordered.put(entry.getKey(), entry.getValue());
+    }
     JournalObject rebuilt =
         new JournalObject(
             new JournalKey.ClassA(SCOPE, 3, JournalType.DELIVERY_INTENT, "42", 1),
             JournalType.DELIVERY_INTENT,
             1,
             Instant.parse("2026-10-19T12:00:00.123456Z"),
-            Map.of("note", "x", "attempt_id", 42L));
+            reordered);
     assertThat(rebuilt.toBytes()).isEqualTo(first);
   }
 
   @Test
   void parseErrorsNeverEchoPayloadText() {
     String good = text(intent());
+    String result = text(transportResult());
     List<String> bad =
         List.of(
             // truncated
             "{\"payload\":{\"note\":\"" + MARKER,
             // duplicate key
             "{\"payload\":{\"" + MARKER + "\":1,\"" + MARKER + "\":2},\"envelope\":{}}",
-            // wrong payload hash, marker in the payload
-            good.replace("\"note\":\"x\"", "\"note\":\"" + MARKER + "\""),
+            // marker as a payload value, wrong payload hash
+            good.replace("\"business_key\":\"TRADE-1\"", "\"business_key\":\"" + MARKER + "\""),
+            // marker as a mistyped payload value and as an unknown payload key
+            good.replace("\"attempt_id\":42", "\"attempt_id\":\"" + MARKER + "\""),
+            good.replace("\"action\"", "\"" + MARKER + "\":1,\"action\""),
+            // marker as a hash
+            good.replace(
+                "\"logical_hash\":\"ac7f39a1e0b7bcd03a4d2c83b773ae28ba3befa34bbfd0341e3fef15dfdfad84\"",
+                "\"logical_hash\":\"" + MARKER + "\""),
             // marker as an unknown envelope key
             good.replace("\"endpoint\"", "\"" + MARKER + "\":1,\"endpoint\""),
             // marker in the type, the subject, the scope, the instant and the hash
@@ -207,6 +257,8 @@ class JournalObjectBytesTest {
             good.replace(intent().payloadSha256().hex(), MARKER),
             // marker where a number is expected
             good.replace("\"ordinal\":1", "\"ordinal\":\"" + MARKER + "\""),
+            // marker in an instant-typed payload field
+            result.replace("2026-10-19T12:00:01.500000Z", MARKER),
             "{\"payload\":{\"a\":" + MARKER + "}}",
             good + MARKER);
     for (String text : bad) {
@@ -222,6 +274,8 @@ class JournalObjectBytesTest {
 
   @Test
   void aKeyAndATypeMustAgree() {
+    Map<String, Object> decision =
+        JournalFixtures.payload(JournalType.RECOVERY_DECISION, JournalClass.A);
     assertThatThrownBy(
             () ->
                 new JournalObject(
@@ -229,7 +283,7 @@ class JournalObjectBytesTest {
                     JournalType.RECOVERY_DECISION,
                     1,
                     AT,
-                    Map.of()))
+                    decision))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(
             () ->
@@ -238,7 +292,7 @@ class JournalObjectBytesTest {
                     JournalType.DELIVERY_INTENT,
                     1,
                     AT,
-                    Map.of()))
+                    intent().payload()))
         .isInstanceOf(IllegalArgumentException.class);
     // a type that both classes allow is accepted in a class b key
     assertThat(
@@ -247,7 +301,7 @@ class JournalObjectBytesTest {
                     JournalType.RECOVERY_DECISION,
                     1,
                     AT,
-                    Map.of())
+                    JournalFixtures.payload(JournalType.RECOVERY_DECISION, JournalClass.B))
                 .key()
                 .journalClass())
         .isEqualTo(JournalClass.B);
@@ -256,9 +310,10 @@ class JournalObjectBytesTest {
   @Test
   void theSchemaVersionAndTheClockInstantAreChecked() {
     JournalKey key = intent().key();
-    assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 0, AT, Map.of()))
+    Map<String, Object> payload = intent().payload();
+    assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 0, AT, payload))
         .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, -1, AT, Map.of()))
+    assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, -1, AT, payload))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(
             () ->
@@ -267,7 +322,7 @@ class JournalObjectBytesTest {
                     JournalType.DELIVERY_INTENT,
                     1,
                     Instant.parse("2026-10-19T12:00:00.123456789Z"),
-                    Map.of()))
+                    payload))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(
             () ->
@@ -276,51 +331,49 @@ class JournalObjectBytesTest {
                     JournalType.DELIVERY_INTENT,
                     1,
                     Instant.parse("+10000-01-01T00:00:00Z"),
-                    Map.of()))
+                    payload))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void thePayloadIsCopiedDeeplyAndImmutable() {
-    Map<String, Object> inner = new LinkedHashMap<>();
-    inner.put("k", "v");
-    List<Object> list = new ArrayList<>(List.of("a", inner));
-    Map<String, Object> source = new LinkedHashMap<>();
-    source.put("list", list);
-    source.put("small", 5);
+    List<Object> list = new ArrayList<>(List.of(JournalFixtures.hash("a")));
+    Map<String, Object> source =
+        new LinkedHashMap<>(JournalFixtures.payload(JournalType.DELIVERY_INTENT, JournalClass.A));
+    source.put("context_ids", list);
+    source.put("attempt_id", 5); // an Integer widens to Long
     JournalObject object =
         new JournalObject(intent().key(), JournalType.DELIVERY_INTENT, 1, AT, source);
     byte[] before = object.toBytes();
-    inner.put("k", "changed");
     list.add("more");
     source.put("late", 1L);
     assertThat(object.toBytes()).isEqualTo(before);
-    assertThat(object.payload()).containsEntry("small", 5L).doesNotContainKey("late");
+    assertThat(object.payload()).containsEntry("attempt_id", 5L).doesNotContainKey("late");
     assertThatThrownBy(() -> object.payload().put("x", 1L))
         .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> ((List<?>) object.payload().get("list")).clear())
+    assertThatThrownBy(() -> ((List<?>) object.payload().get("context_ids")).clear())
         .isInstanceOf(UnsupportedOperationException.class);
   }
 
   @Test
   void aPayloadValueThatIsNotCanonicalJsonIsRefused() {
     JournalKey key = intent().key();
-    Map<String, Object> withNull = new LinkedHashMap<>();
-    withNull.put("a", null);
-    Map<Object, Object> numericKey = new LinkedHashMap<>();
-    numericKey.put(1, "x");
-    List<Object> withNullElement = new ArrayList<>();
-    withNullElement.add(null);
-    for (Map<String, Object> payload :
-        List.<Map<String, Object>>of(
-            withNull,
-            Map.of("a", new Object()),
-            Map.of("a", 1.5d),
-            Map.of("a", List.of(new Object())),
-            Map.of("a", withNullElement),
-            Map.of("a", numericKey))) {
+    Map<String, Object> good = intent().payload();
+    for (Object bad : List.of(new Object(), 1.5d, List.of(new Object()), Map.of(1, "x"))) {
+      Map<String, Object> payload = new LinkedHashMap<>(good);
+      payload.put("file_name", bad);
       assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, payload))
           .isInstanceOf(IllegalArgumentException.class);
     }
+    Map<String, Object> withNull = new LinkedHashMap<>(good);
+    withNull.put("file_name", null);
+    assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, withNull))
+        .isInstanceOf(IllegalArgumentException.class);
+    List<Object> withNullElement = new ArrayList<>();
+    withNullElement.add(null);
+    Map<String, Object> inList = new LinkedHashMap<>(good);
+    inList.put("context_ids", withNullElement);
+    assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, inList))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 }

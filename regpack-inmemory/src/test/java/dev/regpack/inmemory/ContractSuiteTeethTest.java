@@ -19,6 +19,7 @@ import dev.regpack.inmemory.mutants.NonAtomicDecisionsLedgerContractTest;
 import dev.regpack.inmemory.mutants.NonAtomicReportableLedgerContractTest;
 import dev.regpack.inmemory.mutants.OutboxKindIgnoredLedgerContractTest;
 import dev.regpack.inmemory.mutants.OverwriteOnDuplicateEvidenceContractTest;
+import dev.regpack.inmemory.mutants.OverwriteOnDuplicateJournalContractTest;
 import dev.regpack.inmemory.mutants.PageUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.RedeliveryReingestsLedgerContractTest;
 import dev.regpack.inmemory.mutants.ShortenRetentionEvidenceContractTest;
@@ -55,6 +56,10 @@ class ContractSuiteTeethTest {
         OverwriteOnDuplicateEvidenceContractTest.class,
         Set.of("putSameKeyDifferentBytesIsIntegrityAlarmAndKeepsOriginal"));
     expected.put(ShortenRetentionEvidenceContractTest.class, Set.of("retentionCanOnlyBeExtended"));
+    // the journal-format contract (P3b1): a store that overwrites on a duplicate key
+    expected.put(
+        OverwriteOnDuplicateJournalContractTest.class,
+        Set.of("rewritingWithAnotherPayloadIsAnIntegrityAlarmAndKeepsTheFirst"));
     expected.put(
         IgnoreLeaseTokenLedgerContractTest.class,
         Set.of(
