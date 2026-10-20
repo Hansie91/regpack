@@ -1,0 +1,896 @@
+package dev.regpack.evidence.sealed;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIOException;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import dev.regpack.evidence.sealed.RecordingFileOps.Op;
+import dev.regpack.ports.evidence.EvidenceKey;
+import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+
+/**
+ * T6: one P-SEALED volume (D-E5, review focus EF7, EF10, EF11). Every test works in a
+ * {@code @TempDir}. The tests of the sync rules use a recorder that claims a platform with
+ * directory sync, so that they run on Windows too; what the real platform does is asserted
+ * separately.
+ */
+class SealedVolumeTest {
+  private static final EvidenceKey KEY = new EvidenceKey("landing/k1");
+  private static final byte[] FILE = "the object file, as the store built it".getBytes(UTF_8);
+  private static final long DEAD_PID = Long.MAX_VALUE;
+  private static final Instant UNTIL = Instant.parse("2030-01-01T00:00:00Z");
+
+  @TempDir Path root;
+
+  // ---------------------------------------------------------------- helpers
+
+  private static boolean posix() {
+    return FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+  }
+
+  private static byte[] bytes(String text) {
+    return text.getBytes(UTF_8);
+  }
+
+  private Path fresh(String name) throws IOException {
+    return Files.createDirectory(root.resolve(name));
+  }
+
+  /** Every regular file below {@code dir}, relative and with '/', sorted. */
+  private static List<String> files(Path dir) throws IOException {
+    try (Stream<Path> walk = Files.walk(dir)) {
+      return walk.filter(Files::isRegularFile)
+          .map(p -> dir.relativize(p).toString().replace('\\', '/'))
+          .sorted()
+          .toList();
+    }
+  }
+
+  private static List<String> temporaries(Path dir) throws IOException {
+    return files(dir).stream().filter(n -> n.contains("~tmp~")).toList();
+  }
+
+  /** The paths relative to {@code base} with '/', "." for the base itself, as a sorted set. */
+  private static Set<String> relative(Path base, List<Path> paths) {
+    Set<String> out = new TreeSet<>();
+    for (Path p : paths) {
+      String text = base.relativize(p).toString().replace('\\', '/');
+      out.add(text.isEmpty() ? "." : text);
+    }
+    return out;
+  }
+
+  private static <T> List<T> runTogether(List<Callable<T>> tasks) throws Exception {
+    ExecutorService pool = Executors.newFixedThreadPool(tasks.size());
+    try {
+      CountDownLatch start = new CountDownLatch(1);
+      List<Future<T>> futures = new ArrayList<>();
+      for (Callable<T> task : tasks) {
+        futures.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  return task.call();
+                }));
+      }
+      start.countDown();
+      List<T> results = new ArrayList<>();
+      for (Future<T> future : futures) {
+        results.add(future.get(60, TimeUnit.SECONDS));
+      }
+      return results;
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  // ---------------------------------------------------------------- publish and read
+
+  @Test
+  void publishThenReadReturnsTheSameBytes() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+
+    assertThat(volume.publish(KEY, FILE)).isTrue();
+
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    assertThat(volume.read(new EvidenceKey("landing/other"))).isEmpty();
+    assertThat(volume.read(new EvidenceKey("other/k1"))).isEmpty();
+    // the layout: root/o/<d-segments>/o-<last>
+    assertThat(files(root)).containsExactly("o/d-landing/o-k1");
+    assertThat(root.resolve("o/d-landing/o-k1")).hasBinaryContent(FILE);
+  }
+
+  @Test
+  void capitalsAndAFinalDotAreEncodedInTheFileNames() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    EvidenceKey key = new EvidenceKey("Landing/K.1/end.");
+
+    assertThat(volume.publish(key, FILE)).isTrue();
+
+    assertThat(files(root)).containsExactly("o/d-^landing/d-^k.1/o-end^0");
+    assertThat(volume.read(key)).isPresent();
+    assertThat(volume.read(new EvidenceKey("landing/k.1/end."))).isEmpty();
+  }
+
+  @Test
+  void aSecondPublishOfTheSameKeyReturnsFalseAndKeepsTheFirst() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    byte[] second = bytes("another object file for the same key");
+
+    assertThat(volume.publish(KEY, FILE)).isTrue();
+    assertThat(volume.publish(KEY, second)).isFalse();
+
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    assertThat(temporaries(root)).isEmpty();
+    assertThat(files(root)).containsExactly("o/d-landing/o-k1");
+  }
+
+  @Test
+  void publishForcesTheDataBeforeItLinksAndSyncsTheDirectoryAfter() throws IOException {
+    // what the real platform does: on Windows there is no directory sync to call
+    RecordingFileOps real = RecordingFileOps.over(FileOps.real());
+    new SealedVolume(fresh("real"), "vol-a", real).publish(KEY, FILE);
+
+    assertThat(real.ops()).containsSubsequence(Op.WRITE_AND_FORCE, Op.LINK);
+    if (real.supportsDirectorySync()) {
+      assertThat(real.ops()).containsSubsequence(Op.WRITE_AND_FORCE, Op.LINK, Op.SYNC_DIRECTORY);
+      assertThat(real.ops().get(real.ops().size() - 1)).isEqualTo(Op.SYNC_DIRECTORY);
+    } else {
+      assertThat(real.ops()).doesNotContain(Op.SYNC_DIRECTORY);
+    }
+
+    // the rule itself, on every platform: the data is forced into a temporary name, the link
+    // gives it its name, and only then is the directory synced
+    Path claimedRoot = fresh("claimed");
+    RecordingFileOps claimed = RecordingFileOps.claimingDirectorySync(FileOps.real());
+    new SealedVolume(claimedRoot, "vol-a", claimed).publish(KEY, FILE);
+
+    assertThat(claimed.ops()).containsSubsequence(Op.WRITE_AND_FORCE, Op.LINK, Op.SYNC_DIRECTORY);
+    assertThat(claimed.ops().get(claimed.ops().size() - 1)).isEqualTo(Op.SYNC_DIRECTORY);
+    RecordingFileOps.Call write = claimed.calls().get(claimed.ops().indexOf(Op.WRITE_AND_FORCE));
+    RecordingFileOps.Call link = claimed.calls().get(claimed.ops().indexOf(Op.LINK));
+    assertThat(write.path().getFileName().toString()).contains("~tmp~");
+    assertThat(link.source()).isEqualTo(write.path());
+    assertThat(link.path()).isEqualTo(claimedRoot.resolve("o/d-landing/o-k1"));
+    assertThat(temporaries(claimedRoot)).isEmpty();
+  }
+
+  @Test
+  void aFailureAtEachStepLeavesNoVisibleObjectUnlessTheLinkHappened() throws Exception {
+    // the temporary file cannot be written
+    Path writeFails = fresh("write-fails");
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true).failNext(Op.WRITE_AND_FORCE);
+    SealedVolume volume = new SealedVolume(writeFails, "vol-a", failing);
+    assertThatIOException().isThrownBy(() -> volume.publish(KEY, FILE));
+    assertThat(volume.read(KEY)).isEmpty();
+    assertThat(files(writeFails)).isEmpty();
+    assertThat(volume.publish(KEY, FILE)).as("the retry").isTrue();
+
+    // the write did its work and then reported an error: the temporary file is deleted
+    Path writeThenFails = fresh("write-then-fails");
+    failing = new FailingFileOps(FileOps.real(), true).failNextAfterEffect(Op.WRITE_AND_FORCE);
+    SealedVolume afterWrite = new SealedVolume(writeThenFails, "vol-a", failing);
+    assertThatIOException().isThrownBy(() -> afterWrite.publish(KEY, FILE));
+    assertThat(afterWrite.read(KEY)).isEmpty();
+    assertThat(files(writeThenFails)).isEmpty();
+
+    // the link fails before it acts
+    Path linkFails = fresh("link-fails");
+    failing = new FailingFileOps(FileOps.real(), true).failNext(Op.LINK);
+    SealedVolume noLink = new SealedVolume(linkFails, "vol-a", failing);
+    assertThatIOException().isThrownBy(() -> noLink.publish(KEY, FILE));
+    assertThat(noLink.read(KEY)).isEmpty();
+    assertThat(files(linkFails)).isEmpty();
+
+    // a file system without hard links: an IOException that names the volume, nothing left
+    Path unsupported = fresh("link-unsupported");
+    failing = new FailingFileOps(FileOps.real(), true).failNextAsUnsupported(Op.LINK);
+    SealedVolume unsupportedLink = new SealedVolume(unsupported, "vol-a", failing);
+    assertThatIOException()
+        .isThrownBy(() -> unsupportedLink.publish(KEY, FILE))
+        .withMessageContaining("vol-a");
+    assertThat(unsupportedLink.read(KEY)).isEmpty();
+    assertThat(files(unsupported)).isEmpty();
+
+    // the link happened and then an error was reported: the object is there, complete, and the
+    // temporary name is gone
+    Path linkThenFails = fresh("link-then-fails");
+    failing = new FailingFileOps(FileOps.real(), true).failNextAfterEffect(Op.LINK);
+    SealedVolume afterLink = new SealedVolume(linkThenFails, "vol-a", failing);
+    assertThatIOException().isThrownBy(() -> afterLink.publish(KEY, FILE));
+    assertThat(afterLink.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    assertThat(files(linkThenFails)).containsExactly("o/d-landing/o-k1");
+
+    // the directory sync fails after the link: the object is complete; a retry syncs the
+    // directory again and then returns false
+    Path syncFails = fresh("sync-fails");
+    FailingFileOps failingSync =
+        new FailingFileOps(FileOps.real(), true).failNext(Op.SYNC_DIRECTORY);
+    RecordingFileOps recorder = RecordingFileOps.over(failingSync);
+    SealedVolume afterSync = new SealedVolume(syncFails, "vol-a", recorder);
+    assertThatIOException().isThrownBy(() -> afterSync.publish(KEY, FILE));
+    assertThat(afterSync.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    recorder.clear();
+    assertThat(afterSync.publish(KEY, bytes("a retry"))).isFalse();
+    // the directory that holds the link and the directories that gained their first entry in the
+    // failed attempt are all synced again
+    assertThat(relative(syncFails, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder("o/d-landing", "o", ".");
+    assertThat(afterSync.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    assertThat(temporaries(syncFails)).isEmpty();
+  }
+
+  @Test
+  void aTemporaryNameThatAnotherWriterTookIsSkippedAndItsFileIsNeverTouched() throws IOException {
+    FailingFileOps taken = new FailingFileOps(FileOps.real(), true).nameTaken(1);
+    RecordingFileOps recorder = RecordingFileOps.over(taken);
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+
+    assertThat(volume.publish(KEY, FILE)).isTrue();
+
+    // the first name was taken, the second was free
+    assertThat(recorder.paths(Op.WRITE_AND_FORCE)).hasSize(2).doesNotHaveDuplicates();
+    assertThat(taken.planted()).containsExactly(recorder.paths(Op.WRITE_AND_FORCE).get(0));
+    // the foreign file is still there, byte for byte, and was never deleted; the call's own
+    // temporary file was
+    Path foreign = taken.planted().get(0);
+    assertThat(foreign).hasBinaryContent(FailingFileOps.FOREIGN);
+    assertThat(recorder.paths(Op.DELETE)).doesNotContain(foreign);
+    assertThat(temporaries(root)).hasSize(1);
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+  }
+
+  @Test
+  void whenEveryTemporaryNameIsTakenThePublishGivesUpAfterEightTriesAndDeletesNothing()
+      throws IOException {
+    FailingFileOps taken = new FailingFileOps(FileOps.real(), true).nameAlwaysTaken();
+    RecordingFileOps recorder = RecordingFileOps.over(taken);
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+
+    assertThatIOException()
+        .isThrownBy(() -> volume.publish(KEY, FILE))
+        .withMessageContaining("vol-a")
+        .withCauseInstanceOf(FileAlreadyExistsException.class);
+
+    assertThat(recorder.paths(Op.WRITE_AND_FORCE)).hasSize(8).doesNotHaveDuplicates();
+    assertThat(recorder.ops()).doesNotContain(Op.LINK, Op.DELETE);
+    assertThat(taken.planted()).hasSize(8);
+    for (Path foreign : taken.planted()) {
+      assertThat(foreign).hasBinaryContent(FailingFileOps.FOREIGN);
+    }
+    assertThat(volume.read(KEY)).isEmpty();
+    assertThat(files(root)).hasSize(8).allMatch(name -> name.contains("~tmp~"));
+  }
+
+  @Test
+  void aFailedReplaceOfAMetaLeavesTheOldMetaAndNoTemporaryFile() throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true);
+    SealedVolume volume = new SealedVolume(root, "vol-a", failing);
+    SealedFormat.Meta old = new SealedFormat.Meta(1, "journal", UNTIL, false);
+    SealedFormat.Meta higher = new SealedFormat.Meta(2, "journal", UNTIL.plusSeconds(30), true);
+    volume.publish(KEY, FILE);
+    assertThat(volume.writeMeta(KEY, old)).isTrue();
+
+    // the replace fails before it acts: the old meta stays, the temporary file is removed
+    failing.failNext(Op.REPLACE);
+    assertThatIOException().isThrownBy(() -> volume.writeMeta(KEY, higher));
+    assertThat(volume.readMeta(KEY)).contains(old);
+    assertThat(temporaries(root)).isEmpty();
+
+    // the replace happened and then reported an error: the new meta is there, nothing is left
+    failing.failNextAfterEffect(Op.REPLACE);
+    assertThatIOException().isThrownBy(() -> volume.writeMeta(KEY, higher));
+    assertThat(volume.readMeta(KEY)).contains(higher);
+    assertThat(temporaries(root)).isEmpty();
+    assertThat(volume.writeMeta(KEY, higher)).as("the retry").isFalse();
+    assertThat(files(root)).containsExactly("o/d-landing/m-k1", "o/d-landing/o-k1");
+  }
+
+  @Test
+  void aSecondNameThatShowsOtherDataFailsTheHardLinkCheck() throws IOException {
+    Path dir = fresh("liar");
+    FailingFileOps liar =
+        new FailingFileOps(FileOps.real())
+            .readsAs(p -> p.getFileName().toString().startsWith(".selftest"), bytes("other data"));
+
+    assertThatIOException()
+        .isThrownBy(() -> new SealedVolume(dir, "vol-b", liar).checkHardLinks())
+        .withMessageContaining("vol-b");
+
+    assertThat(files(dir)).as("no self-test file is left").isEmpty();
+  }
+
+  @Test
+  void aTemporaryNameThatCannotBeRemovedAfterTheLinkDoesNotUndoThePublish() throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true).failNext(Op.DELETE);
+    SealedVolume volume = new SealedVolume(root, "vol-a", failing);
+
+    assertThat(volume.publish(KEY, FILE)).isTrue();
+
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    assertThat(volume.keys("")).containsExactly(KEY);
+    assertThat(temporaries(root)).as("left for the sweep").hasSize(1);
+  }
+
+  @Test
+  void aFailedCleanupIsSuppressedUnderTheFailureThatCausedIt() throws IOException {
+    FailingFileOps failing =
+        new FailingFileOps(FileOps.real(), true).failNext(Op.LINK).failNext(Op.DELETE);
+    SealedVolume volume = new SealedVolume(root, "vol-a", failing);
+
+    assertThatThrownBy(() -> volume.publish(KEY, FILE))
+        .isInstanceOf(IOException.class)
+        .satisfies(e -> assertThat(e.getSuppressed()).hasSize(1));
+
+    assertThat(volume.read(KEY)).isEmpty();
+    assertThat(temporaries(root)).hasSize(1);
+  }
+
+  @Test
+  void aDirectoryThatCannotBeCreatedOrListedIsAnIOExceptionAndNothingIsLeft() throws IOException {
+    FailingFileOps failing =
+        new FailingFileOps(FileOps.real(), true).failNext(Op.CREATE_DIRECTORIES);
+    SealedVolume volume = new SealedVolume(root, "vol-a", failing);
+
+    assertThatIOException().isThrownBy(() -> volume.publish(KEY, FILE));
+    assertThat(volume.read(KEY)).isEmpty();
+    assertThat(files(root)).isEmpty();
+    assertThat(volume.publish(KEY, FILE)).as("the retry").isTrue();
+
+    failing.failNext(Op.LIST);
+    assertThatIOException().isThrownBy(() -> volume.keys(""));
+    assertThat(volume.keys("")).containsExactly(KEY);
+  }
+
+  @Test
+  void anExistingKeyIsResyncedBeforeFalseIsReturned() throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true);
+    RecordingFileOps recorder = RecordingFileOps.over(failing);
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+    byte[] second = bytes("a second writer");
+    assertThat(volume.publish(KEY, FILE)).isTrue();
+
+    recorder.clear();
+    assertThat(volume.publish(KEY, second)).isFalse();
+    assertThat(recorder.ops()).containsSubsequence(Op.LINK, Op.SYNC_DIRECTORY);
+    // the directory that holds the name and, since a refusal may follow a restart that lost the
+    // bookkeeping, every ancestor up to the root (each once; never the parent of the root)
+    assertThat(recorder.paths(Op.SYNC_DIRECTORY)).doesNotHaveDuplicates();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder("o/d-landing", "o", ".");
+
+    // a sync that fails makes the put throw: presence alone is never an acknowledgement
+    failing.failNext(Op.SYNC_DIRECTORY);
+    assertThatIOException().isThrownBy(() -> volume.publish(KEY, second));
+    assertThat(volume.publish(KEY, second)).isFalse();
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+  }
+
+  @Test
+  void anExistingKeyFoundAfterARestartSyncsTheWholeChainAndFailsWhenAnySyncFails()
+      throws IOException {
+    // an earlier process made the directories and the object: nothing in this JVM remembers
+    // that a directory was new, so the refusal has to sync the whole chain itself
+    Path holder = Files.createDirectories(root.resolve("o/d-a/d-b"));
+    Files.write(holder.resolve("o-k"), FILE);
+    EvidenceKey key = new EvidenceKey("a/b/k");
+    byte[] second = bytes("another writer");
+
+    RecordingFileOps recorder = RecordingFileOps.claimingDirectorySync(FileOps.real());
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+    assertThat(volume.publish(key, second)).isFalse();
+    assertThat(recorder.paths(Op.SYNC_DIRECTORY)).doesNotHaveDuplicates();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder("o/d-a/d-b", "o/d-a", "o", ".");
+
+    // a sync that fails on any directory of the chain (here the root) is not an acknowledgement
+    for (String name : List.of("o/d-a/d-b", "o/d-a", "o", "")) {
+      Path failing = name.isEmpty() ? root : root.resolve(name);
+      FailingFileOps ops =
+          new FailingFileOps(FileOps.real(), true).failNext(Op.SYNC_DIRECTORY, failing::equals);
+      SealedVolume failingVolume = new SealedVolume(root, "vol-a", ops);
+      assertThatIOException()
+          .as("sync of '%s'", name)
+          .isThrownBy(() -> failingVolume.publish(key, second));
+    }
+    assertThat(root.resolve("o/d-a/d-b/o-k")).hasBinaryContent(FILE);
+    assertThat(temporaries(root)).isEmpty();
+  }
+
+  @Test
+  void publishSyncsEveryDirectoryThatGainedAnEntry() throws IOException {
+    RecordingFileOps recorder = RecordingFileOps.claimingDirectorySync(FileOps.real());
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+
+    // an empty volume and four segments: o, d-a, d-b and d-c are new, so the root, o, d-a and
+    // d-b gained an entry, and d-c holds the link
+    assertThat(volume.publish(new EvidenceKey("a/b/c/d"), FILE)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder(".", "o", "o/d-a", "o/d-a/d-b", "o/d-a/d-b/d-c");
+
+    // the same directory: only the directory that holds the link
+    recorder.clear();
+    assertThat(volume.publish(new EvidenceKey("a/b/c/e"), FILE)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY))).containsExactly("o/d-a/d-b/d-c");
+
+    // one new directory below an old one: the old one gained an entry
+    recorder.clear();
+    assertThat(volume.publish(new EvidenceKey("a/b/x/y"), FILE)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder("o/d-a/d-b", "o/d-a/d-b/d-x");
+
+    // a key of one segment lives in o itself
+    recorder.clear();
+    assertThat(volume.publish(new EvidenceKey("top"), FILE)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY))).containsExactly("o");
+  }
+
+  @Test
+  void aRetryAfterAFailedSyncOfAParentDirectoryStillSyncsIt() throws IOException {
+    Path o = root.resolve("o");
+    FailingFileOps failing =
+        new FailingFileOps(FileOps.real(), true).failNext(Op.SYNC_DIRECTORY, p -> p.equals(o));
+    RecordingFileOps recorder = RecordingFileOps.over(failing);
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+    EvidenceKey key = new EvidenceKey("a/b");
+
+    // o is new: the root gained an entry, and the sync of o (for d-a) fails
+    assertThatIOException().isThrownBy(() -> volume.publish(key, FILE));
+
+    recorder.clear();
+    assertThat(volume.publish(key, FILE)).isFalse();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder("o/d-a", "o", ".");
+
+    // once synced, a further publish does not repeat it
+    recorder.clear();
+    assertThat(volume.publish(new EvidenceKey("a/c"), FILE)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY))).containsExactly("o/d-a");
+  }
+
+  @Test
+  void concurrentPublishesIntoNewDirectoriesSyncEveryParent() throws Exception {
+    RecordingFileOps recorder = RecordingFileOps.claimingDirectorySync(FileOps.real());
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+    List<Callable<Boolean>> tasks = new ArrayList<>();
+    for (int i = 0; i < 16; i++) {
+      EvidenceKey key = new EvidenceKey("x/" + (i % 2 == 0 ? "y" : "z") + "/k" + i);
+      tasks.add(() -> volume.publish(key, bytes("object " + key.path())));
+    }
+
+    assertThat(runTogether(tasks)).containsOnly(true);
+
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .contains(".", "o", "o/d-x", "o/d-x/d-y", "o/d-x/d-z");
+    assertThat(temporaries(root)).isEmpty();
+    assertThat(volume.keys("x/")).hasSize(16);
+  }
+
+  // ---------------------------------------------------------------- concurrency
+
+  @Test
+  void twoVolumeInstancesOverOneDirectoryNeverShareATempName() throws Exception {
+    RecordingFileOps recorder = RecordingFileOps.over(FileOps.real());
+    SealedVolume first = new SealedVolume(root, "vol-a", recorder);
+    SealedVolume second = new SealedVolume(root, "vol-a", recorder);
+    List<Callable<Boolean>> tasks = new ArrayList<>();
+    for (int i = 0; i < 16; i++) {
+      SealedVolume volume = i % 2 == 0 ? first : second;
+      byte[] file = bytes("writer " + i);
+      tasks.add(() -> volume.publish(KEY, file));
+    }
+
+    List<Boolean> results = runTogether(tasks);
+
+    assertThat(results.stream().filter(r -> r).count()).isEqualTo(1);
+    List<Path> temporaryNames = recorder.paths(Op.WRITE_AND_FORCE);
+    assertThat(temporaryNames).hasSize(16).doesNotHaveDuplicates();
+    assertThat(temporaries(root)).isEmpty();
+  }
+
+  @Test
+  void concurrentPublishesOfOneKeyHaveOneWinner() throws Exception {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    List<byte[]> candidates = new ArrayList<>();
+    List<Callable<Boolean>> tasks = new ArrayList<>();
+    for (int i = 0; i < 16; i++) {
+      // different lengths and contents, so that a torn mixture of two writers would show
+      byte[] file = ("writer " + i + " ".repeat(i * 100) + "|end").getBytes(UTF_8);
+      candidates.add(file);
+      tasks.add(() -> volume.publish(KEY, file));
+    }
+
+    List<Boolean> results = runTogether(tasks);
+
+    assertThat(results.stream().filter(r -> r).count()).isEqualTo(1);
+    int winner = results.indexOf(true);
+    assertThat(volume.read(KEY))
+        .hasValueSatisfying(b -> assertThat(b).isEqualTo(candidates.get(winner)));
+    assertThat(temporaries(root)).isEmpty();
+  }
+
+  // ---------------------------------------------------------------- permissions
+
+  @Test
+  void filesAndDirectoriesAreOwnerOnlyOnPosix() throws IOException {
+    Assumptions.assumeTrue(posix(), "the POSIX attribute view is needed");
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    EvidenceKey key = new EvidenceKey("a/b/c");
+
+    volume.writeMarker();
+    volume.publish(key, FILE);
+    volume.writeMeta(key, new SealedFormat.Meta(1, "journal", UNTIL, false));
+
+    Set<PosixFilePermission> directory = PosixFilePermissions.fromString("rwx------");
+    Set<PosixFilePermission> file = PosixFilePermissions.fromString("rw-------");
+    for (String name : List.of("o", "o/d-a", "o/d-a/d-b")) {
+      assertThat(Files.getPosixFilePermissions(root.resolve(name))).as(name).isEqualTo(directory);
+    }
+    for (String name : List.of(".sealed-volume", "o/d-a/d-b/o-c", "o/d-a/d-b/m-c")) {
+      assertThat(Files.getPosixFilePermissions(root.resolve(name))).as(name).isEqualTo(file);
+    }
+  }
+
+  // ---------------------------------------------------------------- listing and temporaries
+
+  @Test
+  void temporaryFilesAreNeverListedOrRead() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    EvidenceKey kept = new EvidenceKey("a/k");
+    volume.publish(kept, FILE);
+    Path dir = root.resolve("o/d-a");
+    Files.write(dir.resolve("o-z~tmp~1~1"), FILE);
+    Files.write(dir.resolve("m-z~tmp~1~1"), bytes("not a meta"));
+    Files.write(dir.resolve("o-k~tmp~1~2"), bytes("a second copy of a key, half written"));
+    Files.write(dir.resolve("stray.txt"), bytes("unknown"));
+    Files.write(dir.resolve("o-"), bytes("too short"));
+    // a raw capital is not an encoded name (and Q, not K: o-K and o-k are one file on NTFS)
+    Files.write(dir.resolve("o-Q"), bytes("not an encoded name: a raw capital"));
+    Files.createDirectory(dir.resolve("d-zzz~tmp~1~3"));
+    Files.createDirectory(dir.resolve("unknown"));
+
+    assertThat(volume.keys("")).containsExactly(kept);
+    assertThat(volume.read(new EvidenceKey("a/z"))).isEmpty();
+    assertThat(volume.readMeta(new EvidenceKey("a/z"))).isEmpty();
+    assertThat(volume.read(kept)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+  }
+
+  @Test
+  void namesThatDecodeToADotSegmentAreSkippedNotFatal() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    EvidenceKey kept = new EvidenceKey("a/k");
+    volume.publish(kept, FILE);
+    Path dir = root.resolve("o/d-a");
+    // "o-^0" and "o-.^0" are canonical encodings of the segments "." and "..": SealedNames
+    // accepts them, EvidenceKey does not, and one such entry must not break the listing
+    Files.write(dir.resolve("o-^0"), FILE);
+    Files.write(dir.resolve("o-.^0"), FILE);
+    Files.createDirectories(dir.resolve("d-^0"));
+    Files.write(dir.resolve("d-^0/o-x"), FILE);
+    Files.createDirectories(dir.resolve("d-.^0"));
+    Files.write(dir.resolve("d-.^0/o-x"), FILE);
+    // and the same at the top of the object tree
+    Files.write(root.resolve("o/o-^0"), FILE);
+    Files.createDirectories(root.resolve("o/d-.^0"));
+    Files.write(root.resolve("o/d-.^0/o-x"), FILE);
+
+    assertThat(volume.keys("")).containsExactly(kept);
+    assertThat(volume.keys("a/")).containsExactly(kept);
+    assertThat(volume.keys("a/k")).containsExactly(kept);
+    assertThat(volume.isEmpty()).isFalse();
+    assertThat(volume.sweepTemporaries()).isZero();
+    assertThat(volume.read(kept)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+  }
+
+  @Test
+  void keysOfAPrefixAreDecodedFilteredAndComplete() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    List<String> all =
+        List.of(
+            "a/b",
+            "a/b/c",
+            "a/B",
+            "a/Bc/d",
+            "a/x",
+            "ab/c",
+            "z",
+            "Landing/k1",
+            "a/b.",
+            "a/b.c",
+            "a/b/c/d/e");
+    for (String path : all) {
+      volume.publish(new EvidenceKey(path), bytes(path));
+    }
+    // a meta file is not a key
+    volume.writeMeta(new EvidenceKey("a/b"), new SealedFormat.Meta(1, "journal", UNTIL, true));
+
+    for (String prefix :
+        List.of(
+            "",
+            "a",
+            "a/",
+            "a/b",
+            "a/b/",
+            "a/B",
+            "a/Bc",
+            "a/Bc/",
+            "a/Bc/d",
+            "a/b.",
+            "ab",
+            "Landing/",
+            "land",
+            "z",
+            "zz",
+            "a/b/c/",
+            "x",
+            "a/b/c/d/e",
+            "a/b/c/d/e/",
+            "A")) {
+      List<String> expected = all.stream().filter(k -> k.startsWith(prefix)).sorted().toList();
+      List<String> actual = volume.keys(prefix).stream().map(EvidenceKey::path).sorted().toList();
+      assertThat(actual).as("prefix '%s'", prefix).isEqualTo(expected);
+    }
+    // the key that is a prefix of another is listed with the longer one
+    assertThat(volume.keys("a/b").stream().map(EvidenceKey::path))
+        .contains("a/b", "a/b/c", "a/b.", "a/b.c");
+    // an empty volume
+    assertThat(new SealedVolume(fresh("empty"), "vol-b", FileOps.real()).keys("")).isEmpty();
+  }
+
+  // ---------------------------------------------------------------- meta
+
+  @Test
+  void metaIsReplacedOnlyByAHigherRevision() throws IOException {
+    RecordingFileOps recorder = RecordingFileOps.claimingDirectorySync(FileOps.real());
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+    SealedFormat.Meta first = new SealedFormat.Meta(1, "journal", UNTIL, false);
+    SealedFormat.Meta sameRev = new SealedFormat.Meta(1, "journal", UNTIL.plusSeconds(60), true);
+    SealedFormat.Meta lower = new SealedFormat.Meta(0, "journal", UNTIL.plusSeconds(90), true);
+    SealedFormat.Meta higher = new SealedFormat.Meta(2, "journal", UNTIL.plusSeconds(30), true);
+    volume.publish(KEY, FILE);
+    assertThat(volume.readMeta(KEY)).isEmpty();
+
+    assertThat(volume.writeMeta(KEY, first)).isTrue();
+    assertThat(volume.readMeta(KEY)).contains(first);
+
+    recorder.clear();
+    assertThat(volume.writeMeta(KEY, sameRev)).as("the same revision").isFalse();
+    assertThat(volume.writeMeta(KEY, lower)).as("a lower revision").isFalse();
+    assertThat(volume.readMeta(KEY)).contains(first);
+    // a refusal is acknowledged on presence, so the directory is synced first
+    assertThat(recorder.ops()).contains(Op.SYNC_DIRECTORY);
+    assertThat(recorder.ops()).doesNotContain(Op.REPLACE);
+
+    recorder.clear();
+    assertThat(volume.writeMeta(KEY, higher)).isTrue();
+    assertThat(volume.readMeta(KEY)).contains(higher);
+    assertThat(recorder.ops())
+        .containsSubsequence(Op.WRITE_AND_FORCE, Op.REPLACE, Op.SYNC_DIRECTORY);
+
+    // the object is untouched, nothing is left over, and a meta is not a key
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    assertThat(volume.keys("")).containsExactly(KEY);
+    assertThat(files(root)).containsExactly("o/d-landing/m-k1", "o/d-landing/o-k1");
+  }
+
+  @Test
+  void aCorruptMetaIsNeverOverwritten() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    volume.publish(KEY, FILE);
+    Path meta = root.resolve("o/d-landing/m-k1");
+    byte[] damaged = bytes("RPMETA01 this is not a meta body");
+    Files.write(meta, damaged);
+
+    assertThatThrownBy(() -> volume.readMeta(KEY))
+        .isInstanceOf(SealedFormat.CorruptException.class);
+    assertThatThrownBy(
+            () -> volume.writeMeta(KEY, new SealedFormat.Meta(9, "journal", UNTIL, true)))
+        .isInstanceOf(SealedFormat.CorruptException.class);
+    assertThat(meta).hasBinaryContent(damaged);
+    assertThat(temporaries(root)).isEmpty();
+  }
+
+  @Test
+  void concurrentWritesOfOneMetaRevisionHaveOneWinner() throws Exception {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    volume.publish(KEY, FILE);
+    List<SealedFormat.Meta> candidates = new ArrayList<>();
+    List<Callable<Boolean>> tasks = new ArrayList<>();
+    for (int i = 0; i < 16; i++) {
+      SealedFormat.Meta meta =
+          new SealedFormat.Meta(5, "journal", UNTIL.plusSeconds(i), i % 2 == 0);
+      candidates.add(meta);
+      tasks.add(() -> volume.writeMeta(KEY, meta));
+    }
+
+    List<Boolean> results = runTogether(tasks);
+
+    assertThat(results.stream().filter(r -> r).count()).isEqualTo(1);
+    assertThat(volume.readMeta(KEY)).contains(candidates.get(results.indexOf(true)));
+    assertThat(temporaries(root)).isEmpty();
+  }
+
+  @Test
+  @Timeout(120)
+  void aMetaReadWhileItIsBeingReplacedIsAlwaysAWholeMeta() throws Exception {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    volume.publish(KEY, FILE);
+    volume.writeMeta(KEY, new SealedFormat.Meta(1, "journal", UNTIL, false));
+    AtomicBoolean writing = new AtomicBoolean(true);
+    CountDownLatch readerRunning = new CountDownLatch(1);
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      Future<Long> reader =
+          pool.submit(
+              () -> {
+                long reads = 0;
+                long lastRev = 0;
+                while (writing.get()) {
+                  // a torn or missing meta would throw here, a stale one would show a lower rev
+                  long rev = volume.readMeta(KEY).orElseThrow().rev();
+                  assertThat(rev).isGreaterThanOrEqualTo(lastRev);
+                  lastRev = rev;
+                  reads++;
+                  readerRunning.countDown();
+                  // a short pause, so that the writer is never starved of the lock
+                  LockSupport.parkNanos(20_000);
+                }
+                return reads;
+              });
+      // the writer starts only once the reader is reading, so the two always overlap
+      assertThat(readerRunning.await(60, TimeUnit.SECONDS)).isTrue();
+      for (long rev = 2; rev <= 150; rev++) {
+        assertThat(volume.writeMeta(KEY, new SealedFormat.Meta(rev, "journal", UNTIL, false)))
+            .isTrue();
+      }
+      writing.set(false);
+      assertThat(reader.get(60, TimeUnit.SECONDS)).isPositive();
+    } finally {
+      writing.set(false);
+      pool.shutdownNow();
+    }
+    assertThat(volume.readMeta(KEY).orElseThrow().rev()).isEqualTo(150);
+    assertThat(temporaries(root)).isEmpty();
+  }
+
+  // ---------------------------------------------------------------- sweep
+
+  @Test
+  void sweepRemovesTemporariesOfDeadProcessesOnly() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    volume.publish(new EvidenceKey("a/k"), FILE);
+    long self = ProcessHandle.current().pid();
+    Path dir = root.resolve("o/d-a");
+    String dead = "~tmp~" + DEAD_PID + "~";
+    Files.write(dir.resolve("o-x" + dead + "1"), FILE);
+    Files.write(dir.resolve("m-x" + dead + "2"), FILE);
+    Files.write(root.resolve(".selftest" + dead + "3"), FILE);
+    Files.write(root.resolve("o").resolve("o-top" + dead + "4"), FILE);
+    // a live process keeps its files; names that are not ours are left alone
+    Files.write(dir.resolve("o-y~tmp~" + self + "~1"), FILE);
+    Files.write(dir.resolve("o-w~tmp~abc~1"), FILE);
+    Files.write(dir.resolve("o-v~tmp~" + DEAD_PID), FILE);
+    Files.write(dir.resolve("o-u~tmp~+5~1"), FILE);
+    Files.write(dir.resolve("stray.txt"), FILE);
+
+    assertThat(volume.sweepTemporaries()).isEqualTo(4);
+
+    assertThat(files(root))
+        .containsExactlyInAnyOrder(
+            "o/d-a/o-k",
+            "o/d-a/o-y~tmp~" + self + "~1",
+            "o/d-a/o-w~tmp~abc~1",
+            "o/d-a/o-v~tmp~" + DEAD_PID,
+            "o/d-a/o-u~tmp~+5~1",
+            "o/d-a/stray.txt");
+    assertThat(volume.sweepTemporaries()).as("idempotent").isZero();
+    assertThat(volume.read(new EvidenceKey("a/k"))).isPresent();
+  }
+
+  // ---------------------------------------------------------------- hard links, marker
+
+  @Test
+  void aVolumeThatCannotHardLinkIsRefused() throws IOException {
+    // a real file system that can: nothing is left behind
+    SealedVolume good = new SealedVolume(fresh("good"), "vol-a", FileOps.real());
+    good.checkHardLinks();
+    assertThat(files(root.resolve("good"))).isEmpty();
+
+    // a volume whose link is unsupported, and one whose link fails: the message names the volume
+    List<FailingFileOps> failures =
+        List.of(
+            new FailingFileOps(FileOps.real()).failNextAsUnsupported(Op.LINK),
+            new FailingFileOps(FileOps.real()).failNext(Op.LINK));
+    for (int i = 0; i < failures.size(); i++) {
+      Path bad = fresh("bad-" + i);
+      SealedVolume volume = new SealedVolume(bad, "vol-b", failures.get(i));
+      assertThatIOException().isThrownBy(volume::checkHardLinks).withMessageContaining("vol-b");
+      assertThat(files(bad)).as("no self-test file is left").isEmpty();
+    }
+  }
+
+  @Test
+  void markerRoundTripsAndAnEmptyRootIsRecognised() throws IOException {
+    Path volumeRoot = root.resolve("not-yet-created");
+    SealedVolume volume = new SealedVolume(volumeRoot, "vol-a", FileOps.real());
+    assertThat(volume.isEmpty()).as("an absent root").isTrue();
+    assertThat(volume.markerId()).isEmpty();
+
+    volume.writeMarker();
+    assertThat(volume.markerId()).contains("vol-a");
+    assertThat(volume.isEmpty()).as("a marker is an entry").isFalse();
+    assertThat(volumeRoot.resolve(".sealed-volume")).hasBinaryContent(bytes("vol-a"));
+    volume.writeMarker(); // the same marker again changes nothing
+    assertThat(volume.markerId()).contains("vol-a");
+
+    // another volume never replaces it
+    SealedVolume other = new SealedVolume(volumeRoot, "vol-b", FileOps.real());
+    assertThat(other.markerId()).as("what is stored, whoever asks").contains("vol-a");
+    assertThatIOException().isThrownBy(other::writeMarker).withMessageContaining("vol-b");
+    assertThat(volume.markerId()).contains("vol-a");
+    assertThat(temporaries(volumeRoot)).isEmpty();
+
+    // an empty root: temporaries and empty object directories do not count
+    Path empty = fresh("empty");
+    SealedVolume fresh = new SealedVolume(empty, "vol-c", FileOps.real());
+    assertThat(fresh.isEmpty()).isTrue();
+    Files.write(empty.resolve("x~tmp~1~1"), bytes("left by a crash"));
+    Files.createDirectories(empty.resolve("o/d-a/d-b"));
+    assertThat(fresh.isEmpty()).isTrue();
+    fresh.publish(new EvidenceKey("a/b/c"), FILE);
+    assertThat(fresh.isEmpty()).isFalse();
+
+    // anything else is an entry
+    Path stray = fresh("stray");
+    Files.write(stray.resolve("notes.txt"), bytes("not ours"));
+    assertThat(new SealedVolume(stray, "vol-d", FileOps.real()).isEmpty()).isFalse();
+  }
+
+  @Test
+  void aMarkerThatIsNotAVolumeMarkerIsRefused() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    Files.write(root.resolve(".sealed-volume"), new byte[10_000]);
+
+    assertThatIOException().isThrownBy(volume::markerId).withMessageContaining("vol-a");
+  }
+
+  @Test
+  void aVolumeNeedsAnAbsoluteRootAndAValidId() {
+    FileOps ops = FileOps.real();
+    assertThatIllegalArgumentException()
+        .isThrownBy(() -> new SealedVolume(Path.of("relative"), "vol-a", ops));
+    for (String id : List.of("", "A", "a b", "a/b", "a_b", "x".repeat(33))) {
+      assertThatIllegalArgumentException()
+          .as("id '%s'", id)
+          .isThrownBy(() -> new SealedVolume(root, id, ops));
+    }
+    assertThat(new SealedVolume(root, "x".repeat(32), ops)).isNotNull();
+    assertThat(new SealedVolume(root, "0-9-a", ops)).isNotNull();
+  }
+}
