@@ -704,7 +704,7 @@ class SealedVolumeTest {
     SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
     volume.publish(KEY, FILE);
     Path meta = root.resolve("o/d-landing/m-k1");
-    byte[] damaged = bytes("RPMETA01 this is not a meta body");
+    byte[] damaged = bytes("RPMETA02 this is not a meta body");
     Files.write(meta, damaged);
 
     assertThatThrownBy(() -> volume.readMeta(KEY))

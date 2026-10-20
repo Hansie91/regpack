@@ -1,5 +1,6 @@
 package dev.regpack.ports.evidence.journal;
 
+import dev.regpack.model.Sha256;
 import dev.regpack.ports.evidence.EvidenceKey;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -13,11 +14,15 @@ import java.util.regex.Pattern;
  * :08d}/{seq:016d}}. Zero padding makes the text order of a listing the numeric order. {@link
  * #parse} is the inverse of {@link #evidenceKey()}; two different keys never share an {@link
  * EvidenceKey}.
+ *
+ * <p>The shard keeps a directory small. A numeric subject (an attempt id) is {@code n} and the
+ * first eight digits of its padded form, which groups 10,000 consecutive ids. Any other subject (a
+ * {@code BatchAdmitted} batch id is {@code <64 hex>:<slice>}, never numeric) is {@code x} and the
+ * first byte of the SHA-256 of the subject text in UTF-8, as two lower-case hex digits: 256 shards
+ * (for example {@code x3f}), so that 10,000 batches a day do not pile up in one directory. {@link
+ * #parse} re-renders the key it parsed and refuses any other shard.
  */
 public sealed interface JournalKey permits JournalKey.ClassA, JournalKey.ClassB {
-  /** The largest epoch, ordinal or seq: twelve digits. */
-  long MAX_NUMBER = 999_999_999_999L;
-
   JournalScope scope();
 
   long restoreEpoch();
@@ -93,11 +98,20 @@ public sealed interface JournalKey permits JournalKey.ClassA, JournalKey.ClassB 
     return "0".repeat(width - digits.length()) + digits;
   }
 
+  /** The largest epoch, ordinal or seq: twelve digits. */
   private static void requireNumber(String field, long value, long min) {
-    if (value < min || value > MAX_NUMBER) {
+    long max = 999_999_999_999L;
+    if (value < min || value > max) {
       throw new IllegalArgumentException(
-          field + " must be " + min + " to " + MAX_NUMBER + " (at most 12 digits)");
+          field + " must be " + min + " to " + max + " (at most 12 digits)");
     }
+  }
+
+  /**
+   * {@code x} and the first byte of the SHA-256 of the subject text, as two lower-case hex digits.
+   */
+  private static String hashShard(String subject) {
+    return "x" + Sha256.ofUtf8(subject).hex().substring(0, 2);
   }
 
   /**
@@ -152,7 +166,7 @@ public sealed interface JournalKey permits JournalKey.ClassA, JournalKey.ClassB 
     public EvidenceKey evidenceKey() {
       boolean numeric = DIGITS.matcher(subjectId).matches();
       String padded = numeric ? pad(Long.parseLong(subjectId), 12) : subjectId.replace(':', '=');
-      String shard = numeric ? "n" + padded.substring(0, 8) : "x";
+      String shard = numeric ? "n" + padded.substring(0, 8) : hashShard(subjectId);
       return EvidenceKey.of(
           "journal",
           scope.value(),

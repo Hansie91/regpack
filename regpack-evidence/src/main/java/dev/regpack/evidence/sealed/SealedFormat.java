@@ -9,8 +9,9 @@ import dev.regpack.ports.evidence.EvidenceKey;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -18,21 +19,34 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * The files of P-SEALED (D-E5). An object file is {@code "RPSEAL01"}, a big-endian int32 header
- * length, the canonical JSON header (UTF-8) and the payload. A meta file is {@code "RPMETA01"} and
- * the canonical JSON of the {@link Meta}. Both are strict: a header has exactly its fields and is
- * the canonical text of its own values, so there is one byte string per header and a changed byte
- * is found. The header carries the key, so a file copied under another name is found too. Errors
- * name a reason code only (Convention 8 of P3b1), never a key or a payload byte.
+ * The files of P-SEALED (D-E5). An object file is {@code "RPSEAL02"}, a big-endian int32 header
+ * length, the canonical JSON header (UTF-8), the payload and a 32-byte SHA-256 trailer over all the
+ * bytes before it. A meta file is {@code "RPMETA02"}, the canonical JSON of the {@link Meta} and
+ * the same kind of trailer. Both are strict: a header has exactly its fields and is the canonical
+ * text of its own values, so there is one byte string per header. The header carries the key, so a
+ * file copied under another name is found too, and its own payload hash and length, which are
+ * checked as well. Errors name a reason code only (Convention 8 of P3b1), never a key or a payload
+ * byte.
+ *
+ * <p>The guarantee: a flipped bit anywhere in the file is found; a deliberate edit that recomputes
+ * the trailer is not found until the signed manifests of P3c. The trailer is checked first (after
+ * the magic), so damage anywhere in a file is {@link Reason#HASH_MISMATCH}; the other reasons
+ * remain for a file whose trailer is valid but whose content is not what the format allows.
  */
 public final class SealedFormat {
   /** The most bytes a header or a meta body may have; encode refuses what decode refuses. */
   static final int MAX_HEADER = 65_536;
 
-  private static final byte[] OBJECT_MAGIC = "RPSEAL01".getBytes(UTF_8);
-  private static final byte[] META_MAGIC = "RPMETA01".getBytes(UTF_8);
+  private static final byte[] OBJECT_MAGIC = "RPSEAL02".getBytes(UTF_8);
+  private static final byte[] META_MAGIC = "RPMETA02".getBytes(UTF_8);
   private static final int MAGIC_LENGTH = 8;
   private static final int PREFIX_LENGTH = MAGIC_LENGTH + 4;
+  private static final int TRAILER_LENGTH = 32;
+  private static final Instant FIRST_STORABLE = Instant.parse("0000-01-01T00:00:00Z");
+  private static final Instant LAST_STORABLE = Instant.parse("9999-12-31T23:59:59.999999999Z");
+  // the smallest file of each kind: the structure without a header, a payload or a meta body
+  private static final int MIN_OBJECT_LENGTH = PREFIX_LENGTH + TRAILER_LENGTH;
+  private static final int MIN_META_LENGTH = MAGIC_LENGTH + TRAILER_LENGTH;
 
   private SealedFormat() {}
 
@@ -141,9 +155,10 @@ public final class SealedFormat {
     if (json.length > MAX_HEADER) {
       throw new IllegalArgumentException("the header is over " + MAX_HEADER + " bytes");
     }
-    ByteBuffer out = ByteBuffer.allocate(PREFIX_LENGTH + json.length + payload.length);
+    ByteBuffer out =
+        ByteBuffer.allocate(PREFIX_LENGTH + json.length + payload.length + TRAILER_LENGTH);
     out.put(OBJECT_MAGIC).putInt(json.length).put(json).put(payload);
-    return out.array();
+    return sealed(out);
   }
 
   /**
@@ -154,9 +169,8 @@ public final class SealedFormat {
    */
   public static Decoded decodeObject(byte[] file, String expectedKey) {
     checkMagic(file, OBJECT_MAGIC);
-    if (file.length < PREFIX_LENGTH) {
-      throw new CorruptException(Reason.TRUNCATED);
-    }
+    checkTrailer(file, MIN_OBJECT_LENGTH);
+    int end = file.length - TRAILER_LENGTH; // the end of the payload
     int headerLength = ByteBuffer.wrap(file, MAGIC_LENGTH, 4).getInt();
     if (headerLength > MAX_HEADER) {
       throw new CorruptException(Reason.HEADER_TOO_LARGE);
@@ -164,7 +178,7 @@ public final class SealedFormat {
     if (headerLength <= 0) {
       throw new CorruptException(Reason.BAD_HEADER);
     }
-    if ((long) PREFIX_LENGTH + headerLength > file.length) {
+    if ((long) PREFIX_LENGTH + headerLength > end) {
       throw new CorruptException(Reason.TRUNCATED);
     }
     String text = utf8(file, PREFIX_LENGTH, headerLength);
@@ -173,14 +187,14 @@ public final class SealedFormat {
       throw new CorruptException(Reason.KEY_MISMATCH);
     }
     int payloadStart = PREFIX_LENGTH + headerLength;
-    long actual = (long) file.length - payloadStart;
+    long actual = (long) end - payloadStart;
     if (actual < header.length()) {
       throw new CorruptException(Reason.TRUNCATED);
     }
     if (actual > header.length()) {
       throw new CorruptException(Reason.LENGTH_MISMATCH);
     }
-    byte[] payload = Arrays.copyOfRange(file, payloadStart, file.length);
+    byte[] payload = Arrays.copyOfRange(file, payloadStart, end);
     if (!Sha256.of(payload).equals(header.sha256())) {
       throw new CorruptException(Reason.HASH_MISMATCH);
     }
@@ -198,9 +212,9 @@ public final class SealedFormat {
     if (json.length > MAX_HEADER) {
       throw new IllegalArgumentException("the meta text is over " + MAX_HEADER + " bytes");
     }
-    ByteBuffer out = ByteBuffer.allocate(MAGIC_LENGTH + json.length);
+    ByteBuffer out = ByteBuffer.allocate(MAGIC_LENGTH + json.length + TRAILER_LENGTH);
     out.put(META_MAGIC).put(json);
-    return out.array();
+    return sealed(out);
   }
 
   /**
@@ -210,10 +224,12 @@ public final class SealedFormat {
    */
   public static Meta decodeMeta(byte[] file) {
     checkMagic(file, META_MAGIC);
-    if (file.length - MAGIC_LENGTH > MAX_HEADER) {
+    checkTrailer(file, MIN_META_LENGTH);
+    int bodyLength = file.length - TRAILER_LENGTH - MAGIC_LENGTH;
+    if (bodyLength > MAX_HEADER) {
       throw new CorruptException(Reason.HEADER_TOO_LARGE);
     }
-    String text = utf8(file, MAGIC_LENGTH, file.length - MAGIC_LENGTH);
+    String text = utf8(file, MAGIC_LENGTH, bodyLength);
     Map<String, Object> fields = fieldsOf(text, 4);
     Meta meta;
     try {
@@ -243,6 +259,41 @@ public final class SealedFormat {
     }
     if (file.length < MAGIC_LENGTH) {
       throw new CorruptException(Reason.TRUNCATED);
+    }
+  }
+
+  /**
+   * Fills the last 32 bytes of the buffer, which must be full up to there, with the SHA-256 of the
+   * bytes before them and returns the array.
+   */
+  private static byte[] sealed(ByteBuffer out) {
+    byte[] file = out.array();
+    int end = file.length - TRAILER_LENGTH;
+    System.arraycopy(digest(file, end), 0, file, end, TRAILER_LENGTH);
+    return file;
+  }
+
+  /**
+   * A file shorter than the smallest of its kind is TRUNCATED; one whose last 32 bytes are not the
+   * SHA-256 of all the bytes before them is HASH_MISMATCH.
+   */
+  private static void checkTrailer(byte[] file, int minimum) {
+    if (file.length < minimum) {
+      throw new CorruptException(Reason.TRUNCATED);
+    }
+    int end = file.length - TRAILER_LENGTH;
+    if (!Arrays.equals(file, end, file.length, digest(file, end), 0, TRAILER_LENGTH)) {
+      throw new CorruptException(Reason.HASH_MISMATCH);
+    }
+  }
+
+  private static byte[] digest(byte[] file, int length) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      digest.update(file, 0, length);
+      return digest.digest();
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 is required by the Java platform", e);
     }
   }
 
@@ -349,8 +400,8 @@ public final class SealedFormat {
     if (instant.getNano() % 1000 != 0) {
       throw new IllegalArgumentException("an instant has at most microsecond precision");
     }
-    int year = instant.atOffset(ZoneOffset.UTC).getYear();
-    if (year < 0 || year > 9999) {
+    // compared as instants: Instant.MIN and Instant.MAX have no calendar year to read
+    if (instant.isBefore(FIRST_STORABLE) || instant.isAfter(LAST_STORABLE)) {
       throw new IllegalArgumentException("an instant must be in the years 0000 to 9999");
     }
   }

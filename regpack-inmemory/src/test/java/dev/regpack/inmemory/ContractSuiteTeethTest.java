@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClass;
 
 import dev.regpack.inmemory.mutants.AbaAsNoopLedgerContractTest;
+import dev.regpack.inmemory.mutants.AnyRetainUntilEvidenceContractTest;
 import dev.regpack.inmemory.mutants.AsAtNotCheckedLedgerContractTest;
 import dev.regpack.inmemory.mutants.CaseFoldedKeysEvidenceContractTest;
 import dev.regpack.inmemory.mutants.ExactKeyNotFirstLedgerContractTest;
@@ -66,6 +67,12 @@ class ContractSuiteTeethTest {
     expected.put(
         SilentMissingKeyEvidenceContractTest.class,
         Set.of("extendRetentionOfAMissingKeyIsRejected", "setLegalHoldOfAMissingKeyIsRejected"));
+    // SPEC-7: the retain-until range of the port (microsecond precision, years 0000 to 9999)
+    expected.put(
+        AnyRetainUntilEvidenceContractTest.class,
+        Set.of(
+            "putRefusesARetainUntilTheStoresCannotHoldAndStoresNothing",
+            "extendRetentionRefusesARetainUntilTheStoresCannotHoldAndChangesNothing"));
     // the journal-format contract (P3b1): a store that overwrites on a duplicate key
     expected.put(
         OverwriteOnDuplicateJournalContractTest.class,

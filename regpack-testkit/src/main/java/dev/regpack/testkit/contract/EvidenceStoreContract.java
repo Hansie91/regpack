@@ -147,6 +147,66 @@ public interface EvidenceStoreContract {
     assertThat(extended.writtenAt()).isEqualTo(clock().now());
   }
 
+  /**
+   * Retain-until instants no store holds (SPEC-7): more than microsecond precision, and a year
+   * outside 0000 to 9999.
+   */
+  private static List<Instant> unstorableRetainUntils() {
+    return List.of(
+        Instant.parse("2030-01-01T00:00:00.000000001Z"),
+        Instant.parse("2030-01-01T00:00:00.123456789Z"),
+        Instant.parse("+10000-01-01T00:00:00Z"),
+        Instant.parse("-0001-12-31T23:59:59Z"),
+        Instant.MAX,
+        Instant.MIN);
+  }
+
+  @Test
+  default void putRefusesARetainUntilTheStoresCannotHoldAndStoresNothing() {
+    for (Instant bad : unstorableRetainUntils()) {
+      PutRequest request =
+          request(K, "hello", "text/plain", new Retention(new RetentionClass("landing"), bad));
+      assertThatThrownBy(() -> store().put(request))
+          .as("retain-until %s", bad)
+          .isInstanceOf(IllegalArgumentException.class);
+      assertThat(store().get(K)).as("retain-until %s", bad).isEmpty();
+      assertThat(store().list("", Optional.empty(), 10)).as("retain-until %s", bad).isEmpty();
+    }
+  }
+
+  @Test
+  default void extendRetentionRefusesARetainUntilTheStoresCannotHoldAndChangesNothing() {
+    Retention original = fiveYears();
+    store().put(request(K, "hello", "text/plain", original));
+    StoredObject before = store().get(K).orElseThrow();
+    for (Instant bad : unstorableRetainUntils()) {
+      assertThatThrownBy(() -> store().extendRetention(K, bad))
+          .as("retain-until %s", bad)
+          .isInstanceOf(IllegalArgumentException.class);
+      assertThat(store().get(K)).as("retain-until %s", bad).contains(before);
+    }
+  }
+
+  @Test
+  default void theLastMicrosecondOfYear9999IsARetainUntilEveryStoreHolds() {
+    Instant last = Instant.parse("9999-12-31T23:59:59.999999Z");
+    store()
+        .put(request(K, "hello", "text/plain", new Retention(new RetentionClass("landing"), last)));
+    assertThat(store().get(K).orElseThrow().retention().retainUntil()).isEqualTo(last);
+    EvidenceKey other = EvidenceKey.of("landing", "k2");
+    store().put(request(other, "world", "text/plain", fiveYears()));
+    store().extendRetention(other, last);
+    assertThat(store().get(other).orElseThrow().retention().retainUntil()).isEqualTo(last);
+    // one microsecond of precision is kept as it is
+    Instant micro = clock().now().plus(Duration.ofDays(2000)).plus(Duration.ofNanos(1_000));
+    EvidenceKey third = EvidenceKey.of("landing", "k3");
+    store()
+        .put(
+            request(
+                third, "again", "text/plain", new Retention(new RetentionClass("landing"), micro)));
+    assertThat(store().get(third).orElseThrow().retention().retainUntil()).isEqualTo(micro);
+  }
+
   @Test
   default void legalHoldIsSeparateFromRetention() {
     Retention original = fiveYears();

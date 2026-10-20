@@ -15,10 +15,11 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.SplittableRandom;
 import org.junit.jupiter.api.Test;
 
-/** D-E5: the object file ("RPSEAL01") and the meta file ("RPMETA01") of P-SEALED. */
+/** D-E5: the object file ("RPSEAL02") and the meta file ("RPMETA02") of P-SEALED. */
 class SealedFormatTest {
   private static final Instant WRITTEN = Instant.parse("2026-10-19T12:00:00Z");
   private static final Instant RETAIN = Instant.parse("2031-10-19T12:00:00Z");
@@ -28,13 +29,18 @@ class SealedFormatTest {
           + "\"retain_until\":\"2031-10-19T12:00:00.000000Z\",\"retention_class\":\"sealed\","
           + "\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\","
           + "\"written_at\":\"2026-10-19T12:00:00.000000Z\"}";
+  // Computed with printf, xxd and sha256sum (not with the code under test): see the report of FC-A.
+  private static final String GOLDEN_OBJECT_TRAILER =
+      "170025ff4444f8fd4eb4ef4c549945a90ebe0c05247be553ef12bd2be11594e5";
   private static final String GOLDEN_OBJECT_SHA256 =
-      "8582af0639f5db6eb5cf3d3961a58947fdafa4d81b8a8d6f82063ef64db688e4";
+      "6ba2ff133d8c5097ef0bdf16cc772a6a98669e098bbd68d0002a0dc78720308a";
   private static final String GOLDEN_META =
       "{\"legal_hold\":true,\"retain_until\":\"2031-10-19T12:00:00.000000Z\","
           + "\"retention_class\":\"sealed\",\"rev\":3}";
+  private static final String GOLDEN_META_TRAILER =
+      "fb7f581c186369759c2ff80f12882fa4f26c2b7c79ae7a5f461be4ebfab7598f";
   private static final String GOLDEN_META_SHA256 =
-      "a887fe6440154173cea75b21e6bab0e3966aaa290fd44b065964ce0091185020";
+      "03b06654451ec4dd82b7f234894df1f096ae2175f8999d59811b0c2aa4e4a0a3";
 
   private static Header header(String key, String mediaType, byte[] payload) {
     return new Header(
@@ -45,19 +51,40 @@ class SealedFormatTest {
     return SealedFormat.encodeObject(header("landing/k1", "text/plain", HELLO), HELLO);
   }
 
-  /** A file with the given magic, header length field, header bytes and payload. */
+  /** The bytes followed by the SHA-256 of the bytes: a file with a valid trailer. */
+  private static byte[] sealed(byte[] body) {
+    byte[] trailer = HexFormat.of().parseHex(Sha256.of(body).hex());
+    byte[] file = Arrays.copyOf(body, body.length + trailer.length);
+    System.arraycopy(trailer, 0, file, body.length, trailer.length);
+    return file;
+  }
+
+  /**
+   * A file with the given magic, header length field, header bytes and payload, and a valid
+   * trailer, so that only the part under test is wrong.
+   */
   private static byte[] raw(String magic, int headerLength, byte[] header, byte[] payload) {
     ByteBuffer buffer = ByteBuffer.allocate(8 + 4 + header.length + payload.length);
     buffer.put(magic.getBytes(StandardCharsets.US_ASCII));
     buffer.putInt(headerLength);
     buffer.put(header);
     buffer.put(payload);
-    return buffer.array();
+    return sealed(buffer.array());
+  }
+
+  private static byte[] metaFile(String bodyText) {
+    return sealed(("RPMETA02" + bodyText).getBytes(UTF_8));
+  }
+
+  private static void assertMetaCorrupt(byte[] file, Reason reason) {
+    assertThatThrownBy(() -> SealedFormat.decodeMeta(file))
+        .isInstanceOfSatisfying(
+            CorruptException.class, e -> assertThat(e.reason()).isEqualTo(reason));
   }
 
   private static byte[] rawWithHeader(String headerText, byte[] payload) {
     byte[] header = headerText.getBytes(UTF_8);
-    return raw("RPSEAL01", header.length, header, payload);
+    return raw("RPSEAL02", header.length, header, payload);
   }
 
   private static void assertCorrupt(byte[] file, String key, Reason reason) {
@@ -72,11 +99,13 @@ class SealedFormatTest {
     byte[] file = golden();
     byte[] header = GOLDEN_HEADER.getBytes(UTF_8);
     assertThat(header).hasSize(248);
-    assertThat(Arrays.copyOfRange(file, 0, 8)).isEqualTo("RPSEAL01".getBytes(UTF_8));
+    assertThat(Arrays.copyOfRange(file, 0, 8)).isEqualTo("RPSEAL02".getBytes(UTF_8));
     assertThat(ByteBuffer.wrap(file, 8, 4).getInt()).isEqualTo(248);
     assertThat(new String(file, 12, 248, UTF_8)).isEqualTo(GOLDEN_HEADER);
-    assertThat(Arrays.copyOfRange(file, 260, file.length)).isEqualTo(HELLO);
-    assertThat(file).hasSize(265);
+    assertThat(Arrays.copyOfRange(file, 260, 265)).isEqualTo(HELLO);
+    assertThat(HexFormat.of().formatHex(file, 265, file.length)).isEqualTo(GOLDEN_OBJECT_TRAILER);
+    assertThat(Sha256.of(Arrays.copyOf(file, 265)).hex()).isEqualTo(GOLDEN_OBJECT_TRAILER);
+    assertThat(file).hasSize(297);
     assertThat(Sha256.of(file).hex()).isEqualTo(GOLDEN_OBJECT_SHA256);
   }
 
@@ -107,8 +136,44 @@ class SealedFormatTest {
   @Test
   void flippingOnePayloadByteIsAHashMismatch() {
     byte[] file = golden();
-    file[file.length - 1] ^= 1;
+    file[file.length - 33] ^= 1; // the last payload byte
     assertCorrupt(file, "landing/k1", Reason.HASH_MISMATCH);
+  }
+
+  @Test
+  void aPayloadChangedUnderAValidTrailerIsStillAHashMismatchOfTheHeader() {
+    byte[] file = golden();
+    file[file.length - 33] ^= 1;
+    byte[] resealed = sealed(Arrays.copyOf(file, file.length - 32));
+    assertCorrupt(resealed, "landing/k1", Reason.HASH_MISMATCH);
+  }
+
+  @Test
+  void aFlippedBitAnywhereInAnObjectFileIsFound() {
+    byte[] file = golden();
+    int found = 0;
+    for (int bit = 0; bit < 8 * file.length; bit++) {
+      byte[] damaged = file.clone();
+      damaged[bit / 8] ^= (byte) (1 << (bit % 8));
+      Reason expected = bit / 8 < 8 ? Reason.BAD_MAGIC : Reason.HASH_MISMATCH;
+      assertCorrupt(damaged, "landing/k1", expected);
+      found++;
+    }
+    assertThat(found).isEqualTo(8 * file.length).isEqualTo(8 * 297);
+  }
+
+  @Test
+  void aDeliberateEditThatRecomputesTheTrailerIsNotFoundByTheFormat() {
+    // The stated limit: the trailer finds damage, not a deliberate edit; only the signed
+    // manifests of P3c do. This pins the limit so the Javadoc cannot drift from the code.
+    byte[] file = golden();
+    String edited = GOLDEN_HEADER.replace("\"2031-", "\"2021-");
+    byte[] body = new byte[12 + edited.length() + HELLO.length];
+    System.arraycopy(file, 0, body, 0, 12);
+    System.arraycopy(edited.getBytes(UTF_8), 0, body, 12, edited.length());
+    System.arraycopy(HELLO, 0, body, 12 + edited.length(), HELLO.length);
+    Decoded decoded = SealedFormat.decodeObject(sealed(body), "landing/k1");
+    assertThat(decoded.header().retainUntil()).isEqualTo(Instant.parse("2021-10-19T12:00:00Z"));
   }
 
   @Test
@@ -128,10 +193,10 @@ class SealedFormatTest {
 
   @Test
   void aHeaderLengthOver65536IsRefusedBeforeAnythingIsRead() {
-    byte[] file = raw("RPSEAL01", 65_537, new byte[0], new byte[0]);
+    byte[] file = raw("RPSEAL02", 65_537, new byte[0], new byte[0]);
     assertCorrupt(file, "landing/k1", Reason.HEADER_TOO_LARGE);
     assertCorrupt(
-        raw("RPSEAL01", Integer.MAX_VALUE, new byte[0], HELLO),
+        raw("RPSEAL02", Integer.MAX_VALUE, new byte[0], HELLO),
         "landing/k1",
         Reason.HEADER_TOO_LARGE);
   }
@@ -142,29 +207,32 @@ class SealedFormatTest {
     file[0] = 'X';
     assertCorrupt(file, "landing/k1", Reason.BAD_MAGIC);
     assertCorrupt(
-        raw("RPMETA01", 248, GOLDEN_HEADER.getBytes(UTF_8), HELLO), "landing/k1", Reason.BAD_MAGIC);
+        raw("RPMETA02", 248, GOLDEN_HEADER.getBytes(UTF_8), HELLO), "landing/k1", Reason.BAD_MAGIC);
     assertCorrupt("not a sealed file at all".getBytes(UTF_8), "landing/k1", Reason.BAD_MAGIC);
   }
 
   @Test
-  void aFileCutAtEveryOffsetBelowItsLengthIsTruncated() {
+  void aFileCutAtEveryOffsetBelowItsLengthIsCorrupt() {
     byte[] file = golden();
     for (int cut = 0; cut < file.length; cut++) {
-      assertCorrupt(Arrays.copyOf(file, cut), "landing/k1", Reason.TRUNCATED);
+      // below magic + length field + trailer (44 bytes) no object file can exist: TRUNCATED; above
+      // it the last 32 bytes read as a trailer that does not seal what precedes them
+      Reason expected = cut < 12 + 32 ? Reason.TRUNCATED : Reason.HASH_MISMATCH;
+      assertCorrupt(Arrays.copyOf(file, cut), "landing/k1", expected);
     }
   }
 
   @Test
   void negativeHeaderLength() {
     assertCorrupt(
-        raw("RPSEAL01", -1, GOLDEN_HEADER.getBytes(UTF_8), HELLO), "landing/k1", Reason.BAD_HEADER);
+        raw("RPSEAL02", -1, GOLDEN_HEADER.getBytes(UTF_8), HELLO), "landing/k1", Reason.BAD_HEADER);
     assertCorrupt(
-        raw("RPSEAL01", Integer.MIN_VALUE, new byte[0], HELLO), "landing/k1", Reason.BAD_HEADER);
+        raw("RPSEAL02", Integer.MIN_VALUE, new byte[0], HELLO), "landing/k1", Reason.BAD_HEADER);
   }
 
   @Test
   void zeroHeaderLength() {
-    assertCorrupt(raw("RPSEAL01", 0, new byte[0], HELLO), "landing/k1", Reason.BAD_HEADER);
+    assertCorrupt(raw("RPSEAL02", 0, new byte[0], HELLO), "landing/k1", Reason.BAD_HEADER);
   }
 
   @Test
@@ -188,6 +256,8 @@ class SealedFormatTest {
       GOLDEN_HEADER.replace("12:00:00.000000Z\",\"retention", "12:00:00Z\",\"retention"),
       GOLDEN_HEADER.replace("\"written_at\"", "\"written\""),
       GOLDEN_HEADER.substring(0, GOLDEN_HEADER.length() - 1) + ",\"extra\":1}",
+      "[".repeat(65_000),
+      "{\"a\":".repeat(13_000),
     };
     for (String text : bad) {
       assertCorrupt(rawWithHeader(text, HELLO), "landing/k1", Reason.BAD_HEADER);
@@ -195,7 +265,7 @@ class SealedFormatTest {
     byte[] notUtf8 = GOLDEN_HEADER.getBytes(UTF_8);
     notUtf8[20] = (byte) 0xC3;
     notUtf8[21] = (byte) 0x28;
-    assertCorrupt(raw("RPSEAL01", notUtf8.length, notUtf8, HELLO), "landing/k1", Reason.BAD_HEADER);
+    assertCorrupt(raw("RPSEAL02", notUtf8.length, notUtf8, HELLO), "landing/k1", Reason.BAD_HEADER);
   }
 
   @Test
@@ -224,6 +294,13 @@ class SealedFormatTest {
             () -> new Header("landing/k1", "t", hash, 1, WRITTEN.plusNanos(1), "sealed", RETAIN));
     assertThatIllegalArgumentException()
         .isThrownBy(() -> new Header("landing/k1", "t", hash, 1, WRITTEN, "sealed", Instant.MAX));
+    // Instant.MIN has no calendar year to read: still an IllegalArgumentException
+    assertThatIllegalArgumentException()
+        .isThrownBy(() -> new Header("landing/k1", "t", hash, 1, WRITTEN, "sealed", Instant.MIN));
+    assertThatIllegalArgumentException()
+        .isThrownBy(() -> new Meta(1, "sealed", Instant.MIN, false));
+    assertThatIllegalArgumentException()
+        .isThrownBy(() -> new Meta(1, "sealed", Instant.parse("+10000-01-01T00:00:00Z"), false));
     assertThatThrownBy(() -> new Header("landing/k1", null, hash, 1, WRITTEN, "sealed", RETAIN))
         .isInstanceOf(NullPointerException.class);
   }
@@ -232,7 +309,13 @@ class SealedFormatTest {
   void metaRoundTrips() {
     Meta meta = new Meta(3, "sealed", RETAIN, true);
     byte[] file = SealedFormat.encodeMeta(meta);
-    assertThat(new String(file, UTF_8)).isEqualTo("RPMETA01" + GOLDEN_META);
+    assertThat(new String(file, 0, 8 + GOLDEN_META.length(), UTF_8))
+        .isEqualTo("RPMETA02" + GOLDEN_META);
+    assertThat(file).hasSize(8 + GOLDEN_META.length() + 32).hasSize(139);
+    assertThat(HexFormat.of().formatHex(file, file.length - 32, file.length))
+        .isEqualTo(GOLDEN_META_TRAILER);
+    assertThat(Sha256.of(Arrays.copyOf(file, file.length - 32)).hex())
+        .isEqualTo(GOLDEN_META_TRAILER);
     assertThat(Sha256.of(file).hex()).isEqualTo(GOLDEN_META_SHA256);
     assertThat(SealedFormat.decodeMeta(file)).isEqualTo(meta);
     Meta free = new Meta(0, "journal", WRITTEN, false);
@@ -243,29 +326,39 @@ class SealedFormatTest {
   void aCorruptMetaFileIsCorrupt() {
     byte[] file = SealedFormat.encodeMeta(new Meta(3, "sealed", RETAIN, true));
     for (int cut = 0; cut < file.length; cut++) {
-      int length = cut;
-      assertThatThrownBy(() -> SealedFormat.decodeMeta(Arrays.copyOf(file, length)))
-          .isInstanceOf(CorruptException.class);
+      // below magic + trailer (40 bytes) no meta file can exist: TRUNCATED; above it the last 32
+      // bytes read as a trailer that does not seal what precedes them
+      Reason expected = cut < 8 + 32 ? Reason.TRUNCATED : Reason.HASH_MISMATCH;
+      assertMetaCorrupt(Arrays.copyOf(file, cut), expected);
     }
     byte[] wrongMagic = file.clone();
     wrongMagic[0] = 'X';
-    assertThatThrownBy(() -> SealedFormat.decodeMeta(wrongMagic))
-        .isInstanceOfSatisfying(
-            CorruptException.class, e -> assertThat(e.reason()).isEqualTo(Reason.BAD_MAGIC));
-    byte[] spaced = ("RPMETA01" + GOLDEN_META.replace("{", "{ ")).getBytes(UTF_8);
-    assertThatThrownBy(() -> SealedFormat.decodeMeta(spaced))
-        .isInstanceOfSatisfying(
-            CorruptException.class, e -> assertThat(e.reason()).isEqualTo(Reason.BAD_HEADER));
-    byte[] negative = ("RPMETA01" + GOLDEN_META.replace("\"rev\":3", "\"rev\":-3")).getBytes(UTF_8);
-    assertThatThrownBy(() -> SealedFormat.decodeMeta(negative))
-        .isInstanceOfSatisfying(
-            CorruptException.class, e -> assertThat(e.reason()).isEqualTo(Reason.BAD_HEADER));
-    byte[] huge = new byte[8 + 65_537];
-    System.arraycopy(file, 0, huge, 0, 8);
-    Arrays.fill(huge, 8, huge.length, (byte) ' ');
-    assertThatThrownBy(() -> SealedFormat.decodeMeta(huge))
-        .isInstanceOfSatisfying(
-            CorruptException.class, e -> assertThat(e.reason()).isEqualTo(Reason.HEADER_TOO_LARGE));
+    assertMetaCorrupt(wrongMagic, Reason.BAD_MAGIC);
+    assertMetaCorrupt(metaFile(GOLDEN_META.replace("{", "{ ")), Reason.BAD_HEADER);
+    assertMetaCorrupt(metaFile(GOLDEN_META.replace("\"rev\":3", "\"rev\":-3")), Reason.BAD_HEADER);
+    assertMetaCorrupt(metaFile(""), Reason.BAD_HEADER);
+    assertMetaCorrupt(metaFile(" ".repeat(65_537)), Reason.HEADER_TOO_LARGE);
+    assertMetaCorrupt(metaFile("[".repeat(65_000)), Reason.BAD_HEADER);
+    assertMetaCorrupt(metaFile("{\"a\":".repeat(13_000)), Reason.BAD_HEADER);
+  }
+
+  @Test
+  void aFlippedBitAnywhereInAMetaFileIsFound() {
+    byte[] file = SealedFormat.encodeMeta(new Meta(3, "sealed", RETAIN, true));
+    int found = 0;
+    for (int bit = 0; bit < 8 * file.length; bit++) {
+      byte[] damaged = file.clone();
+      damaged[bit / 8] ^= (byte) (1 << (bit % 8));
+      assertMetaCorrupt(damaged, bit / 8 < 8 ? Reason.BAD_MAGIC : Reason.HASH_MISMATCH);
+      found++;
+    }
+    assertThat(found).isEqualTo(8 * file.length).isEqualTo(8 * 139);
+  }
+
+  @Test
+  void aDeliberateMetaEditThatRecomputesTheTrailerIsNotFoundByTheFormat() {
+    Meta edited = SealedFormat.decodeMeta(metaFile(GOLDEN_META.replace("\"rev\":3", "\"rev\":4")));
+    assertThat(edited).isEqualTo(new Meta(4, "sealed", RETAIN, true));
   }
 
   @Test

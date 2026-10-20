@@ -19,6 +19,7 @@ import dev.regpack.ports.evidence.EvidenceStore.StoredObject;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.testkit.clock.ManualClock;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -294,19 +295,39 @@ class SealedFaultTest {
     StoredObject expected = store.get(KEY).orElseThrow();
     byte[] original = Files.readAllBytes(SealedTamper.objectPath(volumeA, KEY));
 
+    // the file is the header, the 25 payload bytes and the 32-byte trailer; a digit of the year of
+    // retain_until (a field no cross-check covers: key, length and payload hash are the others)
+    // and of written_at
+    String text = new String(original, StandardCharsets.ISO_8859_1);
+    int retainDigit = text.indexOf("\"retain_until\":\"") + "\"retain_until\":\"".length() + 3;
+    int writtenDigit = text.indexOf("\"written_at\":\"") + "\"written_at\":\"".length() + 3;
+    assertThat(retainDigit).isGreaterThan(20);
+    assertThat(writtenDigit).isGreaterThan(20);
+    assertThat(Character.isDigit(text.charAt(retainDigit))).isTrue();
+    assertThat(Character.isDigit(text.charAt(writtenDigit))).isTrue();
+
     // the seal names the fault: a flipped payload byte is a hash mismatch
     assertThatThrownBy(
             () ->
                 SealedFormat.decodeObject(
-                    withByteFlipped(original, original.length - 1), KEY.path()))
+                    withByteFlipped(original, original.length - 33), KEY.path()))
+        .isInstanceOfSatisfying(
+            SealedFormat.CorruptException.class,
+            e -> assertThat(e.reason()).isEqualTo(SealedFormat.Reason.HASH_MISMATCH));
+    // ... and so is a flipped digit of the retention
+    assertThatThrownBy(
+            () -> SealedFormat.decodeObject(withByteFlipped(original, retainDigit), KEY.path()))
         .isInstanceOfSatisfying(
             SealedFormat.CorruptException.class,
             e -> assertThat(e.reason()).isEqualTo(SealedFormat.Reason.HASH_MISMATCH));
 
     Map<String, byte[]> damages = new TreeMap<>();
-    damages.put("payload byte flipped", withByteFlipped(original, original.length - 1));
-    damages.put("first payload byte flipped", withByteFlipped(original, original.length - 25));
-    damages.put("header byte flipped", withByteFlipped(original, 20));
+    damages.put("payload byte flipped", withByteFlipped(original, original.length - 33));
+    damages.put("first payload byte flipped", withByteFlipped(original, original.length - 57));
+    damages.put("trailer byte flipped", withByteFlipped(original, original.length - 1));
+    damages.put("retain_until digit flipped", withByteFlipped(original, retainDigit));
+    damages.put("written_at digit flipped", withByteFlipped(original, writtenDigit));
+    damages.put("key byte flipped", withByteFlipped(original, 20));
     damages.put("magic flipped", withByteFlipped(original, 0));
     damages.put("cut in half", Arrays.copyOf(original, original.length / 2));
     damages.put("last byte missing", Arrays.copyOf(original, original.length - 1));
@@ -321,6 +342,9 @@ class SealedFaultTest {
         SealedTamper.replaceObject(volumeRoot, KEY, damage.getValue());
 
         assertThat(store.get(KEY)).as("%s on %s", damage.getKey(), damaged).contains(expected);
+        assertThat(store.get(KEY).orElseThrow().retention().retainUntil())
+            .as("the retention served, %s on %s", damage.getKey(), damaged)
+            .isEqualTo(expected.retention().retainUntil());
         assertThat(store.list("", Optional.empty(), 10)).containsExactly(KEY);
         assertThat(store.scrub()).containsExactly(damaged + " landing/k1 CORRUPT");
 
@@ -503,7 +527,7 @@ class SealedFaultTest {
     Path deadMeta =
         SealedTamper.metaPath(volumeA, KEY)
             .resolveSibling(SealedNames.temporary("m-k1", DEAD_PID, 8));
-    Files.write(deadMeta, utf8("RPMETA01 half a meta"));
+    Files.write(deadMeta, utf8("RPMETA02 half a meta"));
     Path deadSelfTest = volumeB.resolve(SealedNames.temporary(".selftest", DEAD_PID, 9));
     Files.write(deadSelfTest, utf8("regpack hard-link self-test"));
     EvidenceKey ghost = new EvidenceKey("landing/ghost");
@@ -688,6 +712,25 @@ class SealedFaultTest {
             "a landing/k4 CORRUPT",
             "a landing/k5 CORRUPT",
             "b landing/k5 MISSING_COPY");
+  }
+
+  @Test
+  void aShortenedRetentionInTheOnlyCopyIsNeverCopiedByRepair() throws IOException {
+    // FORMAT-1: before the trailer, a flipped digit of retain_until was a valid file, repair copied
+    // it to the replaced volume and scrub then showed nothing
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "the payload"));
+    byte[] original = Files.readAllBytes(SealedTamper.objectPath(volumeA, KEY));
+    String text = new String(original, StandardCharsets.ISO_8859_1);
+    int digit = text.indexOf("\"retain_until\":\"") + "\"retain_until\":\"".length() + 3;
+    SealedTamper.replaceObject(volumeA, KEY, withByteFlipped(original, digit));
+    SealedTamper.deleteObject(volumeB, KEY);
+
+    assertThat(store.repair()).isZero();
+
+    assertThat(SealedTamper.objectPath(volumeB, KEY)).doesNotExist();
+    assertThat(store.scrub()).containsExactly("a landing/k1 CORRUPT", "b landing/k1 MISSING_COPY");
+    assertThatThrownBy(() -> store.get(KEY)).isInstanceOf(EvidenceCorruptionException.class);
   }
 
   @Test

@@ -10,7 +10,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -32,9 +31,22 @@ import java.util.Set;
  * a class (a) key names its own type), the schema version (at least 1, and 1 for the schemas), the
  * clock instant (microsecond precision, year 0000 to 9999) and the shape of the payload (text,
  * boolean, integer, decimal, instant, list and text-keyed map only; integers widen to {@link
- * Long}). The payload schemas of the types are checked in addition by {@link JournalSchemas}, so an
- * object that breaks its schema cannot be built. The payload is copied deeply and is immutable.
- * Messages never echo a value.
+ * Long}). The shape check also refuses what {@link #toBytes()} could never write: text (and map
+ * keys) with an unpaired surrogate, and an instant of more than microsecond precision or outside
+ * the years 0000 to 9999, so a constructed object is always serialisable. The payload schemas of
+ * the types are checked in addition by {@link JournalSchemas}, so an object that breaks its schema
+ * cannot be built. The payload is copied deeply and is immutable. Messages never echo a value.
+ *
+ * <p>The canonical bytes of an object are at most {@link #MAX_BYTES}: {@link #toBytes()} refuses
+ * more and {@link #fromBytes} refuses longer input before it parses anything.
+ *
+ * <p>The payload read back by {@link #fromBytes} is the JSON data model: text, boolean, {@link
+ * Long}, {@link BigDecimal}, list and map. A payload that was built with an {@link Instant} reads
+ * back as text, except in the two instant-typed fields of the schemas ({@code observed_at} of a
+ * {@code TransportResult}, {@code received_at} of a {@code FeedbackReceived}), which are converted
+ * back by type; an integral {@link BigDecimal} reads back as a {@link Long}. The schemas narrow
+ * this: no payload field accepts a {@link BigDecimal}, and those two are the only instants, so an
+ * object that passes its schema equals what {@code fromBytes(toBytes())} returns.
  */
 public record JournalObject(
     JournalKey key,
@@ -42,6 +54,15 @@ public record JournalObject(
     int schemaVersion,
     Instant clockInstant,
     Map<String, Object> payload) {
+  /**
+   * The most bytes a journal object may have: 64 MiB. A {@code VersionAssigned} object of a
+   * 10,000-record batch is about 1 MB, so the bound is far above any real object and far below the
+   * size at which reading one would exhaust the memory of the reader.
+   */
+  public static final int MAX_BYTES = 67_108_864;
+
+  private static final Instant FIRST_YEAR_0000 = Instant.parse("0000-01-01T00:00:00Z");
+  private static final Instant LAST_YEAR_9999 = Instant.parse("9999-12-31T23:59:59.999999999Z");
   private static final Set<String> COMMON_ENVELOPE_KEYS =
       Set.of(
           "endpoint", "restore_epoch", "type", "schema_version", "clock_instant", "payload_sha256");
@@ -67,8 +88,7 @@ public record JournalObject(
     if (clockInstant.getNano() % 1000 != 0) {
       throw new IllegalArgumentException("clockInstant has sub-microsecond precision");
     }
-    int year = clockInstant.atOffset(ZoneOffset.UTC).getYear();
-    if (year < 0 || year > 9999) {
+    if (outsideYears0000To9999(clockInstant)) {
       throw new IllegalArgumentException("clockInstant year is outside 0000 to 9999");
     }
     @SuppressWarnings("unchecked")
@@ -101,7 +121,12 @@ public record JournalObject(
     Map<String, Object> object = new LinkedHashMap<>();
     object.put("envelope", envelope);
     object.put("payload", payload);
-    return Json.canonical(object).getBytes(UTF_8);
+    byte[] bytes = Json.canonical(object).getBytes(UTF_8);
+    if (bytes.length > MAX_BYTES) {
+      throw new IllegalArgumentException(
+          "journal object: the canonical bytes are over " + MAX_BYTES + " bytes");
+    }
+    return bytes;
   }
 
   /**
@@ -113,6 +138,9 @@ public record JournalObject(
    */
   public static JournalObject fromBytes(byte[] bytes) {
     Objects.requireNonNull(bytes, "bytes");
+    if (bytes.length > MAX_BYTES) {
+      throw malformed("the input is over " + MAX_BYTES + " bytes"); // before anything is parsed
+    }
     try {
       String text =
           UTF_8
@@ -157,6 +185,24 @@ public record JournalObject(
     } catch (CharacterCodingException | JsonException | DateTimeParseException e) {
       // the cause is dropped on purpose: parser messages can repeat parts of the input
       throw malformed("the text cannot be read");
+    }
+  }
+
+  /** Compared as instants: Instant.MIN and Instant.MAX have no calendar year to read. */
+  private static boolean outsideYears0000To9999(Instant instant) {
+    return instant.isBefore(FIRST_YEAR_0000) || instant.isAfter(LAST_YEAR_9999);
+  }
+
+  private static void requireWritableText(String text) {
+    for (int i = 0; i < text.length(); i++) {
+      char c = text.charAt(i);
+      if (Character.isHighSurrogate(c)
+          && i + 1 < text.length()
+          && Character.isLowSurrogate(text.charAt(i + 1))) {
+        i++;
+      } else if (Character.isSurrogate(c)) {
+        throw new IllegalArgumentException("payload text must not have an unpaired surrogate");
+      }
     }
   }
 
@@ -212,24 +258,41 @@ public record JournalObject(
     throw malformed(name + " must be an integer");
   }
 
-  /** A deep, immutable copy that keeps only the value types of canonical JSON. */
+  /**
+   * A deep, immutable copy that keeps only the value types of canonical JSON, and only values that
+   * {@link #toBytes()} can write: text without an unpaired surrogate (map keys too) and instants of
+   * at most microsecond precision in the years 0000 to 9999.
+   */
   private static Object copyValue(Object value) {
     return switch (value) {
       case null -> throw new IllegalArgumentException("a payload value must not be null");
-      case String s -> s;
+      case String s -> {
+        requireWritableText(s);
+        yield s;
+      }
       case Boolean b -> b;
       case Long n -> n;
       case Integer n -> Long.valueOf(n.longValue());
       case Short n -> Long.valueOf(n.longValue());
       case Byte n -> Long.valueOf(n.longValue());
       case BigDecimal d -> d;
-      case Instant t -> t;
+      case Instant t -> {
+        if (t.getNano() % 1000 != 0) {
+          throw new IllegalArgumentException(
+              "a payload instant must have at most microsecond precision");
+        }
+        if (outsideYears0000To9999(t)) {
+          throw new IllegalArgumentException("a payload instant must be in the years 0000 to 9999");
+        }
+        yield t;
+      }
       case Map<?, ?> map -> {
         Map<String, Object> copy = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : map.entrySet()) {
           if (!(entry.getKey() instanceof String name)) {
             throw new IllegalArgumentException("payload object keys must be text");
           }
+          requireWritableText(name);
           copy.put(name, copyValue(entry.getValue()));
         }
         yield Collections.unmodifiableMap(copy);

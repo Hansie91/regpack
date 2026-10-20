@@ -23,6 +23,8 @@ import java.util.TreeMap;
 public final class InMemoryEvidenceStore implements EvidenceStore {
   private static final Grade GRADE = new Grade("P-MEMORY", "");
   private static final Durability DURABILITY = new Durability(false, 0);
+  private static final Instant FIRST_YEAR_0000 = Instant.parse("0000-01-01T00:00:00Z");
+  private static final Instant LAST_YEAR_9999 = Instant.parse("9999-12-31T23:59:59.999999999Z");
 
   /** Deliberate faults for ContractSuiteTeethTest; {@code NONE} is the correct adapter. */
   public enum Flaw {
@@ -31,7 +33,8 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     ALLOW_RETENTION_SHORTENING,
     CASE_FOLDED_KEYS,
     LIST_IGNORES_AFTER,
-    SILENT_MISSING_KEY
+    SILENT_MISSING_KEY,
+    ACCEPT_ANY_RETAIN_UNTIL
   }
 
   private final Clock clock;
@@ -71,6 +74,7 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
   public PutOutcome put(PutRequest request) {
     failIfDown();
     Objects.requireNonNull(request, "request");
+    requireStorable(request.retention().retainUntil());
     byte[] bytes = request.bytes();
     Sha256 digest = Sha256.of(bytes);
     synchronized (lock) {
@@ -137,6 +141,7 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     failIfDown();
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(newRetainUntil, "newRetainUntil");
+    requireStorable(newRetainUntil);
     synchronized (lock) {
       if (missingIsSilent(key)) {
         return;
@@ -185,6 +190,24 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
               existing.writtenAt(),
               existing.retention(),
               hold));
+    }
+  }
+
+  /**
+   * The rule of the port (SPEC-7): a retain-until has at most microsecond precision and a year from
+   * 0000 to 9999, so that every store can hold what another holds. A pure check, before any state
+   * changes. The deliberate flaw ACCEPT_ANY_RETAIN_UNTIL (test double only) skips it.
+   */
+  private void requireStorable(Instant retainUntil) {
+    if (flaw == Flaw.ACCEPT_ANY_RETAIN_UNTIL) {
+      return;
+    }
+    if (retainUntil.getNano() % 1000 != 0) {
+      throw new IllegalArgumentException("a retain-until has at most microsecond precision");
+    }
+    // compared as instants: Instant.MIN and Instant.MAX have no calendar year to read
+    if (retainUntil.isBefore(FIRST_YEAR_0000) || retainUntil.isAfter(LAST_YEAR_9999)) {
+      throw new IllegalArgumentException("a retain-until must be in the years 0000 to 9999");
     }
   }
 

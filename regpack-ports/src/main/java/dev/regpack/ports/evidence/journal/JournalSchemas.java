@@ -1,7 +1,6 @@
 package dev.regpack.ports.evidence.journal;
 
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -13,9 +12,11 @@ import java.util.regex.Pattern;
  * The payload schemas of the journal types (payload version 1, spec 11.2). A version 1 payload is
  * strict: exactly the required keys, no unknown key; integers are {@link Long} and not negative,
  * hashes are 64 lower-case hex characters, instants are {@link Instant} with at most microsecond
- * precision. Two rules go beyond the shape: a {@code RecoveryDecision} says it authorises an effect
- * exactly when it is class (a), and the kind of an {@code OperatorAction} fixes its class and
- * scope. Messages name the schema field and the rule and never echo a value or an unknown key.
+ * precision. Every text is bounded, in UTF-16 code units: {@code detail} and {@code reason} at
+ * 4,096 and every other text (a list element too) at 1,024. Two rules go beyond the shape: a {@code
+ * RecoveryDecision} says it authorises an effect exactly when it is class (a), and the kind of an
+ * {@code OperatorAction} fixes its class and scope. Messages name the schema field and the rule and
+ * never echo a value or an unknown key.
  */
 public final class JournalSchemas {
   /** The only payload version there is. */
@@ -57,6 +58,14 @@ public final class JournalSchemas {
     EITHER
   }
 
+  /** The longest {@code detail} or {@code reason}. */
+  static final int MAX_LONG_TEXT = 4_096;
+
+  /** The longest of every other text, and of each text in a list. */
+  static final int MAX_TEXT = 1_024;
+
+  private static final Instant FIRST_YEAR_0000 = Instant.parse("0000-01-01T00:00:00Z");
+  private static final Instant LAST_YEAR_9999 = Instant.parse("9999-12-31T23:59:59.999999999Z");
   private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
   private static final Map<JournalType, Map<String, Field>> FIELDS =
       new EnumMap<>(JournalType.class);
@@ -208,19 +217,20 @@ public final class JournalSchemas {
   private static void checkValue(JournalType type, String name, Field field, Object value) {
     boolean ok =
         switch (field) {
-          case TEXT -> value instanceof String;
+          case TEXT -> value instanceof String s && s.length() <= maxText(name);
           case COUNT -> value instanceof Long n && n >= 0;
           case HASH -> isHash(value);
           case HASH_LIST ->
               value instanceof List<?> list && list.stream().allMatch(JournalSchemas::isHash);
           case TEXT_LIST ->
-              value instanceof List<?> list && list.stream().allMatch(String.class::isInstance);
+              value instanceof List<?> list
+                  && list.stream().allMatch(e -> e instanceof String s && s.length() <= MAX_TEXT);
           case INSTANT -> value instanceof Instant t && isMicrosecondInstant(t);
           case FLAG -> value instanceof Boolean;
           case ASSIGNMENT_LIST -> value instanceof List<?> list && assignmentsOk(type, list);
         };
     if (!ok) {
-      throw refused(type, "payload field " + name + " must be " + describe(field));
+      throw refused(type, "payload field " + name + " must be " + describe(field, name));
     }
   }
 
@@ -250,21 +260,29 @@ public final class JournalSchemas {
   }
 
   private static boolean isMicrosecondInstant(Instant t) {
-    int year = t.atOffset(ZoneOffset.UTC).getYear();
-    return t.getNano() % 1000 == 0 && year >= 0 && year <= 9999;
+    // compared as instants: Instant.MIN and Instant.MAX have no calendar year to read
+    return t.getNano() % 1000 == 0 && !t.isBefore(FIRST_YEAR_0000) && !t.isAfter(LAST_YEAR_9999);
   }
 
-  private static String describe(Field field) {
+  private static int maxText(String name) {
+    return name.equals("detail") || name.equals("reason") ? MAX_LONG_TEXT : MAX_TEXT;
+  }
+
+  private static String describe(Field field, String name) {
     return switch (field) {
-      case TEXT -> "text";
+      case TEXT -> "text of at most " + maxText(name) + " characters";
       case COUNT -> "a non-negative integer";
       case HASH -> "64 lower-case hex characters";
       case HASH_LIST -> "a list of hashes (64 lower-case hex characters each)";
-      case TEXT_LIST -> "a list of text";
+      case TEXT_LIST -> "a list of text of at most " + MAX_TEXT + " characters each";
       case INSTANT -> "an instant of at most microsecond precision";
       case FLAG -> "true or false";
       case ASSIGNMENT_LIST ->
-          "a list of objects with exactly subject (text), trn (text) and version_seq (integer)";
+          "a list of objects with exactly subject (text of at most "
+              + MAX_TEXT
+              + " characters), trn (text of at most "
+              + MAX_TEXT
+              + " characters) and version_seq (integer)";
     };
   }
 

@@ -6,10 +6,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.SplittableRandom;
+import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
 
 class JournalKeyTest {
@@ -106,9 +109,10 @@ class JournalKeyTest {
     String batch = "ab".repeat(32) + ":7";
     JournalKey.ClassA admitted =
         new JournalKey.ClassA(JournalScope.control(), 3, JournalType.BATCH_ADMITTED, batch, 1);
+    // the shard is x and the first byte of SHA-256("abab...ab:7") as two hex digits (sha256sum)
     assertThat(path(admitted))
         .isEqualTo(
-            "journal/control/e000000000003/a/BatchAdmitted/x/"
+            "journal/control/e000000000003/a/BatchAdmitted/x63/"
                 + "ab".repeat(32)
                 + "=7/000000000001");
     assertThat(admitted.journalClass()).isEqualTo(JournalClass.A);
@@ -189,39 +193,122 @@ class JournalKeyTest {
     assertThatThrownBy(() -> a(JournalType.DELIVERY_INTENT, "a b", 1))
         .isInstanceOf(IllegalArgumentException.class);
     assertThat(path(a(JournalType.DELIVERY_INTENT, "42", 1))).contains("/000000000042/");
-    assertThat(path(a(JournalType.DELIVERY_INTENT, "a:7", 1))).contains("/x/a=7/");
-    assertThat(path(a(JournalType.DELIVERY_INTENT, "x".repeat(100), 1))).contains("/x/xxxx");
+    assertThat(path(a(JournalType.DELIVERY_INTENT, "a:7", 1))).contains("/x36/a=7/");
+    assertThat(path(a(JournalType.DELIVERY_INTENT, "x".repeat(100), 1))).contains("/x09/xxxx");
     assertThat(path(a(JournalType.DELIVERY_INTENT, "123456789012", 1)))
         .contains("/n12345678/123456789012/");
 
-    SplittableRandom random = new SplittableRandom(20_261_019L);
+    // every tuple over a small alphabet (subjects of 1 to 3 characters, two types, two epochs, two
+    // ordinals): any two tuples that share an EvidenceKey are equal, and each key parses back
+    char[] alphabet = {'0', '1', ':', '=', 'a', '.', '-'};
+    List<String> subjects = new ArrayList<>();
+    for (char c1 : alphabet) {
+      subjects.add("" + c1);
+      for (char c2 : alphabet) {
+        subjects.add("" + c1 + c2);
+        for (char c3 : alphabet) {
+          subjects.add("" + c1 + c2 + c3);
+        }
+      }
+    }
+    assertThat(subjects).hasSize(7 + 49 + 343);
     JournalType[] types = {JournalType.DELIVERY_INTENT, JournalType.RECOVERY_DECISION};
-    List<JournalKey> keys = new ArrayList<>();
-    while (keys.size() < 2_000) {
-      try {
-        keys.add(
-            new JournalKey.ClassA(
-                SCOPE,
-                random.nextInt(2),
-                types[random.nextInt(types.length)],
-                randomSubject(random),
-                1 + random.nextInt(3)));
-      } catch (IllegalArgumentException refused) {
-        // an invalid tuple: skipped
-      }
-    }
-    for (int i = 0; i + 1 < keys.size(); i += 2) {
-      JournalKey x = keys.get(i);
-      JournalKey y = keys.get(i + 1);
-      assertThat(x.evidenceKey().equals(y.evidenceKey())).isEqualTo(x.equals(y));
-    }
-    // and across the whole sample: equal keys exactly for equal tuples
     Map<EvidenceKey, JournalKey> byKey = new HashMap<>();
-    for (JournalKey key : keys) {
-      JournalKey earlier = byKey.putIfAbsent(key.evidenceKey(), key);
-      if (earlier != null) {
-        assertThat(earlier).isEqualTo(key);
+    int accepted = 0;
+    int refused = 0;
+    for (String subject : subjects) {
+      for (JournalType type : types) {
+        for (long epoch = 0; epoch < 2; epoch++) {
+          for (long ordinal = 1; ordinal <= 2; ordinal++) {
+            JournalKey.ClassA key;
+            try {
+              key = new JournalKey.ClassA(SCOPE, epoch, type, subject, ordinal);
+            } catch (IllegalArgumentException e) {
+              refused++;
+              continue;
+            }
+            accepted++;
+            JournalKey earlier = byKey.putIfAbsent(key.evidenceKey(), key);
+            assertThat(earlier).as("%s shares its key with %s", key, earlier).isNull();
+            assertThat(JournalKey.parse(key.evidenceKey())).isEqualTo(key);
+          }
+        }
       }
+    }
+    assertThat(byKey).hasSize(accepted);
+    // the refusals: '=' anywhere, "." and "..", and "0" and every digit string with a leading zero
+    // ("00", "01", "000", "001", "010", "011"). Of the 399 subjects 258 have no '=', 256 are not
+    // "." or "..", and 249 are not one of those 7 digit strings (counted by hand, not by the code)
+    long refusedSubjects = subjects.stream().filter(s -> !isAccepted(s)).count();
+    assertThat(refused).isEqualTo(refusedSubjects * 2 * 2 * 2);
+    assertThat(accepted + refused).isEqualTo(subjects.size() * 8);
+    assertThat(subjects.stream().filter(JournalKeyTest::isAccepted).count()).isEqualTo(249);
+
+    // a near-twin of each of 2,000 random keys (a ':' made '-', or a number with another digit)
+    // never has the same EvidenceKey
+    SplittableRandom random = new SplittableRandom(20_261_019L);
+    int twins = 0;
+    while (twins < 2_000) {
+      String subject = randomSubject(random);
+      String twin = subject.contains(":") ? subject.replace(':', '-') : subject + "1";
+      if (!isAccepted(subject) || !isAccepted(twin)) {
+        continue;
+      }
+      JournalType type = types[random.nextInt(types.length)];
+      assertThat(a(type, subject, 1).evidenceKey()).isNotEqualTo(a(type, twin, 1).evidenceKey());
+      twins++;
+    }
+  }
+
+  private static boolean isAccepted(String subject) {
+    try {
+      a(JournalType.DELIVERY_INTENT, subject, 1);
+      return true;
+    } catch (IllegalArgumentException refused) {
+      return false;
+    }
+  }
+
+  @Test
+  void aNonNumericSubjectIsShardedByTheFirstByteOfItsSha256() {
+    // vectors from sha256sum of the subject text as written (with ':', not '=')
+    String[][] vectors = {
+      {"a:7", "x36"},
+      {"b:1", "x34"},
+      {"p:1", "xab"},
+      {"a", "xca"},
+      {"a:a:a:a", "x4f"},
+      {"x".repeat(100), "x09"},
+      {"ab".repeat(32) + ":7", "x63"},
+    };
+    for (String[] vector : vectors) {
+      assertThat(path(a(JournalType.DELIVERY_INTENT, vector[0], 1)))
+          .contains("/a/DeliveryIntent/" + vector[1] + "/" + vector[0].replace(':', '=') + "/");
+    }
+    // a numeric subject keeps its n-shard
+    assertThat(path(a(JournalType.DELIVERY_INTENT, "7", 1))).contains("/n00000000/000000000007/");
+    // the shard spreads over 256 directories, each of the form x plus two lower-case hex digits
+    Set<String> shards = new TreeSet<>();
+    for (int i = 0; i < 4_000; i++) {
+      String path = path(a(JournalType.DELIVERY_INTENT, "s" + i, 1));
+      String shard = path.split("/", -1)[5];
+      assertThat(shard).matches("x[0-9a-f]{2}");
+      shards.add(shard);
+    }
+    assertThat(shards).hasSize(256);
+  }
+
+  @Test
+  void parseRefusesAShardThatIsNotTheCanonicalOne() {
+    String good = path(a(JournalType.DELIVERY_INTENT, "a:7", 1));
+    assertThat(good).contains("/x36/");
+    assertThat(JournalKey.parse(new EvidenceKey(good)))
+        .isEqualTo(a(JournalType.DELIVERY_INTENT, "a:7", 1));
+    for (String shard : List.of("x", "x37", "x3", "X36", "x036", "n00000000", "y36")) {
+      assertThatThrownBy(
+              () -> JournalKey.parse(new EvidenceKey(good.replace("/x36/", "/" + shard + "/"))))
+          .as(shard)
+          .isInstanceOf(IllegalArgumentException.class);
     }
   }
 
@@ -312,7 +399,9 @@ class JournalKeyTest {
         new JournalKey.ClassA(
             longest, MAX_NUMBER, JournalType.RECOVERY_DECISION, "a:".repeat(50), MAX_NUMBER);
     EvidenceKey evidence = key.evidenceKey();
-    assertThat(evidence.path()).hasSize(256);
+    // journal/ 8 + scope 99 + / + e+12 + /a/ + wire 16 + / + shard x+2 hex 3 + / + subject 100 + /
+    // + 12
+    assertThat(evidence.path()).hasSize(258);
     for (String segment : evidence.path().split("/", -1)) {
       assertThat(segment.length()).isLessThanOrEqualTo(100);
     }
@@ -323,7 +412,7 @@ class JournalKeyTest {
                     .evidenceKey()
                     .path()
                     .length())
-            .isLessThanOrEqualTo(256);
+            .isLessThanOrEqualTo(258);
       }
     }
     assertThat(new JournalKey.ClassB(longest, MAX_NUMBER, MAX_NUMBER).evidenceKey().path().length())
@@ -385,7 +474,7 @@ class JournalKeyTest {
   @Test
   void wireNamesAreTheSpecsAndRoundTrip() {
     assertThat(JournalType.values()).hasSize(7);
-    Map<JournalType, String> expected = new java.util.EnumMap<>(JournalType.class);
+    Map<JournalType, String> expected = new EnumMap<>(JournalType.class);
     expected.put(JournalType.DELIVERY_INTENT, "DeliveryIntent");
     expected.put(JournalType.BATCH_ADMITTED, "BatchAdmitted");
     expected.put(JournalType.TRANSPORT_RESULT, "TransportResult");

@@ -263,6 +263,29 @@ class JournalWriterTest {
     assertThat(writer.read(intentKey("44", 1))).isEmpty();
   }
 
+  @Test
+  void anObjectOverTheSizeLimitIsRefusedAtTheWriterAndNothingIsPut() {
+    MapStore store = new MapStore();
+    JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
+    JournalObject over = JournalFixtures.feedbackOfLength(JournalObject.MAX_BYTES + 1L);
+    assertThatThrownBy(() -> writer.write(over)).isInstanceOf(IllegalArgumentException.class);
+    assertThat(store.puts).isEmpty();
+    JournalObject exactly = JournalFixtures.feedbackOfLength(JournalObject.MAX_BYTES);
+    assertThat(writer.write(exactly)).isEqualTo(JournalWriter.Outcome.CREATED);
+    assertThat(writer.read(exactly.key())).contains(exactly);
+  }
+
+  @Test
+  void aStoredObjectOverTheSizeLimitIsAnIntegrityAlarmAndNotAnOutOfMemoryError() {
+    MapStore store = new MapStore();
+    JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
+    JournalKey key = JournalFixtures.object(JournalType.DELIVERY_INTENT).key();
+    byte[] over = new byte[JournalObject.MAX_BYTES + 1];
+    Arrays.fill(over, (byte) ' ');
+    storeBytes(store, key.evidenceKey(), over);
+    assertThatThrownBy(() -> writer.read(key)).isInstanceOf(EvidenceIntegrityException.class);
+  }
+
   private static void storeBytes(MapStore store, EvidenceKey key, byte[] bytes) {
     store.put(
         new EvidenceStore.PutRequest(

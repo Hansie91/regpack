@@ -150,6 +150,10 @@ class SealedNamesTest {
       for (UnaryOperator<String> form : FORMS) {
         String name = form.apply(segment);
         assertThat(name).doesNotEndWith(".").doesNotEndWith(" ");
+        // this guards the prefix rule: every name starts with the prefix of its form (d-, o- or
+        // m-), so no encoding of a segment is a bare device name before its first dot; the check
+        // below cannot fail for any other cause
+        assertThat(name).matches("[dom]-.*");
         assertThat(isWindowsReserved(name)).as("reserved: %s", name).isFalse();
         assertThat(name).matches("[a-z0-9._=,+^-]+");
         assertThat(name.length()).isLessThanOrEqualTo(255);

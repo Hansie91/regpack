@@ -3,6 +3,8 @@ package dev.regpack.ports.evidence.journal;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -94,5 +96,34 @@ final class JournalFixtures {
           case VERSION_ASSIGNED -> new JournalKey.ClassB(SCOPE, 3, 10_003);
         };
     return new JournalObject(key, type, 1, AT, payload(type, key.journalClass()));
+  }
+
+  /**
+   * A FeedbackReceived object whose canonical bytes are exactly {@code target} long: a list of text
+   * of 1,024 characters or a few less, as many as it takes. Equal texts share one String instance,
+   * so the object itself is small; only its canonical text is large.
+   */
+  static JournalObject feedbackOfLength(long target) {
+    JournalObject empty = feedback(List.of());
+    // the list "[]" grows by (length + 3) per element, less one for the first (no comma)
+    long total = target - empty.toBytes().length + 1;
+    long count = (total + 1026) / 1027;
+    long base = total / count;
+    long extra = total % count;
+    Map<Long, String> texts = new HashMap<>();
+    List<String> ids = new ArrayList<>();
+    for (long i = 0; i < count; i++) {
+      long length = base - 3 + (i < extra ? 1 : 0);
+      ids.add(texts.computeIfAbsent(length, n -> "a".repeat((int) (long) n)));
+    }
+    return feedback(ids);
+  }
+
+  private static JournalObject feedback(List<String> ids) {
+    Map<String, Object> payload =
+        new LinkedHashMap<>(payload(JournalType.FEEDBACK_RECEIVED, JournalClass.B));
+    payload.put("file_ids", ids);
+    return new JournalObject(
+        new JournalKey.ClassB(SCOPE, 3, 10_002), JournalType.FEEDBACK_RECEIVED, 1, AT, payload);
   }
 }

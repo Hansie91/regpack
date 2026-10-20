@@ -141,6 +141,8 @@ class JournalSchemasTest {
             "2026-10-19T12:00:00.000000Z", // text, not an Instant
             Instant.parse("2026-10-19T12:00:00.123456789Z"),
             Instant.parse("+10000-01-01T00:00:00Z"),
+            Instant.MIN,
+            Instant.MAX,
             5L)) {
       Map<String, Object> result =
           new LinkedHashMap<>(
@@ -228,6 +230,106 @@ class JournalSchemasTest {
     assertThatThrownBy(() -> validate(JournalType.BATCH_ADMITTED, text))
         .hasMessageContaining("pack_digest")
         .satisfies(e -> assertThat(e.getMessage()).doesNotContain(MARKER));
+  }
+
+  /** Every text field of the schemas and its limit in characters (UTF-16 code units). */
+  private static final Object[][] TEXT_LIMITS = {
+    {JournalType.DELIVERY_INTENT, "business_key", 1_024},
+    {JournalType.DELIVERY_INTENT, "trn", 1_024},
+    {JournalType.DELIVERY_INTENT, "action", 1_024},
+    {JournalType.DELIVERY_INTENT, "file_name", 1_024},
+    {JournalType.BATCH_ADMITTED, "batch_id", 1_024},
+    {JournalType.TRANSPORT_RESULT, "status", 1_024},
+    {JournalType.TRANSPORT_RESULT, "detail", 4_096},
+    {JournalType.RECOVERY_DECISION, "decision", 1_024},
+    {JournalType.RECOVERY_DECISION, "reason", 4_096},
+    {JournalType.OPERATOR_ACTION, "operator", 1_024},
+    {JournalType.OPERATOR_ACTION, "subject", 1_024},
+    {JournalType.OPERATOR_ACTION, "detail", 4_096},
+    {JournalType.VERSION_ASSIGNED, "batch_id", 1_024},
+  };
+
+  @Test
+  void everyTextFieldIsBoundedAndTheLimitItselfIsAccepted() {
+    for (Object[] row : TEXT_LIMITS) {
+      JournalType type = (JournalType) row[0];
+      String field = (String) row[1];
+      int limit = (Integer) row[2];
+      Map<String, Object> exactly =
+          new LinkedHashMap<>(JournalFixtures.payload(type, classOf(type)));
+      exactly.put(field, "a".repeat(limit));
+      assertThatCode(() -> validate(type, exactly))
+          .as(type + "." + field)
+          .doesNotThrowAnyException();
+      assertThat(
+              new JournalObject(
+                      JournalFixtures.object(type).key(), type, 1, JournalFixtures.AT, exactly)
+                  .payload())
+          .containsEntry(field, "a".repeat(limit));
+      Map<String, Object> over = new LinkedHashMap<>(exactly);
+      over.put(field, "a".repeat(limit + 1));
+      assertThatThrownBy(() -> validate(type, over))
+          .as(type + "." + field)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining(field)
+          .hasMessageContaining(Integer.toString(limit))
+          .satisfies(e -> assertThat(e.getMessage()).doesNotContain("aaaa"));
+    }
+    // the operator action kind is a name from a closed set: a long one is refused as text too
+    Map<String, Object> kind =
+        new LinkedHashMap<>(JournalFixtures.payload(JournalType.OPERATOR_ACTION, JournalClass.A));
+    kind.put("kind", "A".repeat(1_025));
+    assertThatThrownBy(() -> validate(JournalType.OPERATOR_ACTION, kind))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("kind")
+        .hasMessageContaining("1024");
+  }
+
+  @Test
+  void theTextsOfAListAreBoundedToo() {
+    Map<String, Object> ids =
+        new LinkedHashMap<>(JournalFixtures.payload(JournalType.FEEDBACK_RECEIVED, JournalClass.B));
+    ids.put("file_ids", List.of("a", "b".repeat(1_024)));
+    assertThatCode(() -> validate(JournalType.FEEDBACK_RECEIVED, ids)).doesNotThrowAnyException();
+    ids.put("file_ids", List.of("a", "b".repeat(1_025)));
+    assertThatThrownBy(() -> validate(JournalType.FEEDBACK_RECEIVED, ids))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("file_ids")
+        .hasMessageContaining("1024")
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("bbbb"));
+    for (String field : List.of("subject", "trn")) {
+      Map<String, Object> assigned =
+          new LinkedHashMap<>(
+              JournalFixtures.payload(JournalType.VERSION_ASSIGNED, JournalClass.B));
+      assigned.put(
+          "assignments",
+          List.of(
+              Map.of("subject", "s", "trn", "t", "version_seq", 1L),
+              withText(field, "c".repeat(1_024))));
+      assertThatCode(() -> validate(JournalType.VERSION_ASSIGNED, assigned))
+          .as(field)
+          .doesNotThrowAnyException();
+      assigned.put(
+          "assignments",
+          List.of(
+              Map.of("subject", "s", "trn", "t", "version_seq", 1L),
+              withText(field, "c".repeat(1_025))));
+      assertThatThrownBy(() -> validate(JournalType.VERSION_ASSIGNED, assigned))
+          .as(field)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("assignments")
+          .hasMessageContaining("1024")
+          .satisfies(e -> assertThat(e.getMessage()).doesNotContain("cccc"));
+    }
+  }
+
+  private static Map<String, Object> withText(String field, String value) {
+    Map<String, Object> assignment = new LinkedHashMap<>();
+    assignment.put("subject", "s");
+    assignment.put("trn", "t");
+    assignment.put("version_seq", 1L);
+    assignment.put(field, value);
+    return assignment;
   }
 
   @Test

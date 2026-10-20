@@ -35,7 +35,9 @@ public final class SealedTamper {
         .resolveSibling(SealedNames.meta(path.substring(path.lastIndexOf('/') + 1)));
   }
 
-  /** Flips the lowest bit of the last byte of the object file, which lies in the payload. */
+  /**
+   * Flips the lowest bit of the last byte of the object file, which lies in its SHA-256 trailer.
+   */
   public static void flipByte(Path volumeRoot, EvidenceKey key) throws IOException {
     flipByte(volumeRoot, key, -1);
   }

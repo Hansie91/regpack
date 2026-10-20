@@ -159,6 +159,10 @@ class JournalObjectBytesTest {
     bad.add(
         good.replace("\"subject_id\":\"42\",", "\"seq\":1,\"subject_id\":\"42\",").getBytes(UTF_8));
     bad.add(good.replace(hash, otherHash).getBytes(UTF_8)); // wrong payload hash
+    // the dedicated check names the field (a text that is only not canonical does not)
+    assertThatThrownBy(() -> JournalObject.fromBytes(good.replace(hash, otherHash).getBytes(UTF_8)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("payload_sha256");
     bad.add(good.replace("\"payload\":{", "\"extra\":{},\"payload\":{").getBytes(UTF_8));
     bad.add(good.replace("\"subject_id\":\"42\"", "\"subject_id\":\"042\"").getBytes(UTF_8));
     bad.add(good.replace("\"schema_version\":1", "\"schema_version\":0").getBytes(UTF_8));
@@ -204,6 +208,93 @@ class JournalObjectBytesTest {
     }
     // the control: the untouched text is accepted
     assertThat(JournalObject.fromBytes(good.getBytes(UTF_8))).isEqualTo(intent());
+  }
+
+  @Test
+  void theClockInstantIsRenderedWithSixDigitsOfMicroseconds() {
+    JournalKey key = intent().key();
+    Map<String, Object> payload = intent().payload();
+    String[][] cases = {
+      {"2026-10-19T12:00:00Z", "2026-10-19T12:00:00.000000Z"},
+      {"2026-10-19T12:00:00.120Z", "2026-10-19T12:00:00.120000Z"},
+      {"2026-10-19T12:00:00.100001Z", "2026-10-19T12:00:00.100001Z"},
+      {"2026-10-19T12:00:00.123456Z", "2026-10-19T12:00:00.123456Z"},
+      {"0000-01-01T00:00:00Z", "0000-01-01T00:00:00.000000Z"},
+      {"9999-12-31T23:59:59.999999Z", "9999-12-31T23:59:59.999999Z"},
+    };
+    for (String[] c : cases) {
+      JournalObject object =
+          new JournalObject(key, JournalType.DELIVERY_INTENT, 1, Instant.parse(c[0]), payload);
+      String text = text(object);
+      assertThat(text).contains("\"clock_instant\":\"" + c[1] + "\"");
+      assertThat(JournalObject.fromBytes(object.toBytes())).isEqualTo(object);
+      // the shortened form (what Instant.toString gives) is not the canonical text
+      String shortened = text.replace(c[1], c[0]);
+      if (!shortened.equals(text)) {
+        assertThatThrownBy(() -> JournalObject.fromBytes(shortened.getBytes(UTF_8)))
+            .as(c[0])
+            .isInstanceOf(IllegalArgumentException.class);
+      }
+    }
+  }
+
+  @Test
+  void aPayloadThatToBytesCouldNeverWriteCannotBeConstructed() {
+    JournalKey key = intent().key();
+    Map<String, Object> good = intent().payload();
+    String lone = "a" + (char) 0xD800 + "b";
+    String loneLow = "a" + (char) 0xDC00;
+    String reversed = "" + (char) 0xDC00 + (char) 0xD800;
+    for (String text : List.of(lone, loneLow, reversed, "tail" + (char) 0xD83D)) {
+      Map<String, Object> asValue = new LinkedHashMap<>(good);
+      asValue.put("file_name", text);
+      assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, asValue))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("surrogate");
+      Map<String, Object> asKey = new LinkedHashMap<>(good);
+      asKey.put(text, 1L);
+      assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, asKey))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("surrogate");
+      Map<String, Object> inList = new LinkedHashMap<>(good);
+      inList.put("context_ids", List.of(text));
+      assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, inList))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("surrogate");
+    }
+    // a pair is fine
+    Map<String, Object> pair = new LinkedHashMap<>(good);
+    pair.put("file_name", "ok " + new String(Character.toChars(0x1F600)));
+    assertThat(new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, pair).toBytes())
+        .isNotEmpty();
+    // an instant the canonical writer cannot render: nanoseconds, or a year outside 0000 to 9999
+    for (String instant :
+        List.of(
+            "2026-10-19T12:00:00.123456789Z",
+            "2026-10-19T12:00:00.000000001Z",
+            "+10000-01-01T00:00:00Z",
+            "-0001-12-31T23:59:59Z",
+            "MIN",
+            "MAX")) {
+      Map<String, Object> payload = new LinkedHashMap<>(good);
+      payload.put(
+          "file_name",
+          instant.equals("MIN")
+              ? Instant.MIN
+              : instant.equals("MAX") ? Instant.MAX : Instant.parse(instant));
+      assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, payload))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("instant")
+          .satisfies(
+              e -> assertThat(e.getMessage()).doesNotContain("2026").doesNotContain("10000"));
+    }
+    // and an instant it can render is not refused by the shape check (the schema refuses the
+    // field's type here, not the instant)
+    Map<String, Object> fine = new LinkedHashMap<>(good);
+    fine.put("file_name", Instant.parse("2026-10-19T12:00:00.123456Z"));
+    assertThatThrownBy(() -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, AT, fine))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("instant has");
   }
 
   @Test
@@ -332,6 +423,13 @@ class JournalObjectBytesTest {
                     1,
                     Instant.parse("+10000-01-01T00:00:00Z"),
                     payload))
+        .isInstanceOf(IllegalArgumentException.class);
+    // Instant.MIN has no calendar year: still an IllegalArgumentException, not a DateTimeException
+    assertThatThrownBy(
+            () -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, Instant.MIN, payload))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () -> new JournalObject(key, JournalType.DELIVERY_INTENT, 1, Instant.MAX, payload))
         .isInstanceOf(IllegalArgumentException.class);
   }
 

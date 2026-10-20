@@ -49,6 +49,13 @@ public interface EvidenceStore {
     }
   }
 
+  /**
+   * What to store. The retain-until of the retention is an {@link Instant} with at most microsecond
+   * precision and a year from 0000 to 9999 (the precision of the {@code Clock} port, and what every
+   * adapter can hold); {@code put} throws {@link IllegalArgumentException} for any other instant,
+   * for example {@code Instant.MAX} or an instant with nanoseconds, and stores nothing. This record
+   * does not check it, so a caller that computes a retain-until finds out at {@code put}.
+   */
   record PutRequest(EvidenceKey key, byte[] bytes, String mediaType, Retention retention) {
     public PutRequest {
       Objects.requireNonNull(key, "key");
@@ -154,8 +161,11 @@ public interface EvidenceStore {
   List<EvidenceKey> list(String prefix, Optional<EvidenceKey> after, int limit);
 
   /**
-   * Moves retain-until later; an earlier instant throws {@link EvidenceRetentionException}. A key
-   * that was never put throws {@link IllegalArgumentException} with the message {@code "no such
+   * Moves retain-until later; an earlier instant throws {@link EvidenceRetentionException}. The new
+   * instant has at most microsecond precision and a year from 0000 to 9999, as on {@link
+   * PutRequest}; any other instant throws {@link IllegalArgumentException} before it is compared
+   * with the stored one (so {@code Instant.MIN} is not "earlier"), and the object is unchanged. A
+   * key that was never put throws {@link IllegalArgumentException} with the message {@code "no such
    * evidence key: <path>"} (M28); during an outage {@link EvidenceUnavailableException} comes
    * first. There is no delete, so a listed key cannot vanish; a lost object is found by {@code
    * verify}, not by this call.

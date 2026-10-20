@@ -142,7 +142,7 @@ class SealedEvidenceStoreTest {
 
   /** Leaves the magic of a meta file and puts junk behind it. */
   private static void damageMeta(Path volume, EvidenceKey key) throws IOException {
-    Files.write(metaPath(volume, key), utf8("RPMETA01 this is not a retention record"));
+    Files.write(metaPath(volume, key), utf8("RPMETA02 this is not a retention record"));
   }
 
   @FunctionalInterface
@@ -1045,7 +1045,9 @@ class SealedEvidenceStoreTest {
         .contains("plaintext")
         .contains("must not receive production data before P3c")
         .contains("access control list")
-        .contains("a shortened or deleted meta is not detected")
+        .contains("a flipped bit anywhere in a file is found")
+        .contains("a deliberate edit that recomputes the trailer")
+        .contains("a shortened or deleted meta, are not detected")
         .contains("both volumes already hold")
         .contains("temporary file of the full object size");
   }
