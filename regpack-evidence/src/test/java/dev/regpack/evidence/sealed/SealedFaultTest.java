@@ -19,7 +19,9 @@ import dev.regpack.ports.evidence.EvidenceStore.StoredObject;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.testkit.clock.ManualClock;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,7 +41,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,7 +57,10 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class SealedFaultTest {
   private static final EvidenceKey KEY = new EvidenceKey("landing/k1");
-  private static final long DEAD_PID = Long.MAX_VALUE;
+
+  /** Above every pid_max (Linux 4,194,304) and never a Windows pid (multiples of 4). */
+  private static final long DEAD_PID = Integer.MAX_VALUE;
+
   private static final String MARKER = ".sealed-volume";
 
   @TempDir Path root;
@@ -292,11 +299,18 @@ class SealedFaultTest {
   @Test
   void aCorruptedCopyIsDetectedByHashAndServedFromTheOtherVolume() throws IOException {
     SealedEvidenceStore store = open();
-    store.put(request(KEY, "the payload of the object"));
+    byte[] payload = utf8("the payload of the object");
+    store.put(new PutRequest(KEY, payload, "text/plain", retention()));
     StoredObject expected = store.get(KEY).orElseThrow();
     byte[] original = Files.readAllBytes(SealedTamper.objectPath(volumeA, KEY));
+    int trailerLength = 32; // the SHA-256 that ends every file
+    int firstPayloadByte = original.length - trailerLength - payload.length;
+    int lastPayloadByte = original.length - trailerLength - 1;
+    assertThat(Arrays.copyOfRange(original, firstPayloadByte, lastPayloadByte + 1))
+        .as("the offsets point at the payload")
+        .isEqualTo(payload);
 
-    // the file is the header, the 25 payload bytes and the 32-byte trailer; a digit of the year of
+    // the file is the header, the payload and the 32-byte trailer; a digit of the year of
     // retain_until (a field no cross-check covers: key, length and payload hash are the others)
     // and of written_at
     String text = new String(original, StandardCharsets.ISO_8859_1);
@@ -309,9 +323,7 @@ class SealedFaultTest {
 
     // the seal names the fault: a flipped payload byte is a hash mismatch
     assertThatThrownBy(
-            () ->
-                SealedFormat.decodeObject(
-                    withByteFlipped(original, original.length - 33), KEY.path()))
+            () -> SealedFormat.decodeObject(withByteFlipped(original, lastPayloadByte), KEY.path()))
         .isInstanceOfSatisfying(
             SealedFormat.CorruptException.class,
             e -> assertThat(e.reason()).isEqualTo(SealedFormat.Reason.HASH_MISMATCH));
@@ -323,8 +335,8 @@ class SealedFaultTest {
             e -> assertThat(e.reason()).isEqualTo(SealedFormat.Reason.HASH_MISMATCH));
 
     Map<String, byte[]> damages = new TreeMap<>();
-    damages.put("payload byte flipped", withByteFlipped(original, original.length - 33));
-    damages.put("first payload byte flipped", withByteFlipped(original, original.length - 57));
+    damages.put("payload byte flipped", withByteFlipped(original, lastPayloadByte));
+    damages.put("first payload byte flipped", withByteFlipped(original, firstPayloadByte));
     damages.put("trailer byte flipped", withByteFlipped(original, original.length - 1));
     damages.put("retain_until digit flipped", withByteFlipped(original, retainDigit));
     damages.put("written_at digit flipped", withByteFlipped(original, writtenDigit));
@@ -509,6 +521,7 @@ class SealedFaultTest {
 
   @Test
   void temporaryFilesLeftByACrashAreNeverListedOrServedAndAreSweptAtOpen() throws IOException {
+    assertThat(ProcessHandle.of(DEAD_PID)).as("the constant must name no process").isEmpty();
     CrashOnLink crashing = new CrashOnLink(FileOps.real(), volumeB);
     SealedEvidenceStore store = open(crashing);
     crashing.arm(); // not before the open: its hard-link self-test makes a link too
@@ -837,7 +850,9 @@ class SealedFaultTest {
     // "unavailable" answer (three overtakes in a row) is a rarity; a regression that makes it
     // common, or permanent for one caller, shows in this count (T8 F1).
     AtomicInteger unavailableAnswers = new AtomicInteger();
-    // one store: the two calls of a key take turns under the key's lock
+    // one store: the two calls of a key take turns under the key's lock; this test would pass
+    // without the lock (two actors are rarely overtaken three times), and the lock is pinned by
+    // manyConcurrentCallsOnOneKeyThroughOneStoreAreAllAcknowledged
     for (int round = 0; round < 20; round++) {
       EvidenceKey key = new EvidenceKey("race/one-store-" + round);
       one.put(request(key, "v" + round));
@@ -1398,5 +1413,237 @@ class SealedFaultTest {
     assertThat(open().put(new PutRequest(KEY, winnerPayload, "text/plain", retention())))
         .isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
     assertThat(Files.readAllBytes(SealedTamper.objectPath(volumeB, KEY))).isEqualTo(winnerFile);
+  }
+
+  // ---------------------------------------------------------------- interruption (CONCURRENCY-5)
+
+  /** What a call that ran in a thread of its own threw, and whether the thread kept its flag. */
+  private record Outcome(Throwable thrown, boolean flagStillSet) {}
+
+  /** Runs {@code call} in a fresh thread; reading the flag at the end clears it, for the pool. */
+  private static Outcome inAThread(Callable<?> call) throws Exception {
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      return pool.submit(
+              () -> {
+                Throwable thrown = null;
+                try {
+                  call.call();
+                } catch (Exception e) {
+                  thrown = e;
+                }
+                return new Outcome(thrown, Thread.interrupted());
+              })
+          .get(60, TimeUnit.SECONDS);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void aThreadInterruptedBeforeAPutGetsAClearAnswerKeepsItsFlagAndLeavesNothingHalfWritten()
+      throws Exception {
+    SealedEvidenceStore store = open();
+
+    Outcome outcome =
+        inAThread(
+            () -> {
+              Thread.currentThread().interrupt();
+              return store.put(request(KEY, "hello"));
+            });
+
+    assertThat(outcome.thrown())
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("volume a failed: interrupted")
+        .hasCauseInstanceOf(ClosedByInterruptException.class);
+    assertThat(outcome.flagStillSet()).as("the interrupt is not swallowed").isTrue();
+    assertThat(temporaryFiles(volumeA)).isEmpty();
+    assertThat(temporaryFiles(volumeB)).isEmpty();
+    assertThat(SealedTamper.objectPath(volumeA, KEY)).doesNotExist();
+    assertThat(SealedTamper.objectPath(volumeB, KEY)).doesNotExist();
+    assertThat(store.get(KEY)).isEmpty();
+    // a retry in a thread whose flag is clear is acknowledged
+    assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
+    assertThat(store.scrub()).isEmpty();
+  }
+
+  @Test
+  void aThreadInterruptedBetweenTheVolumesLeavesACompleteCopyOnTheFirstAndAByteIdenticalRetryHeals()
+      throws Exception {
+    AtomicBoolean armed = new AtomicBoolean();
+    FailingFileOps ops =
+        new FailingFileOps(FileOps.real())
+            .before(
+                Op.WRITE_AND_FORCE,
+                path -> armed.get() && path.startsWith(volumeB),
+                path -> Thread.currentThread().interrupt());
+    SealedEvidenceStore store = open(ops);
+    armed.set(true); // not before the open: its hard-link self-test writes to volume b too
+
+    Outcome outcome = inAThread(() -> store.put(request(KEY, "hello")));
+
+    armed.set(false);
+    assertThat(outcome.thrown())
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("volume b failed: interrupted");
+    assertThat(outcome.flagStillSet()).isTrue();
+    assertThat(temporaryFiles(volumeA)).isEmpty();
+    assertThat(temporaryFiles(volumeB)).isEmpty();
+    assertThat(SealedTamper.objectPath(volumeB, KEY)).doesNotExist();
+    // the copy on volume a is whole and is served; the gap is the one scrub knows
+    assertThat(store.get(KEY).orElseThrow().bytes()).isEqualTo(utf8("hello"));
+    assertThat(store.scrub()).containsExactly("b landing/k1 MISSING_COPY");
+    assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+    assertThat(store.scrub()).isEmpty();
+    assertThat(Files.readAllBytes(SealedTamper.objectPath(volumeB, KEY)))
+        .isEqualTo(Files.readAllBytes(SealedTamper.objectPath(volumeA, KEY)));
+  }
+
+  @Test
+  void everyKindOfInterruptedIoIsTheInterruptedAnswerAndAPlainIoErrorStaysOne() throws Exception {
+    Map<String, Supplier<IOException>> kinds = new TreeMap<>();
+    kinds.put("closed by interrupt", ClosedByInterruptException::new);
+    kinds.put("interrupted io", () -> new InterruptedIOException("injected"));
+    for (Map.Entry<String, Supplier<IOException>> kind : kinds.entrySet()) {
+      AtomicBoolean armed = new AtomicBoolean();
+      FailingFileOps ops =
+          new FailingFileOps(FileOps.real())
+              .failNextWith(
+                  Op.WRITE_AND_FORCE, p -> armed.get() && p.startsWith(volumeA), kind.getValue());
+      SealedEvidenceStore store = open(ops);
+      armed.set(true);
+
+      Outcome outcome = inAThread(() -> store.put(request(KEY, "hello")));
+
+      assertThat(outcome.thrown())
+          .as(kind.getKey())
+          .isInstanceOf(EvidenceUnavailableException.class)
+          .hasMessage("volume a failed: interrupted");
+      assertThat(outcome.flagStillSet()).as("%s: the flag is set again", kind.getKey()).isTrue();
+      assertThat(temporaryFiles(volumeA)).isEmpty();
+      assertThat(store.get(KEY)).isEmpty();
+      deleteTree(volumeA);
+      deleteTree(volumeB);
+    }
+
+    // an ordinary I/O error is not an interruption: its text, and no flag
+    AtomicBoolean armed = new AtomicBoolean();
+    FailingFileOps plain =
+        new FailingFileOps(FileOps.real())
+            .failNextWith(
+                Op.WRITE_AND_FORCE,
+                p -> armed.get() && p.startsWith(volumeA),
+                () -> new IOException("disk"));
+    SealedEvidenceStore store = open(plain);
+    armed.set(true);
+
+    Outcome outcome = inAThread(() -> store.put(request(KEY, "hello")));
+
+    assertThat(outcome.thrown())
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("volume a failed: I/O error");
+    assertThat(outcome.flagStillSet()).isFalse();
+  }
+
+  // ---------------------------------------------------------------- scrub and the key lock
+
+  @Test
+  void scrubWaitsForAPutThatHoldsTheKeyAndDoesNotReportItsFirstCopyAsMissing() throws Exception {
+    Path objectOnA = SealedTamper.objectPath(volumeA, KEY);
+    Path objectOnB = SealedTamper.objectPath(volumeB, KEY);
+    CountDownLatch putAtTheLinkOnB = new CountDownLatch(1);
+    CountDownLatch releasePut = new CountDownLatch(1);
+    CountDownLatch scrubReadsA = new CountDownLatch(1);
+    AtomicBoolean scrubbing = new AtomicBoolean();
+    FailingFileOps ops =
+        new FailingFileOps(FileOps.real())
+            .before(
+                Op.LINK,
+                objectOnB::equals,
+                path -> {
+                  putAtTheLinkOnB.countDown();
+                  awaitOrFail(releasePut);
+                })
+            .before(
+                Op.READ,
+                path -> scrubbing.get() && path.equals(objectOnA),
+                path -> scrubReadsA.countDown());
+    SealedEvidenceStore store = open(ops);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      Future<PutOutcome> put = pool.submit(() -> store.put(request(KEY, "hello")));
+      assertThat(putAtTheLinkOnB.await(60, TimeUnit.SECONDS)).isTrue();
+      // the put holds the key: the copy on volume a is whole, the one on volume b is not there yet
+      assertThat(objectOnA).exists();
+      assertThat(objectOnB).doesNotExist();
+
+      scrubbing.set(true);
+      Future<List<String>> scrub = pool.submit(store::scrub);
+      // a bounded wait on a latch (no sleep as synchronisation): a scrub that does not take the
+      // key lock reads the copy on volume a at once; one that does is still waiting for the lock
+      boolean readTheKeyWhilePutHeldIt = scrubReadsA.await(500, TimeUnit.MILLISECONDS);
+      releasePut.countDown();
+
+      assertThat(put.get(60, TimeUnit.SECONDS)).isEqualTo(PutOutcome.CREATED);
+      List<String> findings = scrub.get(60, TimeUnit.SECONDS);
+      assertThat(readTheKeyWhilePutHeldIt)
+          .as("scrub read the key while a put held its lock")
+          .isFalse();
+      assertThat(findings).as("a key between two puts is whole").isEmpty();
+    } finally {
+      releasePut.countDown();
+      pool.shutdownNow();
+    }
+    assertThat(store.scrub()).isEmpty();
+  }
+
+  private static void awaitOrFail(CountDownLatch latch) throws IOException {
+    try {
+      if (!latch.await(60, TimeUnit.SECONDS)) {
+        throw new IOException("the test did not release the latch");
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new InterruptedIOException("interrupted while the test held a call");
+    }
+  }
+
+  // ---------------------------------------------------------------- the key lock (TEETH-10)
+
+  @Test
+  void manyConcurrentCallsOnOneKeyThroughOneStoreAreAllAcknowledged() throws Exception {
+    SealedEvidenceStore store = open();
+    int callers = 8;
+    // The key's lock is what keeps these callers from overtaking one another until a call has used
+    // its three tries (without it 4 rounds in 8 end in an "unavailable" answer): many rounds, so
+    // that a store without the lock is caught on practically every run.
+    for (int round = 0; round < 25; round++) {
+      EvidenceKey key = new EvidenceKey("race/lock-" + round);
+      store.put(request(key, "v" + round));
+      Instant base = retention().retainUntil();
+      List<Callable<Boolean>> tasks = new ArrayList<>();
+      for (int i = 1; i <= callers; i++) {
+        Instant later = base.plus(Duration.ofDays(i));
+        boolean extend = i % 2 == 0;
+        tasks.add(
+            () -> {
+              try {
+                if (extend) {
+                  store.extendRetention(key, later);
+                } else {
+                  store.setLegalHold(key, true);
+                }
+                return true;
+              } catch (EvidenceRetentionException e) {
+                return true; // a later instant won first: a legitimate refusal
+              } catch (EvidenceUnavailableException e) {
+                return false; // gave up after three tries
+              }
+            });
+      }
+
+      assertThat(runTogether(tasks)).as("round %d", round).containsOnly(true);
+    }
+    assertThat(store.scrub()).isEmpty();
   }
 }

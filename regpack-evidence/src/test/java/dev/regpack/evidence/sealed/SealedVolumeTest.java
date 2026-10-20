@@ -10,14 +10,16 @@ import dev.regpack.evidence.sealed.RecordingFileOps.Op;
 import dev.regpack.ports.evidence.EvidenceKey;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.AclFileAttributeView;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
@@ -37,22 +39,23 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * T6: one P-SEALED volume (D-E5, review focus EF7, EF10, EF11). Every test works in a
  * {@code @TempDir}. The tests of the sync rules use a recorder that claims a platform with
- * directory sync, so that they run on Windows too; what the real platform does is asserted
- * separately.
+ * directory sync, so that they run on Windows too. They show which calls the volume makes and in
+ * which order, and that a failing call propagates; they do not show that a byte reached the device.
+ * What the real operations force (the force call itself, through a recording force seam) is shown
+ * in {@code FileOpsTest}.
  */
 class SealedVolumeTest {
   private static final EvidenceKey KEY = new EvidenceKey("landing/k1");
   private static final byte[] FILE = "the object file, as the store built it".getBytes(UTF_8);
-  private static final long DEAD_PID = Long.MAX_VALUE;
+
+  /** Above every pid_max (Linux 4,194,304) and never a Windows pid (multiples of 4). */
+  private static final long DEAD_PID = Integer.MAX_VALUE;
+
   private static final Instant UNTIL = Instant.parse("2030-01-01T00:00:00Z");
 
   @TempDir Path root;
 
   // ---------------------------------------------------------------- helpers
-
-  private static boolean posix() {
-    return FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
-  }
 
   private static byte[] bytes(String text) {
     return text.getBytes(UTF_8);
@@ -152,7 +155,7 @@ class SealedVolumeTest {
   }
 
   @Test
-  void publishForcesTheDataBeforeItLinksAndSyncsTheDirectoryAfter() throws IOException {
+  void publishCallsWriteAndForceThenLinkThenSyncDirectoryInThatOrder() throws IOException {
     // what the real platform does: on Windows there is no directory sync to call
     RecordingFileOps real = RecordingFileOps.over(FileOps.real());
     new SealedVolume(fresh("real"), "vol-a", real).publish(KEY, FILE);
@@ -165,7 +168,8 @@ class SealedVolumeTest {
       assertThat(real.ops()).doesNotContain(Op.SYNC_DIRECTORY);
     }
 
-    // the rule itself, on every platform: the data is forced into a temporary name, the link
+    // the order of the calls, on every platform: writeAndForce is called for a temporary name, the
+    // link
     // gives it its name, and only then is the directory synced
     Path claimedRoot = fresh("claimed");
     RecordingFileOps claimed = RecordingFileOps.claimingDirectorySync(FileOps.real());
@@ -244,6 +248,28 @@ class SealedVolumeTest {
         .containsExactlyInAnyOrder("o/d-landing", "o", ".");
     assertThat(afterSync.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
     assertThat(temporaries(syncFails)).isEmpty();
+  }
+
+  @Test
+  void aFailedReadIsAnIoErrorAndNeverAnAbsence() throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true);
+    SealedVolume volume = new SealedVolume(root, "vol-a", failing);
+    SealedFormat.Meta meta = new SealedFormat.Meta(1, "journal", UNTIL, true);
+    volume.writeMarker();
+    volume.publish(KEY, FILE);
+    volume.writeMeta(KEY, meta);
+
+    failing.failNext(Op.READ);
+    assertThatIOException().isThrownBy(() -> volume.read(KEY));
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+
+    failing.failNext(Op.READ);
+    assertThatIOException().isThrownBy(() -> volume.readMeta(KEY));
+    assertThat(volume.readMeta(KEY)).contains(meta);
+
+    failing.failNext(Op.READ);
+    assertThatIOException().isThrownBy(volume::markerId);
+    assertThat(volume.markerId()).contains("vol-a");
   }
 
   @Test
@@ -475,6 +501,52 @@ class SealedVolumeTest {
   }
 
   @Test
+  void aDifferentKeyPublishedAfterAFailedSyncOfAParentStillSyncsThatParent() throws IOException {
+    Path o = root.resolve("o");
+    FailingFileOps failing =
+        new FailingFileOps(FileOps.real(), true).failNext(Op.SYNC_DIRECTORY, p -> p.equals(o));
+    RecordingFileOps recorder = RecordingFileOps.over(failing);
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+
+    // o and d-a are new: the sync of o (the entry of d-a) fails, so the put is not acknowledged
+    assertThatIOException().isThrownBy(() -> volume.publish(new EvidenceKey("a/b"), FILE));
+
+    // A different key into the same new directory links (true) and does not go through the
+    // refused-link path that syncs the whole chain: only the pending marks bring o (and the root,
+    // which gained o) back. The mark of d-a must have survived the failed sync of its parent.
+    recorder.clear();
+    assertThat(volume.publish(new EvidenceKey("a/c"), FILE)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder("o/d-a", "o", ".");
+
+    // every mark is cleared by now
+    recorder.clear();
+    assertThat(volume.publish(new EvidenceKey("a/d"), FILE)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY))).containsExactly("o/d-a");
+  }
+
+  @Test
+  void aMetaWrittenAfterAFailedSyncOfAParentStillSyncsThatParent() throws IOException {
+    Path o = root.resolve("o");
+    FailingFileOps failing =
+        new FailingFileOps(FileOps.real(), true).failNext(Op.SYNC_DIRECTORY, p -> p.equals(o));
+    RecordingFileOps recorder = RecordingFileOps.over(failing);
+    SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
+    SealedFormat.Meta meta = new SealedFormat.Meta(1, "journal", UNTIL, false);
+
+    assertThatIOException().isThrownBy(() -> volume.writeMeta(new EvidenceKey("a/b"), meta));
+
+    recorder.clear();
+    assertThat(volume.writeMeta(new EvidenceKey("a/c"), meta)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY)))
+        .containsExactlyInAnyOrder("o/d-a", "o", ".");
+
+    recorder.clear();
+    assertThat(volume.writeMeta(new EvidenceKey("a/d"), meta)).isTrue();
+    assertThat(relative(root, recorder.paths(Op.SYNC_DIRECTORY))).containsExactly("o/d-a");
+  }
+
+  @Test
   void concurrentPublishesIntoNewDirectoriesSyncEveryParent() throws Exception {
     RecordingFileOps recorder = RecordingFileOps.claimingDirectorySync(FileOps.real());
     SealedVolume volume = new SealedVolume(root, "vol-a", recorder);
@@ -539,7 +611,7 @@ class SealedVolumeTest {
 
   @Test
   void filesAndDirectoriesAreOwnerOnlyOnPosix() throws IOException {
-    Assumptions.assumeTrue(posix(), "the POSIX attribute view is needed");
+    Assumptions.assumeFalse(HostPlatform.current().isWindows(), "the POSIX permissions are needed");
     SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
     EvidenceKey key = new EvidenceKey("a/b/c");
 
@@ -555,6 +627,26 @@ class SealedVolumeTest {
     for (String name : List.of(".sealed-volume", "o/d-a/d-b/o-c", "o/d-a/d-b/m-c")) {
       assertThat(Files.getPosixFilePermissions(root.resolve(name))).as(name).isEqualTo(file);
     }
+  }
+
+  @Test
+  void onWindowsTheFilesCarryTheAclTheyInheritAndTheStoreSaysTheyAreNotOwnerOnly()
+      throws IOException {
+    Assumptions.assumeTrue(HostPlatform.current().isWindows(), "the twin of the POSIX test");
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    EvidenceKey key = new EvidenceKey("a/b/c");
+
+    volume.writeMarker();
+    volume.publish(key, FILE);
+    volume.writeMeta(key, new SealedFormat.Meta(1, "journal", UNTIL, false));
+
+    assertThat(root.getFileSystem().supportedFileAttributeViews()).doesNotContain("posix");
+    for (String name : List.of(".sealed-volume", "o/d-a/d-b/o-c", "o/d-a/d-b/m-c")) {
+      assertThat(Files.getFileAttributeView(root.resolve(name), AclFileAttributeView.class))
+          .as(name)
+          .isNotNull();
+    }
+    // the text of the store's limits() about the inherited list is pinned in SealedPortabilityTest
   }
 
   // ---------------------------------------------------------------- listing and temporaries
@@ -783,6 +875,7 @@ class SealedVolumeTest {
 
   @Test
   void sweepRemovesTemporariesOfDeadProcessesOnly() throws IOException {
+    assertThat(ProcessHandle.of(DEAD_PID)).as("the constant must name no process").isEmpty();
     SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
     volume.publish(new EvidenceKey("a/k"), FILE);
     long self = ProcessHandle.current().pid();
@@ -813,6 +906,101 @@ class SealedVolumeTest {
     assertThat(volume.read(new EvidenceKey("a/k"))).isPresent();
   }
 
+  /** The start of the JVM as the sweep sees it in the tests below. */
+  private static final Instant START = Instant.parse("2026-06-01T12:00:00Z");
+
+  private SealedVolume volumeStartedAt(Optional<Instant> start) {
+    return new SealedVolume(root, "vol-a", FileOps.real(), () -> start);
+  }
+
+  private Path plantTemporary(String name, long pid, long counter, Instant modified)
+      throws IOException {
+    Path file =
+        Files.createDirectories(root.resolve("o/d-a"))
+            .resolve(SealedNames.temporary(name, pid, counter));
+    Files.write(file, FILE);
+    Files.setLastModifiedTime(file, FileTime.from(modified));
+    return file;
+  }
+
+  @Test
+  void aTemporaryOfThisPidFromAnEarlierIncarnationIsSwept() throws IOException {
+    long self = ProcessHandle.current().pid();
+    // a container whose JVM is always pid 1, or a recycled pid: the process is "alive", but the
+    // file is older than the JVM that now holds the pid
+    Path stale = plantTemporary("o-x", self, 1, START.minusSeconds(3600));
+    Path rootStale = root.resolve(SealedNames.temporary(".selftest", self, 2));
+    Files.write(rootStale, FILE);
+    Files.setLastModifiedTime(rootStale, FileTime.from(START.minusSeconds(3600)));
+    Path inO = root.resolve("o").resolve(SealedNames.temporary("o-top", self, 3));
+    Files.write(inO, FILE);
+    Files.setLastModifiedTime(inO, FileTime.from(START.minusSeconds(3600)));
+
+    assertThat(volumeStartedAt(Optional.of(START)).sweepTemporaries()).isEqualTo(3);
+
+    assertThat(stale).doesNotExist();
+    assertThat(rootStale).doesNotExist();
+    assertThat(inO).doesNotExist();
+  }
+
+  @Test
+  void aTemporaryOfThisPidMadeByThisIncarnationIsKept() throws IOException {
+    long self = ProcessHandle.current().pid();
+    Path after = plantTemporary("o-a", self, 1, START.plusSeconds(5));
+    Path atStart = plantTemporary("o-b", self, 2, START);
+    // the file system may round a time down (FAT keeps two seconds): two seconds of skew are kept
+    Path withinSkew = plantTemporary("o-c", self, 3, START.minusSeconds(2));
+    Path beyondSkew = plantTemporary("o-d", self, 4, START.minusSeconds(2).minusMillis(1));
+
+    assertThat(volumeStartedAt(Optional.of(START)).sweepTemporaries()).isEqualTo(1);
+
+    assertThat(after).exists();
+    assertThat(atStart).exists();
+    assertThat(withinSkew).exists();
+    assertThat(beyondSkew).doesNotExist();
+  }
+
+  @Test
+  void aTemporaryOfAnotherLiveProcessIsKeptWhileItIsNotOlderThanThisJvm() throws IOException {
+    Optional<ProcessHandle> parent = ProcessHandle.current().parent();
+    Assumptions.assumeTrue(parent.isPresent(), "a live process other than this one is needed");
+    long other = parent.get().pid();
+    assertThat(other).isNotEqualTo(ProcessHandle.current().pid());
+    Path running = plantTemporary("o-a", other, 1, START.plusSeconds(1));
+    Path recycled = plantTemporary("o-b", other, 2, START.minusSeconds(3600));
+
+    assertThat(volumeStartedAt(Optional.of(START)).sweepTemporaries()).isEqualTo(1);
+
+    assertThat(running).as("a writer of another live process").exists();
+    assertThat(recycled).as("older than this JVM: a pid that was handed on").doesNotExist();
+  }
+
+  @Test
+  void withoutAStartInstantTheRuleIsTheLivenessOfTheProcessAlone() throws IOException {
+    long self = ProcessHandle.current().pid();
+    Path old = plantTemporary("o-a", self, 1, START.minusSeconds(3600));
+    Path dead = plantTemporary("o-b", DEAD_PID, 2, START.minusSeconds(3600));
+
+    assertThat(volumeStartedAt(Optional.empty()).sweepTemporaries()).isEqualTo(1);
+
+    assertThat(old).exists();
+    assertThat(dead).doesNotExist();
+  }
+
+  @Test
+  void aTemporaryThatVanishesDuringTheSweepIsNotCounted() throws IOException {
+    long self = ProcessHandle.current().pid();
+    Path stale = plantTemporary("o-a", self, 1, START.minusSeconds(3600));
+    // the listing shows the file, the file is gone when the sweep asks for its age
+    FailingFileOps vanishing =
+        new FailingFileOps(FileOps.real())
+            .after(Op.LIST, stale.getParent()::equals, directory -> Files.deleteIfExists(stale));
+
+    SealedVolume volume = new SealedVolume(root, "vol-a", vanishing, () -> Optional.of(START));
+
+    assertThat(volume.sweepTemporaries()).isZero();
+  }
+
   // ---------------------------------------------------------------- hard links, marker
 
   @Test
@@ -833,6 +1021,151 @@ class SealedVolumeTest {
       assertThatIOException().isThrownBy(volume::checkHardLinks).withMessageContaining("vol-b");
       assertThat(files(bad)).as("no self-test file is left").isEmpty();
     }
+  }
+
+  private static final FailingFileOps.LinkAction COPY =
+      (existing, name) -> Files.copy(existing, name);
+
+  private static final FailingFileOps.LinkAction MOVE =
+      (existing, name) -> Files.move(existing, name);
+
+  /** A link that is a true second name but takes over a name that exists (no no-clobber). */
+  private static final FailingFileOps.LinkAction LINK_THAT_REPLACES =
+      (existing, name) -> {
+        Files.deleteIfExists(name);
+        Files.createLink(name, existing);
+      };
+
+  /** A link that makes the second name and a third one: the file ends with three names. */
+  private static final FailingFileOps.LinkAction LINK_WITH_AN_EXTRA_NAME =
+      (existing, name) -> {
+        Files.createLink(name, existing);
+        Files.createLink(name.resolveSibling("extra-" + name.getFileName()), existing);
+      };
+
+  @Test
+  void aLinkThatCopiesIsRefusedBecauseTheTwoNamesAreNotOneFile() throws IOException {
+    Path dir = fresh("copy");
+    FailingFileOps ops = new FailingFileOps(FileOps.real()).linksBy(COPY);
+
+    assertThatIOException()
+        .isThrownBy(() -> new SealedVolume(dir, "vol-b", ops).checkHardLinks())
+        .withMessage("volume vol-b: the two names of a hard link are not one file");
+    assertThat(files(dir)).as("no self-test file is left").isEmpty();
+  }
+
+  @Test
+  void aLinkThatMovesIsRefused() throws IOException {
+    Path dir = fresh("move");
+    FailingFileOps ops = new FailingFileOps(FileOps.real()).linksBy(MOVE);
+
+    assertThatIOException()
+        .isThrownBy(() -> new SealedVolume(dir, "vol-b", ops).checkHardLinks())
+        .withMessage("volume vol-b: the two names of a hard link are not one file");
+    assertThat(files(dir)).as("no self-test file is left").isEmpty();
+  }
+
+  @Test
+  void aLinkOntoAnExistingNameThatDoesNotRefuseItIsRefused() throws IOException {
+    Path dir = fresh("replace");
+    FailingFileOps ops = new FailingFileOps(FileOps.real()).linksBy(LINK_THAT_REPLACES);
+
+    assertThatIOException()
+        .isThrownBy(() -> new SealedVolume(dir, "vol-b", ops).checkHardLinks())
+        .withMessage("volume vol-b: a hard link onto an existing name does not refuse it");
+    assertThat(files(dir)).as("no self-test file is left").isEmpty();
+  }
+
+  @Test
+  void aSecondLinkOntoTheNewNameIsAttemptedAndRefusedByTheRealFileSystem() throws IOException {
+    Path dir = fresh("twice");
+    RecordingFileOps recorder = RecordingFileOps.over(FileOps.real());
+
+    new SealedVolume(dir, "vol-a", recorder).checkHardLinks();
+
+    List<RecordingFileOps.Call> links =
+        recorder.calls().stream().filter(c -> c.op() == Op.LINK).toList();
+    assertThat(links).hasSize(2);
+    assertThat(links.get(1).path()).as("the same new name").isEqualTo(links.get(0).path());
+    assertThat(files(dir)).isEmpty();
+  }
+
+  @Test
+  void theLinkCountOfTheFileIsTwoWhereTheFileSystemReportsIt() throws IOException {
+    Path dir = fresh("count");
+    FailingFileOps ops = new FailingFileOps(FileOps.real()).linksBy(LINK_WITH_AN_EXTRA_NAME);
+    boolean reports = dir.getFileSystem().supportedFileAttributeViews().contains("unix");
+    // the guard is the platform, and the file system must agree with it (HostPlatformTest)
+    assertThat(reports).isEqualTo(!HostPlatform.current().isWindows());
+
+    if (reports) {
+      assertThatIOException()
+          .isThrownBy(() -> new SealedVolume(dir, "vol-b", ops).checkHardLinks())
+          .withMessage("volume vol-b: a hard link gives the file 3 names, not 2");
+    } else {
+      // no link count to read here: three names of one file pass (the other checks hold)
+      new SealedVolume(dir, "vol-b", ops).checkHardLinks();
+    }
+    try (Stream<Path> walk = Files.walk(dir)) {
+      for (Path leftover : walk.filter(Files::isRegularFile).toList()) {
+        assertThat(leftover.getFileName().toString()).startsWith("extra-");
+      }
+    }
+  }
+
+  @Test
+  void aForeignFileOnTheSecondNameIsSkippedAndNeverDeleted() throws IOException {
+    Path dir = fresh("taken");
+    FailingFileOps ops = new FailingFileOps(FileOps.real()).linkNameTaken(2);
+
+    new SealedVolume(dir, "vol-a", ops).checkHardLinks();
+
+    assertThat(ops.planted()).hasSize(2);
+    for (Path foreign : ops.planted()) {
+      assertThat(foreign).hasBinaryContent(FailingFileOps.FOREIGN);
+    }
+    assertThat(files(dir)).hasSize(2).allMatch(name -> name.contains("~tmp~"));
+  }
+
+  @Test
+  void whenEverySecondNameIsTakenTheSelfTestFailsClearlyAndDeletesNothingForeign()
+      throws IOException {
+    Path dir = fresh("always-taken");
+    FailingFileOps ops = new FailingFileOps(FileOps.real()).linkNameAlwaysTaken();
+
+    assertThatIOException()
+        .isThrownBy(() -> new SealedVolume(dir, "vol-b", ops).checkHardLinks())
+        .withMessage("volume vol-b: no free name for the hard-link self-test")
+        .withCauseInstanceOf(FileAlreadyExistsException.class);
+
+    assertThat(ops.planted()).hasSize(8);
+    for (Path foreign : ops.planted()) {
+      assertThat(foreign).hasBinaryContent(FailingFileOps.FOREIGN);
+    }
+    assertThat(files(dir)).hasSize(8).allMatch(name -> name.contains("~tmp~"));
+  }
+
+  @Test
+  void theSelfTestSyncsTheRootWhereTheVolumeCanSyncADirectory() throws IOException {
+    Path dir = fresh("sync");
+    RecordingFileOps claiming = RecordingFileOps.claimingDirectorySync(FileOps.real());
+    new SealedVolume(dir, "vol-a", claiming).checkHardLinks();
+    assertThat(claiming.paths(Op.SYNC_DIRECTORY)).containsExactly(dir);
+
+    // a volume whose directory sync fails is refused at the open, not at the first send
+    Path failingDir = fresh("sync-fails");
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true).failNext(Op.SYNC_DIRECTORY);
+    assertThatIOException()
+        .isThrownBy(() -> new SealedVolume(failingDir, "vol-b", failing).checkHardLinks())
+        .withMessage("volume vol-b cannot sync a directory");
+    assertThat(files(failingDir)).as("no self-test file is left").isEmpty();
+
+    // and where the platform cannot sync a directory (Windows) none is attempted
+    Path plainDir = fresh("plain");
+    RecordingFileOps plain = RecordingFileOps.over(FileOps.real());
+    new SealedVolume(plainDir, "vol-c", plain).checkHardLinks();
+    assertThat(plain.paths(Op.SYNC_DIRECTORY).isEmpty())
+        .isEqualTo(HostPlatform.current().isWindows());
   }
 
   @Test

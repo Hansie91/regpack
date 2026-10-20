@@ -53,6 +53,9 @@ import org.junit.jupiter.api.io.TempDir;
 class SealedEvidenceStoreTest {
   private static final EvidenceKey KEY = new EvidenceKey("landing/k1");
 
+  /** Above every pid_max (Linux 4,194,304) and never a Windows pid (multiples of 4). */
+  private static final long DEAD_PID = Integer.MAX_VALUE;
+
   @TempDir Path root;
 
   private ManualClock clock;
@@ -313,12 +316,14 @@ class SealedEvidenceStoreTest {
   }
 
   @Test
-  void aCrashBetweenTheVolumesIsNeverAcknowledged() throws IOException {
+  void aWriteFailureOnTheSecondVolumeIsNeverAcknowledged() throws IOException {
     FailingFileOps failing = new FailingFileOps(FileOps.real());
     SealedEvidenceStore store = open(failing);
     failing.failNext(Op.WRITE_AND_FORCE, path -> path.startsWith(volumeB));
 
-    // the caller saw an exception, so nothing was acknowledged...
+    // An IOException from the second volume's write, in a process that lives on (it deletes its
+    // temporary file); the death of the writer, which leaves debris, is in SealedFaultTest.
+    // The caller saw an exception, so nothing was acknowledged...
     assertThatThrownBy(() -> store.put(request(KEY, "hello")))
         .isInstanceOf(EvidenceUnavailableException.class);
     // ...and the state is: the first volume has it, the second not, and reads serve it
@@ -346,7 +351,7 @@ class SealedEvidenceStoreTest {
   }
 
   @Test
-  void aPutOfAnExistingKeyIsNotAcknowledgedBeforeItsDirectoriesAreSyncedOnBothVolumes()
+  void aFailingDirectorySyncOfAnExistingKeyFailsThePutAndTheSyncIsCalledOnBothVolumes()
       throws IOException {
     FailingFileOps failing = new FailingFileOps(FileOps.real(), true);
     RecordingFileOps recording = RecordingFileOps.claimingDirectorySync(failing);
@@ -633,6 +638,17 @@ class SealedEvidenceStoreTest {
     Instant later = retention().retainUntil().plus(Duration.ofDays(365));
 
     store.extendRetention(KEY, later);
+
+    // the meta that the extension wrote, before the hold supersedes it: it is in the persisted
+    // format, with the retention class of the object
+    SealedFormat.Meta extendedOnA = volume(volumeA, "vol-a").readMeta(KEY).orElseThrow();
+    SealedFormat.Meta extendedOnB = volume(volumeB, "vol-b").readMeta(KEY).orElseThrow();
+    assertThat(extendedOnA).isEqualTo(extendedOnB);
+    assertThat(extendedOnA.retentionClass()).isEqualTo("landing");
+    assertThat(extendedOnA.rev()).isEqualTo(1);
+    assertThat(extendedOnA.retainUntil()).isEqualTo(later);
+    assertThat(extendedOnA.legalHold()).isFalse();
+
     store.setLegalHold(KEY, true);
 
     SealedFormat.Meta onA = volume(volumeA, "vol-a").readMeta(KEY).orElseThrow();
@@ -1198,10 +1214,10 @@ class SealedEvidenceStoreTest {
 
   @Test
   void openSweepsTheTemporaryFilesOfDeadProcesses() throws IOException {
+    assertThat(ProcessHandle.of(DEAD_PID)).as("the constant must name no process").isEmpty();
     open().put(request(KEY, "hello"));
     Path leftover =
-        objectPath(volumeA, KEY)
-            .resolveSibling(SealedNames.temporary("o-left-over", Long.MAX_VALUE, 1));
+        objectPath(volumeA, KEY).resolveSibling(SealedNames.temporary("o-left-over", DEAD_PID, 1));
     Files.write(leftover, utf8("a crashed writer"));
 
     SealedEvidenceStore store = open();

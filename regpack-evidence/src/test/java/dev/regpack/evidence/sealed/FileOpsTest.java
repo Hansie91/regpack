@@ -5,12 +5,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.AclFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
@@ -28,10 +30,6 @@ class FileOpsTest {
 
   private static byte[] bytes(String text) {
     return text.getBytes(UTF_8);
-  }
-
-  private static boolean posix() {
-    return FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
   }
 
   @Test
@@ -78,6 +76,16 @@ class FileOpsTest {
 
     ops.link(source, name);
 
+    // a link, not a copy and not a move: the source stays, and the two names are one file
+    assertThat(source).exists();
+    assertThat(Files.isSameFile(source, name)).isTrue();
+    if (HostPlatform.current().isWindows()) {
+      assertThat(name.getFileSystem().supportedFileAttributeViews())
+          .as("no link count to read on Windows")
+          .doesNotContain("unix");
+    } else {
+      assertThat(Files.getAttribute(name, "unix:nlink")).isEqualTo(2);
+    }
     assertThat(name).hasBinaryContent(bytes("data"));
     ops.delete(source);
     assertThat(name).as("the data lives on under the other name").hasBinaryContent(bytes("data"));
@@ -132,28 +140,111 @@ class FileOpsTest {
   }
 
   @Test
-  void aDirectoryCanBeSyncedWhereThePlatformCanAndNowhereElseIsClaimed() throws IOException {
+  void aDirectoryThatExistsCanBeSyncedWithoutAnError() throws IOException {
     ops.createDirectories(root.resolve("dir"));
 
     ops.syncDirectory(root.resolve("dir")); // never throws for a directory that exists
-
-    // where the file system has no POSIX view (Windows) the JDK cannot open a directory: nothing
-    // is forced, and the seam says so (the volume then makes no call and the limits of the store
-    // say it too)
-    assertThat(ops.supportsDirectorySync()).isEqualTo(posix());
+    // that supportsDirectorySync() agrees with the platform is HostPlatformTest's cross-check
   }
 
   @Test
   void aSyncOfADirectoryThatIsNotThereFailsWhereTheSyncIsReal() throws IOException {
-    Assumptions.assumeTrue(ops.supportsDirectorySync(), "a platform with directory sync");
+    Assumptions.assumeFalse(HostPlatform.current().isWindows(), "a platform with directory sync");
 
     assertThatThrownBy(() -> ops.syncDirectory(root.resolve("absent")))
         .isInstanceOf(IOException.class);
   }
 
+  /** Records what the channel is when a force is asked for. */
+  private static final class RecordingForcer implements FileOps.Forcer {
+    final List<Boolean> open = new ArrayList<>();
+    final List<Long> sizes = new ArrayList<>();
+    final List<FileChannel> channels = new ArrayList<>();
+
+    @Override
+    public void force(FileChannel channel) throws IOException {
+      open.add(channel.isOpen());
+      sizes.add(channel.size());
+      channels.add(channel);
+    }
+  }
+
+  @Test
+  void writeAndForceForcesOnceWhileTheChannelIsOpenAndAfterEveryByteIsWritten() throws IOException {
+    RecordingForcer forcer = new RecordingForcer();
+    FileOps recording = new FileOps.Real(forcer);
+    byte[] data = bytes("some data that has to reach the device");
+
+    recording.writeAndForce(root.resolve("f"), data);
+
+    assertThat(forcer.open).as("forced once, on an open channel").containsExactly(true);
+    assertThat(forcer.sizes)
+        .as("all bytes written when forced")
+        .containsExactly((long) data.length);
+    assertThat(forcer.channels.get(0).isOpen()).as("closed only after the force").isFalse();
+    assertThat(root.resolve("f")).hasBinaryContent(data);
+
+    // an empty file is forced too; a large one is written in full before the force
+    recording.writeAndForce(root.resolve("empty"), new byte[0]);
+    byte[] big = new byte[3 * 1024 * 1024 + 17];
+    recording.writeAndForce(root.resolve("big"), big);
+    assertThat(forcer.sizes).containsExactly((long) data.length, 0L, (long) big.length);
+  }
+
+  @Test
+  void aFailedForceFailsTheWriteAndARefusedWriteForcesNothing() throws IOException {
+    FileOps failing =
+        new FileOps.Real(
+            channel -> {
+              throw new IOException("injected force failure");
+            });
+    assertThatThrownBy(() -> failing.writeAndForce(root.resolve("f"), bytes("x")))
+        .isInstanceOf(IOException.class)
+        .hasMessage("injected force failure");
+
+    RecordingForcer forcer = new RecordingForcer();
+    FileOps recording = new FileOps.Real(forcer);
+    Files.write(root.resolve("taken"), bytes("x"));
+    assertThatThrownBy(() -> recording.writeAndForce(root.resolve("taken"), bytes("y")))
+        .isInstanceOf(FileAlreadyExistsException.class);
+    assertThat(forcer.open).isEmpty();
+  }
+
+  @Test
+  void onPosixADirectoryIsForcedThroughAChannelOpenOnIt() throws IOException {
+    Assumptions.assumeFalse(HostPlatform.current().isWindows(), "a platform with directory sync");
+    RecordingForcer forcer = new RecordingForcer();
+    FileOps recording = new FileOps.Real(forcer);
+    ops.createDirectories(root.resolve("dir"));
+
+    recording.syncDirectory(root.resolve("dir"));
+
+    assertThat(recording.supportsDirectorySync()).isTrue();
+    assertThat(forcer.open).containsExactly(true);
+    assertThat(forcer.channels.get(0).isOpen()).as("closed after the force").isFalse();
+    // a directory that is not there is not forced, and the call says so
+    assertThatThrownBy(() -> recording.syncDirectory(root.resolve("absent")))
+        .isInstanceOf(IOException.class);
+    assertThat(forcer.open).hasSize(1);
+  }
+
+  @Test
+  void onWindowsNoDirectoryIsForcedAndTheSeamSaysSo() throws IOException {
+    Assumptions.assumeTrue(HostPlatform.current().isWindows(), "a platform without it");
+    RecordingForcer forcer = new RecordingForcer();
+    FileOps recording = new FileOps.Real(forcer);
+    ops.createDirectories(root.resolve("dir"));
+
+    recording.syncDirectory(root.resolve("dir"));
+    recording.syncDirectory(root.resolve("absent")); // nothing is opened, so nothing can fail
+
+    assertThat(recording.supportsDirectorySync()).isFalse();
+    assertThat(forcer.open).as("no directory is forced").isEmpty();
+  }
+
   @Test
   void createdFilesAndDirectoriesAreOwnerOnlyOnPosix() throws IOException {
-    Assumptions.assumeTrue(posix(), "the POSIX attribute view is needed");
+    Assumptions.assumeFalse(HostPlatform.current().isWindows(), "the POSIX permissions are needed");
 
     ops.createDirectories(root.resolve("a/b"));
     ops.writeAndForce(root.resolve("a/b/f"), bytes("x"));
@@ -164,6 +255,21 @@ class FileOpsTest {
         .isEqualTo(PosixFilePermissions.fromString("rwx------"));
     assertThat(Files.getPosixFilePermissions(root.resolve("a/b/f")))
         .isEqualTo(PosixFilePermissions.fromString("rw-------"));
+  }
+
+  @Test
+  void onWindowsCreatedFilesCarryTheAclTheyInheritAndHaveNoPosixPermissions() throws IOException {
+    Assumptions.assumeTrue(HostPlatform.current().isWindows(), "the twin of the POSIX test");
+
+    ops.createDirectories(root.resolve("a/b"));
+    ops.writeAndForce(root.resolve("a/b/f"), bytes("x"));
+
+    assertThat(root.getFileSystem().supportedFileAttributeViews())
+        .doesNotContain("posix")
+        .contains("acl");
+    assertThat(Files.getFileAttributeView(root.resolve("a/b/f"), AclFileAttributeView.class))
+        .as("the access control list that the file inherits (see limits() of the store)")
+        .isNotNull();
   }
 
   @Test

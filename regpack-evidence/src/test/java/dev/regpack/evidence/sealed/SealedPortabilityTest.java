@@ -15,6 +15,8 @@ import dev.regpack.testkit.clock.ManualClock;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.AclFileAttributeView;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -247,7 +249,7 @@ class SealedPortabilityTest {
   // ---------------------------------------------------------------- directory flush
 
   @Test
-  void directoryFlushIsAttemptedWhereThePlatformCanAndTheLimitsSayWhereNot() {
+  void directorySyncIsCalledWhereThePlatformCanAndTheLimitsSayWhereNot() {
     boolean platformCanForceADirectory = !platform.isWindows();
     RecordingFileOps recording = RecordingFileOps.over(FileOps.real());
     SealedEvidenceStore store = open(recording);
@@ -269,7 +271,7 @@ class SealedPortabilityTest {
   }
 
   @Test
-  void onPosixTheDirectoryOfANewObjectAndTheParentsOfNewDirectoriesAreForced() {
+  void onPosixTheSyncOfTheDirectoryOfANewObjectAndOfTheParentsOfNewDirectoriesIsCalled() {
     Assumptions.assumeFalse(platform.isWindows(), "this platform cannot force a directory");
     RecordingFileOps recording = RecordingFileOps.over(FileOps.real());
     SealedEvidenceStore store = open(recording);
@@ -296,7 +298,7 @@ class SealedPortabilityTest {
   }
 
   @Test
-  void onWindowsNoDirectoryIsForcedAndTheStoreSaysSo() throws IOException {
+  void onWindowsNoDirectorySyncIsCalledAndTheStoreSaysSo() throws IOException {
     Assumptions.assumeTrue(platform.isWindows(), "this platform can force a directory");
     RecordingFileOps recording = RecordingFileOps.over(FileOps.real());
     SealedEvidenceStore store = open(recording);
@@ -310,6 +312,59 @@ class SealedPortabilityTest {
     assertThat(store.limits())
         .contains("on Windows the JDK cannot force a directory")
         .contains("a new file name may not survive a power failure");
+  }
+
+  // ---------------------------------------------------------------- file permissions
+
+  private static final String ACL_LIMIT = "the files carry the access control list they inherit";
+
+  @Test
+  void onPosixTheStoredFilesAreOwnerOnlyAndTheLimitsStillNameTheWindowsList() throws IOException {
+    Assumptions.assumeFalse(platform.isWindows(), "the POSIX permissions are needed");
+    SealedEvidenceStore store = open();
+    EvidenceKey key = new EvidenceKey("perm/one");
+
+    store.put(request(key, utf8("x"), "text/plain"));
+    store.setLegalHold(key, true);
+
+    for (Path volumeRoot : List.of(volumeA, volumeB)) {
+      for (Path file :
+          List.of(
+              volumeRoot.resolve(".sealed-volume"),
+              SealedTamper.objectPath(volumeRoot, key),
+              SealedTamper.metaPath(volumeRoot, key))) {
+        assertThat(Files.getPosixFilePermissions(file))
+            .as(file.getFileName().toString())
+            .isEqualTo(PosixFilePermissions.fromString("rw-------"));
+      }
+    }
+    assertThat(store.limits()).contains(ACL_LIMIT).contains("only on POSIX systems");
+  }
+
+  @Test
+  void onWindowsTheStoredFilesCarryTheInheritedAclAndTheLimitsSayWhy() throws IOException {
+    Assumptions.assumeTrue(platform.isWindows(), "the twin of the POSIX test");
+    SealedEvidenceStore store = open();
+    EvidenceKey key = new EvidenceKey("perm/one");
+
+    store.put(request(key, utf8("x"), "text/plain"));
+    store.setLegalHold(key, true);
+
+    assertThat(volumeA.getFileSystem().supportedFileAttributeViews()).doesNotContain("posix");
+    for (Path volumeRoot : List.of(volumeA, volumeB)) {
+      for (Path file :
+          List.of(
+              volumeRoot.resolve(".sealed-volume"),
+              SealedTamper.objectPath(volumeRoot, key),
+              SealedTamper.metaPath(volumeRoot, key))) {
+        assertThat(Files.getFileAttributeView(file, AclFileAttributeView.class))
+            .as(file.getFileName().toString())
+            .isNotNull();
+      }
+    }
+    assertThat(store.limits())
+        .contains(ACL_LIMIT)
+        .contains("only on POSIX systems are they owner-only");
   }
 
   // ---------------------------------------------------------------- content

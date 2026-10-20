@@ -16,6 +16,7 @@ import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -81,9 +82,22 @@ interface FileOps {
    */
   List<Path> list(Path dir) throws IOException;
 
+  /**
+   * What forces a file channel to the device: the one call that makes a write durable. The real
+   * operations use {@link #FORCE}; a test passes a recording one to see that, and when, it is
+   * called.
+   */
+  @FunctionalInterface
+  interface Forcer {
+    /** The real force: data and metadata of the file (or the entries of the directory). */
+    Forcer FORCE = channel -> channel.force(true);
+
+    void force(FileChannel channel) throws IOException;
+  }
+
   /** The operations on the file system of the machine, through {@code java.nio}. */
   final class Real implements FileOps {
-    private static final Real INSTANCE = new Real();
+    private static final Real INSTANCE = new Real(Forcer.FORCE);
     private static final boolean POSIX =
         FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
     private static final FileAttribute<Set<PosixFilePermission>> DIRECTORY_PERMISSIONS =
@@ -93,7 +107,12 @@ interface FileOps {
     private static final Set<OpenOption> CREATE_NEW_FOR_WRITE =
         Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
 
-    private Real() {}
+    private final Forcer forcer;
+
+    /** The real operations with another force call (a test). */
+    Real(Forcer forcer) {
+      this.forcer = Objects.requireNonNull(forcer, "forcer");
+    }
 
     @Override
     public void createDirectories(Path dir) throws IOException {
@@ -114,7 +133,7 @@ interface FileOps {
         while (buffer.hasRemaining()) {
           channel.write(buffer);
         }
-        channel.force(true);
+        forcer.force(channel);
       }
     }
 
@@ -134,7 +153,7 @@ interface FileOps {
         return;
       }
       try (FileChannel channel = FileChannel.open(dir, StandardOpenOption.READ)) {
-        channel.force(true);
+        forcer.force(channel);
       }
     }
 

@@ -36,26 +36,14 @@ public final class SealedTamper {
   }
 
   /**
-   * Flips the lowest bit of the last byte of the object file, which lies in its SHA-256 trailer.
+   * Flips the lowest bit of the last byte of the object file: a byte of its SHA-256 trailer, for
+   * any payload (also an empty one). A flip of another byte is made on a copy of the bytes, with
+   * {@link #replaceObject}.
    */
   public static void flipByte(Path volumeRoot, EvidenceKey key) throws IOException {
-    flipByte(volumeRoot, key, -1);
-  }
-
-  /**
-   * Flips the lowest bit of one byte of the object file.
-   *
-   * @param offset the position of the byte; a negative value counts from the end ({@code -1} is the
-   *     last byte)
-   */
-  public static void flipByte(Path volumeRoot, EvidenceKey key, int offset) throws IOException {
     Path file = objectPath(volumeRoot, key);
     byte[] bytes = Files.readAllBytes(file);
-    int position = offset < 0 ? bytes.length + offset : offset;
-    if (position < 0 || position >= bytes.length) {
-      throw new IllegalArgumentException("the offset is outside the file");
-    }
-    bytes[position] ^= 0x01;
+    bytes[bytes.length - 1] ^= 0x01;
     Files.write(file, bytes);
   }
 

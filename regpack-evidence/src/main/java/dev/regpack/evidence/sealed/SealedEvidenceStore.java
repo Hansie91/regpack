@@ -9,6 +9,8 @@ import dev.regpack.ports.evidence.EvidenceRetentionException;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -53,6 +55,23 @@ import java.util.regex.Pattern;
  * replaced disk: the store is {@link #degraded()}, declares no synchronous acknowledgement, refuses
  * every write and is brought back by {@link #repair()}. Messages carry key paths, volume ids and
  * fixed texts only, never file names.
+ *
+ * <p><b>Interruption.</b> A thread that is interrupted while a forced write is under way has its
+ * file channel closed by the JDK. The call then throws an {@link EvidenceUnavailableException}
+ * whose message ends in "interrupted" (not "I/O error"), the temporary file is removed, and the
+ * thread's interrupt flag is set again before the call returns. The state left is one of the
+ * designed ones: nothing written, or a whole object on the first volume only, which a retry with
+ * the same bytes completes. A caller that retries on {@link EvidenceUnavailableException} in the
+ * same thread must clear the flag first ({@code Thread.interrupted()}) or honour it and stop: with
+ * the flag set, every further forced write fails the same way. Waits for the key locks are not
+ * interruptible.
+ *
+ * <p><b>Scrub and repair.</b> {@link #scrub()} reads each key under the key's lock, so it sees a
+ * key between two puts, never in the middle of one; its findings are a snapshot per key, and a
+ * defect that arises after its key was read is not in them. {@link #repair()} takes the same locks,
+ * and the store is write-closed ({@link #degraded()}) for as long as a replaced volume has no
+ * marker, which a repair writes last: for a repair that is the time to read both copies of every
+ * key.
  */
 public final class SealedEvidenceStore implements EvidenceStore {
   private static final Grade GRADE = new Grade("P-SEALED", "");
@@ -211,7 +230,11 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * (the store is degraded and nothing is written), unless neither volume holds an object or a
    * meta: that is a first open that was interrupted between its two markers, and the open writes
    * the missing one. A marker with another id, or two missing markers on volumes that hold objects,
-   * refuse the open. Stale temporary files of dead processes are swept.
+   * refuse the open. Stale temporary files are swept: those of dead processes, and those of this
+   * pid that an earlier incarnation of the process left (see {@link
+   * SealedVolume#sweepTemporaries}). Each volume also proves that it can make a hard link as the
+   * publish protocol needs it, and sync its root where the platform can ({@link
+   * SealedVolume#checkHardLinks}).
    */
   static SealedEvidenceStore open(Config config, FileOps ops) {
     Objects.requireNonNull(config, "config");
@@ -758,6 +781,11 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * retention), and a volume without its marker is then marked (markers come last, so a repair that
    * fails midway leaves the store degraded). Idempotent.
    *
+   * <p>Each key is repaired under its lock. For a replaced volume the store stays write-closed
+   * (every put is refused for the missing marker) from the open until the markers are written at
+   * the end, so that time is the time to read both copies of every key, which has not been
+   * measured.
+   *
    * @return the number of objects copied
    * @throws EvidenceUnavailableException when a volume cannot be read or written, or when another
    *     writer keeps changing the meta of a key (three tries, as for {@link #extendRetention})
@@ -850,6 +878,12 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * CORRUPT_META"} (the retention record is damaged) and {@code "<key> DIVERGENT"} (both copies are
    * whole but differ). Empty on a clean store.
    *
+   * <p>Each key is read under the key's lock, the one a put takes, so a put of this store is seen
+   * as done or not begun and never as a missing copy. The findings are a snapshot per key: the keys
+   * are listed first, a key put afterwards is not in them, and a defect that arises after its key
+   * was read is not either. Another store over the same directories is not held back by these locks
+   * and can still show a copy that is on its way.
+   *
    * @throws EvidenceUnavailableException when a volume cannot be read
    */
   public List<String> scrub() {
@@ -857,23 +891,29 @@ public final class SealedEvidenceStore implements EvidenceStore {
     List<Finding> findings = new ArrayList<>();
     for (String path : keysOfBothVolumes("")) {
       EvidenceKey key = new EvidenceKey(path);
-      Copy onFirst = readCopy(first, key);
-      Copy onSecond = readCopy(second, key);
-      for (Vol vol : volumes) {
-        Copy copy = vol == first ? onFirst : onSecond;
-        if (copy.kind() == Kind.CORRUPT) {
-          findings.add(new Finding(path, vol.id(), vol.id() + " " + path + " CORRUPT"));
-        } else if (copy.kind() == Kind.ABSENT) {
-          findings.add(new Finding(path, vol.id(), vol.id() + " " + path + " MISSING_COPY"));
+      ReentrantLock lock = lockOf(key);
+      lock.lock();
+      try {
+        Copy onFirst = readCopy(first, key);
+        Copy onSecond = readCopy(second, key);
+        for (Vol vol : volumes) {
+          Copy copy = vol == first ? onFirst : onSecond;
+          if (copy.kind() == Kind.CORRUPT) {
+            findings.add(new Finding(path, vol.id(), vol.id() + " " + path + " CORRUPT"));
+          } else if (copy.kind() == Kind.ABSENT) {
+            findings.add(new Finding(path, vol.id(), vol.id() + " " + path + " MISSING_COPY"));
+          }
+          if (readMeta(vol, key).kind() == Kind.CORRUPT) {
+            findings.add(new Finding(path, vol.id(), vol.id() + " " + path + " CORRUPT_META"));
+          }
         }
-        if (readMeta(vol, key).kind() == Kind.CORRUPT) {
-          findings.add(new Finding(path, vol.id(), vol.id() + " " + path + " CORRUPT_META"));
+        if (onFirst.kind() == Kind.PRESENT
+            && onSecond.kind() == Kind.PRESENT
+            && !Arrays.equals(onFirst.file(), onSecond.file())) {
+          findings.add(new Finding(path, "", path + " DIVERGENT"));
         }
-      }
-      if (onFirst.kind() == Kind.PRESENT
-          && onSecond.kind() == Kind.PRESENT
-          && !Arrays.equals(onFirst.file(), onSecond.file())) {
-        findings.add(new Finding(path, "", path + " DIVERGENT"));
+      } finally {
+        lock.unlock();
       }
     }
     findings.sort(
@@ -915,7 +955,13 @@ public final class SealedEvidenceStore implements EvidenceStore {
         + "(9) A put of a key that both volumes already hold (a journal re-ship, a retry) still "
         + "writes, forces and discards a temporary file of the full object size on each volume "
         + "before it syncs the directories, so its cost grows with the object size; it has not "
-        + "been measured.";
+        + "been measured. "
+        + "(10) Temporary files that a crashed writer leaves are swept when the store is opened. "
+        + "Their owner is told by the process id in this process-id namespace and by the age of "
+        + "the file (older than the start of this JVM); two stores in different containers or "
+        + "hosts over one directory are not told apart, and one can sweep the file that the other "
+        + "is still writing (its put then fails and is retried). Sharing a volume between "
+        + "processes is not claimed.";
   }
 
   // ---------------------------------------------------------------- reading one volume
@@ -965,6 +1011,11 @@ public final class SealedEvidenceStore implements EvidenceStore {
   private static <T> T on(Vol vol, IoCall<T> call) {
     try {
       return call.run();
+    } catch (ClosedByInterruptException | InterruptedIOException e) {
+      // The interrupt closed the channel (or the call was interrupted): not a failing disk, and
+      // the caller's flag must survive, so that code above this call can see it.
+      Thread.currentThread().interrupt();
+      throw new EvidenceUnavailableException("volume " + vol.id() + " failed: interrupted", e);
     } catch (IOException e) {
       throw new EvidenceUnavailableException("volume " + vol.id() + " failed: I/O error", e);
     }

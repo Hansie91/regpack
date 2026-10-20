@@ -37,14 +37,14 @@ public record EvidenceKey(String path) {
   }
 
   private static void requireSegment(String segment) {
-    if (segment != null && segment.length() > MAX_SEGMENT_LENGTH) {
+    if (segment == null) {
+      throw new IllegalArgumentException("invalid EvidenceKey segment: null");
+    }
+    if (segment.length() > MAX_SEGMENT_LENGTH) {
       throw new IllegalArgumentException(
           "EvidenceKey segment must be at most " + MAX_SEGMENT_LENGTH + " characters");
     }
-    if (segment == null
-        || segment.equals(".")
-        || segment.equals("..")
-        || !SEGMENT.matcher(segment).matches()) {
+    if (segment.equals(".") || segment.equals("..") || !SEGMENT.matcher(segment).matches()) {
       throw new IllegalArgumentException("invalid EvidenceKey segment: " + segment);
     }
   }

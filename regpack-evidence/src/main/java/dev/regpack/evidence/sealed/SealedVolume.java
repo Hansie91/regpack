@@ -9,17 +9,20 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -87,9 +90,23 @@ final class SealedVolume {
    */
   private static final ReentrantLock[] META_LOCKS = metaLocks();
 
+  /**
+   * The start of this JVM as the operating system reports it (not a clock reading: it comes from
+   * the process table), read once. Empty where the platform does not report it.
+   */
+  private static final Optional<Instant> JVM_START = ProcessHandle.current().info().startInstant();
+
+  /**
+   * A temporary file is taken to be an earlier incarnation's when it was last written more than
+   * this long before the start of this JVM: file systems round times (FAT keeps two seconds), and
+   * the start instant of a process is itself reported to the second on some systems.
+   */
+  private static final Duration START_SKEW = Duration.ofSeconds(2);
+
   private final Path root;
   private final String volumeId;
   private final FileOps ops;
+  private final Supplier<Optional<Instant>> processStart;
 
   /**
    * @param root an absolute directory (a store creates it with {@link #ensureRoot} when it opens; a
@@ -97,9 +114,18 @@ final class SealedVolume {
    * @param volumeId 1 to 32 characters of a-z, 0-9 and '-'
    */
   SealedVolume(Path root, String volumeId, FileOps ops) {
+    this(root, volumeId, ops, () -> JVM_START);
+  }
+
+  /**
+   * @param processStart where the sweep reads the start instant of this JVM (a test replaces it)
+   */
+  SealedVolume(Path root, String volumeId, FileOps ops, Supplier<Optional<Instant>> processStart) {
     Objects.requireNonNull(root, "root");
     Objects.requireNonNull(volumeId, "volumeId");
     Objects.requireNonNull(ops, "ops");
+    Objects.requireNonNull(processStart, "processStart");
+    this.processStart = processStart;
     if (!root.isAbsolute()) {
       throw new IllegalArgumentException("the root of a volume must be an absolute path");
     }
@@ -164,26 +190,51 @@ final class SealedVolume {
   }
 
   /**
-   * Proves that this volume can make a hard link (A10): creates a file and a second name for it,
-   * reads the data through the second name and removes both.
+   * Proves that this volume can make a hard link (A10) as the publish protocol needs it: creates a
+   * file and a second name for it, and requires that the data show through the second name, that
+   * the two names be one file (and, where the file system reports a link count, that the file have
+   * exactly two names), that a link onto an existing name be refused with a {@link
+   * FileAlreadyExistsException} (a "link" that copies or replaces would lose the no-clobber
+   * guarantee), and, where the platform can sync a directory, that the sync of the root work (a
+   * volume whose directory sync fails is refused here and not at the first send). Both names are
+   * removed. A second name that is taken by a file of another writer (a leftover of an earlier run
+   * with the same pid and counter) is skipped and that file is never touched; when eight names in a
+   * row are taken the check fails with a message that says so.
    *
    * @throws IOException naming the volume when it cannot, or when the file operations fail
    */
   void checkHardLinks() throws IOException {
     ensureDirectory(root);
     Path source = writeTemporary(root, SELFTEST, SELFTEST_BYTES);
-    Path second =
-        root.resolve(SealedNames.temporary(SELFTEST, PID, TEMP_COUNTER.getAndIncrement()));
-    IOException failure = null;
+    Path ours = null; // the second name, once this call may have created it
+    IOException failure;
     try {
-      ops.link(source, second);
-      if (!Arrays.equals(ops.read(second), SELFTEST_BYTES)) {
-        failure = new IOException("volume " + volumeId + ": a hard link does not show the data");
+      Path second = null;
+      IOException taken = null;
+      for (int attempt = 0; attempt < MAX_TEMP_TRIES && second == null; attempt++) {
+        Path candidate =
+            root.resolve(SealedNames.temporary(SELFTEST, PID, TEMP_COUNTER.getAndIncrement()));
+        ours = candidate;
+        try {
+          ops.link(source, candidate);
+          second = candidate;
+        } catch (FileAlreadyExistsException e) {
+          ours = null; // a file of another writer: never ours to delete
+          taken = e;
+        }
       }
+      failure =
+          second == null
+              ? new IOException(
+                  "volume " + volumeId + ": no free name for the hard-link self-test", taken)
+              : verifyHardLink(source, second);
     } catch (IOException | UnsupportedOperationException e) {
       failure = new IOException("volume " + volumeId + " cannot create hard links", e);
     }
-    for (Path file : List.of(second, source)) {
+    for (Path file : Arrays.asList(ours, source)) {
+      if (file == null) {
+        continue;
+      }
       try {
         ops.delete(file);
       } catch (IOException e) {
@@ -196,6 +247,56 @@ final class SealedVolume {
     if (failure != null) {
       throw failure;
     }
+  }
+
+  /** The failure of the self-test of a second name that was made, or null when it holds. */
+  private IOException verifyHardLink(Path source, Path second) {
+    String volume = "volume " + volumeId;
+    try {
+      if (!Arrays.equals(ops.read(second), SELFTEST_BYTES)) {
+        return new IOException(volume + ": a hard link does not show the data");
+      }
+      if (!isSameFile(source, second)) {
+        return new IOException(volume + ": the two names of a hard link are not one file");
+      }
+      OptionalInt names = linkCount(second);
+      if (names.isPresent() && names.getAsInt() != 2) {
+        return new IOException(
+            volume + ": a hard link gives the file " + names.getAsInt() + " names, not 2");
+      }
+      try {
+        ops.link(source, second);
+        return new IOException(volume + ": a hard link onto an existing name does not refuse it");
+      } catch (FileAlreadyExistsException expected) {
+        // the no-clobber property of the publish protocol holds
+      }
+    } catch (IOException | UnsupportedOperationException e) {
+      return new IOException(volume + " cannot create hard links", e);
+    }
+    if (ops.supportsDirectorySync()) {
+      try {
+        ops.syncDirectory(root);
+      } catch (IOException e) {
+        return new IOException(volume + " cannot sync a directory", e);
+      }
+    }
+    return null;
+  }
+
+  private static boolean isSameFile(Path first, Path second) throws IOException {
+    try {
+      return Files.isSameFile(first, second);
+    } catch (NoSuchFileException e) {
+      return false; // one of the names is gone: a move, not a link
+    }
+  }
+
+  /** The number of names of the file where the file system reports it (POSIX), else empty. */
+  private static OptionalInt linkCount(Path file) throws IOException {
+    if (!file.getFileSystem().supportedFileAttributeViews().contains("unix")) {
+      return OptionalInt.empty();
+    }
+    return OptionalInt.of(((Number) Files.getAttribute(file, "unix:nlink")).intValue());
   }
 
   /** The id stored in the marker file, or empty when the volume has no marker. */
@@ -432,9 +533,18 @@ final class SealedVolume {
   // ---------------------------------------------------------------- temporaries
 
   /**
-   * Deletes the temporary files ({@code ~tmp~<pid>~<counter>}) of processes that are not running,
-   * anywhere in the volume. The files of a running process (this one included) and names that do
-   * not have the temporary form are left alone.
+   * Deletes the temporary files ({@code ~tmp~<pid>~<counter>}) that no running writer can own,
+   * anywhere in the volume: those of a pid that is not running, and those of a pid that is running
+   * but that were last written more than two seconds before this JVM started (a container whose JVM
+   * is always pid 1, or a pid that was handed on to another process, would otherwise keep the
+   * debris of its predecessors for ever; where the platform does not report the start of this JVM
+   * only the first rule applies). The files that this JVM or another running process wrote since
+   * and names that do not have the temporary form are left alone.
+   *
+   * <p>The owner of a file is told by the pid of this PID namespace and the age of the file alone:
+   * a second process on the same directory in another container or on another host is not
+   * recognised, and a temporary file of it can be swept from under it (its publish then fails and
+   * is retried). Sharing a volume between processes is not claimed.
    *
    * @return the number of files deleted
    */
@@ -466,8 +576,23 @@ final class SealedVolume {
 
   private int sweepFile(Path file, String name) throws IOException {
     OptionalLong pid = temporaryPid(name);
-    if (pid.isEmpty() || ProcessHandle.of(pid.getAsLong()).isPresent()) {
+    if (pid.isEmpty()) {
       return 0;
+    }
+    if (ProcessHandle.of(pid.getAsLong()).isPresent()) {
+      Optional<Instant> start = processStart.get();
+      if (start.isEmpty()) {
+        return 0; // no start instant: a running pid owns its files
+      }
+      Instant modified;
+      try {
+        modified = Files.getLastModifiedTime(file).toInstant();
+      } catch (NoSuchFileException e) {
+        return 0; // gone already: not ours to count
+      }
+      if (!modified.isBefore(start.get().minus(START_SKEW))) {
+        return 0; // written by this incarnation or by a process that has run since
+      }
     }
     try {
       ops.delete(file);
@@ -609,33 +734,30 @@ final class SealedVolume {
   /**
    * Syncs the directory that holds a new or found entry, and the parent of every directory on the
    * way up to the root that was created and not yet synced. With {@code wholeChain} every directory
-   * from the holder up to the root is synced (each once), whatever the bookkeeping says. The parent
-   * of the root is synced here only when this volume object created the root itself (a root that
-   * vanished after the open); a store creates its roots with {@link #ensureRoot}, which syncs the
-   * parent of the root and of each ancestor it created. A no-op where the platform cannot sync a
-   * directory.
+   * from the holder up to the root is synced, whatever the bookkeeping says (the chain visits each
+   * directory once, so no call is repeated). The parent of the root is synced here only when this
+   * volume object created the root itself (a root that vanished after the open); a store creates
+   * its roots with {@link #ensureRoot}, which syncs the parent of the root and of each ancestor it
+   * created. A no-op where the platform cannot sync a directory.
    */
   private void syncDirectories(Path holder, boolean wholeChain) throws IOException {
     if (!ops.supportsDirectorySync()) {
       return;
     }
-    Set<Path> synced = new HashSet<>();
-    sync(holder, synced);
+    ops.syncDirectory(holder);
     Path directory = holder;
     while (directory != null) {
       boolean atRoot = directory.equals(root);
       Path parent = directory.getParent();
       if (parent != null && ((wholeChain && !atRoot) || UNSYNCED.contains(directory))) {
-        sync(parent, synced);
+        ops.syncDirectory(parent);
       }
+      // The pending mark is cleared only AFTER the sync of the parent has succeeded: when that
+      // sync throws, the mark stays, and the next publish into this directory (of any key) syncs
+      // the parent again. Clearing it first would let a different key be acknowledged while the
+      // entry of this directory in its parent was never synced.
       UNSYNCED.remove(directory);
       directory = atRoot ? null : parent;
-    }
-  }
-
-  private void sync(Path directory, Set<Path> synced) throws IOException {
-    if (synced.add(directory)) {
-      ops.syncDirectory(directory);
     }
   }
 

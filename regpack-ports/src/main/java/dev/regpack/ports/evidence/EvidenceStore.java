@@ -182,14 +182,15 @@ public interface EvidenceStore {
    * Moves retain-until later; an earlier instant throws {@link EvidenceRetentionException}. The new
    * instant has at most microsecond precision and a year from 0000 to 9999, as on {@link
    * PutRequest}; any other instant throws {@link IllegalArgumentException} before it is compared
-   * with the stored one (so {@code Instant.MIN} is not "earlier"), and the object is unchanged. A
-   * key that was never put throws {@link IllegalArgumentException} with the message {@code "no such
-   * evidence key: <path>"} (M28); during an outage {@link EvidenceUnavailableException} comes
-   * first. There is no delete, so a listed key cannot vanish; a lost object is found by {@code
-   * verify}, not by this call. A store that keeps several copies of the retention record returns
-   * only after every copy holds the requested state, also when an earlier call that failed had
-   * written some of them; a damaged retention record or object is an {@link
-   * EvidenceCorruptionException} and nothing is changed.
+   * with the stored one (so {@code Instant.MIN} is not "earlier"), and the object is unchanged.
+   *
+   * <p>{@code "no such evidence key: <path>"} is the message of the {@link
+   * IllegalArgumentException} that a key which was never put throws (M28); during an outage {@link
+   * EvidenceUnavailableException} comes first. There is no delete, so a listed key cannot vanish; a
+   * lost object is found by {@code verify}, not by this call. A store that keeps several copies of
+   * the retention record returns only after every copy holds the requested state, also when an
+   * earlier call that failed had written some of them; a damaged retention record or object is an
+   * {@link EvidenceCorruptionException} and nothing is changed.
    */
   void extendRetention(EvidenceKey key, Instant newRetainUntil);
 
