@@ -73,10 +73,11 @@ class MigratorIT {
     return SqlIdentifier.require(schema) + "." + SqlIdentifier.require(name);
   }
 
-  private static ScriptCatalogue withABrokenSecondScript(String brokenSql) {
+  /** The real scripts followed by one broken script that is the next version (V003 today). */
+  private static ScriptCatalogue withABrokenNextScript(String brokenSql) {
     List<ScriptCatalogue.Script> scripts =
         new ArrayList<>(ScriptCatalogue.fromClasspath().scripts());
-    scripts.add(ScriptCatalogue.Script.of(scripts.size() + 1, "V002__broken.sql", brokenSql));
+    scripts.add(ScriptCatalogue.Script.of(scripts.size() + 1, "V003__broken.sql", brokenSql));
     return ScriptCatalogue.of(scripts);
   }
 
@@ -179,36 +180,36 @@ class MigratorIT {
   @Test
   void aFailingScriptLeavesNothingBehind() throws SQLException {
     ScriptCatalogue catalogue =
-        withABrokenSecondScript(
+        withABrokenNextScript(
             "CREATE TABLE broken_probe (x int);\nINSERT INTO no_such_table_at_all VALUES (1);\n");
     assertThatThrownBy(() -> Migrator.migrate(dataSource, schema, catalogue))
         .isInstanceOfSatisfying(
             MigrationException.class,
             e -> {
               assertThat(e.kind()).isEqualTo(Kind.SCRIPT_FAILED);
-              assertThat(e.version()).isEqualTo(2);
+              assertThat(e.version()).isEqualTo(3);
             });
     assertThat(
             column("SELECT version::text FROM " + table("schema_migration") + " ORDER BY version"))
-        .as("the first script stays applied")
-        .containsExactly("1");
+        .as("the two real scripts stay applied")
+        .containsExactly("1", "2");
     assertThat(column("SELECT to_regclass(?)::text", schema + ".broken_probe"))
         .as("nothing of the broken script: its first statement was rolled back")
         .containsExactly((String) null);
-    // version 2 was never recorded, so a run with the real catalogue finds nothing to do
+    // version 3 was never recorded, so a run with the real catalogue finds nothing to do
     assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
   }
 
   @Test
   void aFailingScriptMessageHasNoSqlText() {
     ScriptCatalogue catalogue =
-        withABrokenSecondScript("INSERT INTO secret_marker_table_zz VALUES (42);\n");
+        withABrokenNextScript("INSERT INTO secret_marker_table_zz VALUES (42);\n");
     assertThatThrownBy(() -> Migrator.migrate(dataSource, schema, catalogue))
         .isInstanceOfSatisfying(
             MigrationException.class,
             e -> {
               assertThat(e.getMessage())
-                  .contains("V002__broken.sql")
+                  .contains("V003__broken.sql")
                   .contains("SCRIPT_FAILED")
                   .doesNotContain("secret_marker_table_zz")
                   .doesNotContain("INSERT")
@@ -225,7 +226,8 @@ class MigratorIT {
             "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
                 + " WHERE n.nspname = ? AND c.relkind IN ('r', 'p')",
             schema);
-    assertThat(tables).containsExactlyInAnyOrderElementsOf(SchemaDocument.tableNames());
+    // the union of the documents of every script: the 18 tables of V001 and object_manifest (V002)
+    assertThat(tables).containsExactlyInAnyOrderElementsOf(SchemaDocument.allTableNames());
 
     // and, as far as the server can show it, every named constraint, index and trigger of the
     // document (the server also holds unnamed internal objects, so this is a subset check)
@@ -245,7 +247,9 @@ class MigratorIT {
             schema));
     assertThat(existing)
         .containsAll(
-            SchemaDocument.constraintEntries().stream().map(SchemaDocument.Entry::name).toList());
+            SchemaDocument.allConstraintEntries().stream()
+                .map(SchemaDocument.Entry::name)
+                .toList());
 
     // the one seeded row: T17 reads and updates it (V001 deviation 1)
     assertThat(column("SELECT epoch::text FROM " + table("restore_epoch"))).containsExactly("0");

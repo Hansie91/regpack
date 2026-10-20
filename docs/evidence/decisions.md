@@ -60,6 +60,8 @@ Executor run `wf_c79c06d1-15c`: seven tasks, 20 subagent runs, every task approv
 | longest journal key | 258 characters (8 + 99 + 1 + 13 + 3 + 16 + 1 + 3 + 1 + 100 + 1 + 12; old 256) | FCA | `JournalKeyTest#everyRenderedKeyIsAValidEvidenceKeyUnder512Chars`; segments stay at most 100 characters |
 | journal object bounds | `JournalObject.MAX_BYTES` 67,108,864; text 4,096 characters (`detail`, `reason`) or 1,024 (every other text and list element) | FCA | `JournalObjectSizeTest#theLimitIsThePinnedSixtyFourMebibytes`, `JournalSchemasTest#everyTextFieldIsBoundedAndTheLimitItselfIsAccepted` |
 | sweep rule for temporaries | a temporary of a live pid is deleted when its last-modified time is more than 2 seconds before this JVM's start instant | FCC | a container JVM that is PID 1 must still sweep its predecessor's debris |
+| V002__evidence_manifest.sql | 7dd09d404be962f44a463ddbaec961b41abf5192fa109cba9951412bf8cf562a | T11 | the applied script is never edited; a change is a new script |
+| schema-design-p3b.md (approved) | a48d083f15e849fa9f8e0d40eac383107810cde97238ec4fb3afe7dd9c101662 | T11 | the document is frozen after AP-7 |
 
 ## Deviations from the plan
 

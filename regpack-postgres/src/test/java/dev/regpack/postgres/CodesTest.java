@@ -7,6 +7,8 @@ import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
+import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
+import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
 import dev.regpack.ports.ledger.ReportLedger.VersionOrigin;
@@ -74,6 +76,19 @@ class CodesTest {
     new Family(OutboxKind.class, "outboxKind", codes("DECIDE_BATCH", "SEQUENCE")),
     new Family(OutboxState.class, "outboxState", codes("PENDING", "DONE")),
     new Family(VersionOrigin.class, "versionOrigin", codes("SOURCE", "ARM", "IMPORTED")),
+    // object_manifest.object_class and .provenance (V002), pinned by number in the test below
+    new Family(
+        ObjectClass.class,
+        "objectClass",
+        codes(
+            "SEALED_FILE",
+            "JOURNAL_A",
+            "JOURNAL_B",
+            "LANDING_BATCH",
+            "ENRICHMENT_RESPONSE",
+            "SIGNED_MANIFEST",
+            "OTHER")),
+    new Family(Provenance.class, "provenance", codes("WRITTEN", "ADOPTED_AT_RESTORE")),
   };
 
   @Test
@@ -108,6 +123,31 @@ class CodesTest {
     assertThat(Codes.of(DeliveryState.PREPARED)).isEqualTo((short) 1);
     assertThat(Codes.of(DeliveryState.WRITTEN_OFF)).isEqualTo((short) 16);
     assertThat(Codes.of(OutboxState.DONE)).isEqualTo((short) 2);
+  }
+
+  @Test
+  void objectClassAndProvenanceCodesArePinned() {
+    // V002 stores both as smallint, without a CHECK on the set (schema-design-p3b.md, note a): the
+    // numbers are written here as literals, not derived from the order of the constants
+    assertThat(Codes.of(ObjectClass.SEALED_FILE)).isEqualTo((short) 1);
+    assertThat(Codes.of(ObjectClass.JOURNAL_A)).isEqualTo((short) 2);
+    assertThat(Codes.of(ObjectClass.JOURNAL_B)).isEqualTo((short) 3);
+    assertThat(Codes.of(ObjectClass.LANDING_BATCH)).isEqualTo((short) 4);
+    assertThat(Codes.of(ObjectClass.ENRICHMENT_RESPONSE)).isEqualTo((short) 5);
+    assertThat(Codes.of(ObjectClass.SIGNED_MANIFEST)).isEqualTo((short) 6);
+    assertThat(Codes.of(ObjectClass.OTHER)).isEqualTo((short) 7);
+    assertThat(Codes.of(Provenance.WRITTEN)).isEqualTo((short) 1);
+    assertThat(Codes.of(Provenance.ADOPTED_AT_RESTORE)).isEqualTo((short) 2);
+    for (ObjectClass objectClass : ObjectClass.values()) {
+      assertThat(Codes.objectClass(Codes.of(objectClass))).isSameAs(objectClass);
+    }
+    for (Provenance provenance : Provenance.values()) {
+      assertThat(Codes.provenance(Codes.of(provenance))).isSameAs(provenance);
+    }
+    assertThat(ObjectClass.values()).as("a new object class needs a code and a pin").hasSize(7);
+    assertThat(Provenance.values()).as("a new provenance needs a code and a pin").hasSize(2);
+    assertThatThrownBy(() -> Codes.of((ObjectClass) null)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> Codes.of((Provenance) null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test

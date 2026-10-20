@@ -1,1 +1,2 @@
 V001__core.sql
+V002__evidence_manifest.sql
