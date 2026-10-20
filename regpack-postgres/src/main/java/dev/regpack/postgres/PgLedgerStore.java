@@ -25,10 +25,11 @@ import javax.sql.DataSource;
  * schema (I2, D-L3); every unit of work starts through {@link Unit#begin} (Convention 11).
  *
  * <p>Built in tasks: T15 ingest, outbox and context reads; T16 decisions and partitions; T17 leases
- * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work). No
- * method is left unbuilt ({@code NoStubsLeftTest}). The integrity queries of T19 are not part of
- * the {@link LedgerStore} port: {@link LedgerIntegrity} reads the same schema through a {@link
- * DataSource} and the schema name of the {@link Config}.
+ * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work); P3b1
+ * T12 the object manifest. No method is left unbuilt ({@code NoStubsLeftTest}); the durability
+ * query of {@link dev.regpack.ports.ledger.LedgerDurability} is built in T17 of P3b1. The integrity
+ * queries of T19 are not part of the {@link LedgerStore} port: {@link LedgerIntegrity} reads the
+ * same schema through a {@link DataSource} and the schema name of the {@link Config}.
  */
 public final class PgLedgerStore implements LedgerStore {
   /**
@@ -106,6 +107,7 @@ public final class PgLedgerStore implements LedgerStore {
   private final PgLeases leases;
   private final PgDeliveries deliveries;
   private final PgReports reports;
+  private final PgManifest manifest;
 
   public PgLedgerStore(DataSource dataSource, Clock clock, Config config) {
     Objects.requireNonNull(dataSource, "dataSource");
@@ -119,6 +121,7 @@ public final class PgLedgerStore implements LedgerStore {
     this.deliveries = new PgDeliveries(dataSource, clock, config);
     // the report unit shares the decision side: its partitions cache and its head conflicts
     this.reports = new PgReports(dataSource, clock, config, decisions);
+    this.manifest = new PgManifest(dataSource, clock, config);
   }
 
   /**
@@ -267,23 +270,22 @@ public final class PgLedgerStore implements LedgerStore {
     return deliveries.attempt(id);
   }
 
-  // ManifestLedger: a placeholder until T12 (PgManifest); it throws so that nothing is silently
-  // lost
+  // ManifestLedger (P3b1 T12; the manifest rows of a SENDING unit are written by PgDeliveries)
 
   @Override
   public void recordObjects(
       List<ObjectEntry> entries, Provenance provenance, Optional<AttemptId> attempt) {
-    throw new IllegalStateException("not built until T12");
+    manifest.recordObjects(entries, provenance, attempt);
   }
 
   @Override
   public Optional<ManifestRow> manifestRow(EvidenceKey key) {
-    throw new IllegalStateException("not built until T12");
+    return manifest.manifestRow(key);
   }
 
   @Override
   public List<ManifestRow> manifestRows(String prefix, Optional<EvidenceKey> after, int limit) {
-    throw new IllegalStateException("not built until T12");
+    return manifest.manifestRows(prefix, after, limit);
   }
 
   // LedgerDurability: a placeholder until T17 (PgLedgerDurability)

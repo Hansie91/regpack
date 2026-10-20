@@ -18,10 +18,11 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * The constraints of {@code V001} against seeded duplicates and orphans (spec 14.1, review focus
- * LF23; Convention 6): raw SQL on a migrated schema, each statement expected to be rejected with a
- * SQLState and, where the server names one, the constraint. They are the seeded-duplicate evidence
- * of the constraint clause of the P3 exit criterion, together with {@code
+ * The constraints of {@code V001} and (P3b1 T12) of {@code V002} against seeded duplicates and
+ * orphans (spec 14.1, review focus LF23; Convention 6): raw SQL on a migrated schema, each
+ * statement expected to be rejected with a SQLState and, where the server names one, the
+ * constraint. They are the seeded-duplicate evidence of the constraint clause of the P3 exit
+ * criterion, together with {@code
  * PgDecisionsIT#crossPartitionDuplicateDecisionSeqIsRejectedByTheHead}. The adapter is not used:
  * what the schema itself refuses is the point. Skipped without {@code REGPACK_PG_URL}; first run at
  * CP-3. The tests of the dictionary, batch, checkpoint, lease and restore-epoch keys and of the
@@ -692,6 +693,80 @@ class PgConstraintsIT extends AbstractPgStoreTest {
     assertThat(count("SELECT count(*) FROM decision WHERE outcome = 1")).isEqualTo(1);
     assertThat(count("SELECT count(*) FROM report_version WHERE action = 'NEWT'")).isEqualTo(1);
     assertThat(count("SELECT count(*) FROM trn_assignment WHERE trn = 'TRN1'")).isEqualTo(1);
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // the object manifest (V002, T12)
+
+  /**
+   * A manifest row: class SEALED_FILE 1, provenance WRITTEN 1, no attempt; the hash is {@code
+   * hashBytes} bytes of {@code hashByte} ({@code decode(repeat(..), 'hex')}), the size {@code
+   * size}.
+   */
+  private static String manifestRow(String key, String hashByte, int hashBytes, long size) {
+    return "INSERT INTO object_manifest (object_key, object_class, sha256, size_bytes,"
+        + " provenance, written_at) VALUES ('"
+        + key
+        + "', 1, decode(repeat('"
+        + hashByte
+        + "', "
+        + hashBytes
+        + "), 'hex'), "
+        + size
+        + ", 1, now())";
+  }
+
+  @Test
+  void duplicateObjectKeyIsRejected() throws SQLException {
+    exec(manifestRow("sealed/ab/key-one", "ab", 32, 10));
+    // the same key with another hash, size and class: only the primary key can clash
+    assertRejected(manifestRow("sealed/ab/key-one", "cd", 32, 99), "23505", "object_manifest_pk");
+    // a key that differs in case is another key (byte order), and so is a longer one
+    exec(
+        manifestRow("sealed/ab/Key-one", "cd", 32, 99),
+        manifestRow("sealed/ab/key-one2", "cd", 32, 99));
+    assertThat(count("SELECT count(*) FROM object_manifest")).isEqualTo(3);
+    assertThat(
+            count(
+                "SELECT count(*) FROM object_manifest WHERE object_key = 'sealed/ab/key-one'"
+                    + " AND sha256 = decode(repeat('ab', 32), 'hex') AND size_bytes = 10"))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void updateAndDeleteOfObjectManifestRowsAreRejected() throws SQLException {
+    // a row-level trigger fires only for a row, so the table is not empty
+    exec(manifestRow("sealed/ab/key-one", "ab", 32, 10));
+    List<String> statements =
+        List.of(
+            "UPDATE object_manifest SET size_bytes = 11",
+            "UPDATE object_manifest SET sha256 = decode(repeat('ff', 32), 'hex')",
+            "UPDATE object_manifest SET object_key = 'sealed/ab/key-two'",
+            "DELETE FROM object_manifest");
+    for (String sql : statements) {
+      // the trigger raises 55000 without a constraint name
+      assertRejected(sql, "55000", null);
+    }
+    assertThat(count("SELECT count(*) FROM object_manifest")).isEqualTo(1);
+    assertThat(
+            count(
+                "SELECT count(*) FROM object_manifest WHERE object_key = 'sealed/ab/key-one'"
+                    + " AND sha256 = decode(repeat('ab', 32), 'hex') AND size_bytes = 10"))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void aShortHashAndANegativeSizeAreRejected() throws SQLException {
+    assertRejected(
+        manifestRow("sealed/ab/short", "ab", 31, 10), "23514", "object_manifest_hash_check");
+    assertRejected(
+        manifestRow("sealed/ab/long", "ab", 33, 10), "23514", "object_manifest_hash_check");
+    assertRejected(
+        manifestRow("sealed/ab/negative", "ab", 32, -1), "23514", "object_manifest_size_check");
+    assertThat(count("SELECT count(*) FROM object_manifest")).isZero();
+    // the limits themselves are accepted: 32 bytes and a size of zero
+    exec(manifestRow("sealed/ab/empty", "ab", 32, 0));
+    assertThat(count("SELECT count(*) FROM object_manifest")).isEqualTo(1);
   }
 
   // ------------------------------------------------------------------------------------------

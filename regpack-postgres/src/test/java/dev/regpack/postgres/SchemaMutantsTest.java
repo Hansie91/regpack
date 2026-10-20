@@ -35,15 +35,16 @@ class SchemaMutantsTest {
           "report_subject_key",
           "decision_idem_key",
           "decision_head_pk",
-          "ingest_pk");
+          "ingest_pk",
+          "object_manifest_pk");
 
   @Test
-  void theSixMutationsOfThePlanAreRegisteredOnceEach() {
+  void theSevenMutationsOfThePlanAreRegisteredOnceEach() {
     List<String> objects = SchemaMutants.all().stream().map(e -> e.mutation().name()).toList();
 
     assertThat(objects).containsExactlyInAnyOrderElementsOf(PLANNED_OBJECTS);
     assertThat(objects).doesNotHaveDuplicates();
-    assertThat(SchemaMutants.all().stream().map(Entry::type).distinct().count()).isEqualTo(6);
+    assertThat(SchemaMutants.all().stream().map(Entry::type).distinct().count()).isEqualTo(7);
     for (Entry entry : SchemaMutants.all()) {
       assertThat(entry.caughtBy()).as(entry.type().getSimpleName()).isNotEmpty();
     }
@@ -68,8 +69,8 @@ class SchemaMutantsTest {
   }
 
   @Test
-  void everyMutationNamesAnObjectThatV001Creates() throws IOException {
-    String sql = v001();
+  void everyMutationNamesAnObjectThatAMigrationCreates() throws IOException {
+    String sql = allScripts();
     for (Entry entry : SchemaMutants.all()) {
       SchemaMutation mutation = entry.mutation();
       String table = Pattern.quote(mutation.table());
@@ -154,10 +155,26 @@ class SchemaMutantsTest {
         .containsExactlyInAnyOrderElementsOf(new TreeSet<>(registered));
   }
 
-  private static String v001() throws IOException {
-    try (InputStream in =
-        SchemaMutantsTest.class.getResourceAsStream("/db/migration/V001__core.sql")) {
-      assertThat(in).as("V001__core.sql on the classpath").isNotNull();
+  /** The text of every script named in {@code db/migration/index.txt}, in order, LF only. */
+  private static String allScripts() throws IOException {
+    StringBuilder all = new StringBuilder();
+    for (String line : resource("index.txt").split("\n")) {
+      String name = line.strip();
+      if (!name.isEmpty()) {
+        all.append(resource(name)).append('\n');
+      }
+    }
+    // the scan must see both scripts, or "every mutation names an object" would be weaker than it
+    // reads
+    assertThat(all.toString())
+        .contains("CREATE TABLE ingest (")
+        .contains("CREATE TABLE object_manifest (");
+    return all.toString();
+  }
+
+  private static String resource(String name) throws IOException {
+    try (InputStream in = SchemaMutantsTest.class.getResourceAsStream("/db/migration/" + name)) {
+      assertThat(in).as(name + " on the classpath").isNotNull();
       return new String(in.readAllBytes(), StandardCharsets.UTF_8).replace("\r\n", "\n");
     }
   }
