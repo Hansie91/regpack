@@ -6,6 +6,7 @@ import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClass
 import dev.regpack.inmemory.mutants.AbaAsNoopLedgerContractTest;
 import dev.regpack.inmemory.mutants.AnyRetainUntilEvidenceContractTest;
 import dev.regpack.inmemory.mutants.AsAtNotCheckedLedgerContractTest;
+import dev.regpack.inmemory.mutants.BeginSendingNotAtomicWithManifestLedgerContractTest;
 import dev.regpack.inmemory.mutants.CaseFoldedKeysEvidenceContractTest;
 import dev.regpack.inmemory.mutants.ExactKeyNotFirstLedgerContractTest;
 import dev.regpack.inmemory.mutants.HighestVersionIsMinLedgerContractTest;
@@ -15,6 +16,8 @@ import dev.regpack.inmemory.mutants.IgnoreLeaseTokenLedgerContractTest;
 import dev.regpack.inmemory.mutants.IgnoreRestoreEpochLedgerContractTest;
 import dev.regpack.inmemory.mutants.LeaseTtlUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.ListIgnoresAfterEvidenceContractTest;
+import dev.regpack.inmemory.mutants.ManifestOverwritesOnConflictLedgerContractTest;
+import dev.regpack.inmemory.mutants.ManifestRecordedOnFailedBeginLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoInFlightGuardLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoTakeoverInDoubtLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoWithdrawalGuardLedgerContractTest;
@@ -181,6 +184,19 @@ class ContractSuiteTeethTest {
     expected.put(
         OutboxKindIgnoredLedgerContractTest.class,
         Set.of("oneSequenceOutboxItemPerBatchEvenOnRedelivery"));
+
+    // P3b1 T10: the object manifest and its place in the SENDING unit
+    expected.put(
+        ManifestOverwritesOnConflictLedgerContractTest.class,
+        Set.of(
+            "recordingTheSameKeyWithAnotherHashIsAConflictAndStoresNothingOfTheCall",
+            "aConflictingObjectRollsTheSendingTransitionBack"));
+    expected.put(
+        ManifestRecordedOnFailedBeginLedgerContractTest.class,
+        Set.of("aStaleLeaseOrAStateMismatchRecordsNoObject"));
+    expected.put(
+        BeginSendingNotAtomicWithManifestLedgerContractTest.class,
+        Set.of("aConflictingObjectRollsTheSendingTransitionBack"));
 
     List<String> misses = new ArrayList<>();
     expected.forEach(

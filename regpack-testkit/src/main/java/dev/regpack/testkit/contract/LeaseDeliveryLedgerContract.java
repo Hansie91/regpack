@@ -3,11 +3,14 @@ package dev.regpack.testkit.contract;
 import static dev.regpack.testkit.contract.LedgerFixtures.attemptIntent;
 import static dev.regpack.testkit.contract.LedgerFixtures.begin;
 import static dev.regpack.testkit.contract.LedgerFixtures.endpoint;
+import static dev.regpack.testkit.contract.LedgerFixtures.objectEntry;
 import static dev.regpack.testkit.contract.LedgerFixtures.queuedDelivery;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.regpack.model.Sha256;
 import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
+import dev.regpack.ports.ledger.DeliveryLedger.AttemptIntent;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.DeliveryLedger.NewDelivery;
@@ -22,12 +25,18 @@ import dev.regpack.ports.ledger.LeaseLedger.LeaseResult.Granted;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseResult.Held;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.ManifestConflictException;
+import dev.regpack.ports.ledger.ManifestLedger.ManifestRow;
+import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
+import dev.regpack.ports.ledger.ManifestLedger.ObjectEntry;
+import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.testkit.clock.ManualClock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -559,6 +568,125 @@ public interface LeaseDeliveryLedgerContract {
     assertThatThrownBy(() -> ledger().beginSending(d2, id, t1, attemptIntent()))
         .isInstanceOf(DuplicateKeyException.class);
     assertThat(stateOf(d2)).isEqualTo(DeliveryState.QUEUED);
+  }
+
+  @Test
+  default void beginSendingRecordsItsObjectsInTheSameUnit() {
+    LeaseToken t1 = acquire(E1, "A");
+    DeliveryId d = queuedDelivery(ledger(), E1, "bk-objects", 1);
+    ObjectEntry sealed =
+        objectEntry("sealed/aa/" + "1".repeat(64), ObjectClass.SEALED_FILE, "sealed-bytes", 500);
+    ObjectEntry intent =
+        objectEntry("journal/scope/DeliveryIntent/1", ObjectClass.JOURNAL_A, "intent-bytes", 300);
+    AttemptId id = ledger().allocateAttemptId();
+    clock().advance(Duration.ofSeconds(5));
+    Instant at = clock().now();
+
+    assertThat(applied(ledger().beginSending(d, id, t1, attemptIntent(sealed, intent))))
+        .isEqualTo(id);
+
+    assertThat(stateOf(d)).isEqualTo(DeliveryState.SENDING);
+    assertThat(ledger().attempt(id)).isPresent();
+    assertThat(ledger().manifestRow(sealed.key()))
+        .contains(new ManifestRow(sealed, Provenance.WRITTEN, Optional.of(id), at));
+    assertThat(ledger().manifestRow(intent.key()))
+        .contains(new ManifestRow(intent, Provenance.WRITTEN, Optional.of(id), at));
+    assertThat(ledger().manifestRows("", Optional.empty(), 100)).hasSize(2);
+
+    // byte-identical sealed bytes of a second delivery are one object: the first row wins
+    DeliveryId second = queuedDelivery(ledger(), E1, "bk-objects-2", 1);
+    ObjectEntry secondIntent =
+        objectEntry("journal/scope/DeliveryIntent/2", ObjectClass.JOURNAL_A, "intent-2", 310);
+    AttemptId secondId = ledger().allocateAttemptId();
+    clock().advance(Duration.ofSeconds(5));
+    assertThat(
+            applied(
+                ledger().beginSending(second, secondId, t1, attemptIntent(sealed, secondIntent))))
+        .isEqualTo(secondId);
+    assertThat(ledger().manifestRow(sealed.key()))
+        .contains(new ManifestRow(sealed, Provenance.WRITTEN, Optional.of(id), at));
+    assertThat(ledger().manifestRow(secondIntent.key()).orElseThrow().attempt()).contains(secondId);
+  }
+
+  @Test
+  default void aStaleLeaseOrAStateMismatchRecordsNoObject() {
+    LeaseToken t1 = acquire(E1, "A");
+    ObjectEntry object = objectEntry("sealed/zz/one", ObjectClass.SEALED_FILE, "one", 1);
+
+    // IN_FLIGHT_CONFLICT: another delivery of the same business key is already SENDING
+    DeliveryId inFlight = queuedDelivery(ledger(), E1, "bk-flight", 1);
+    assertThat(applied(begin(ledger(), inFlight, t1))).isNotNull();
+    DeliveryId behind = queuedDelivery(ledger(), E1, "bk-flight", 2);
+    AttemptId idInFlight = ledger().allocateAttemptId();
+    assertThat(ledger().beginSending(behind, idInFlight, t1, attemptIntent(object)).status())
+        .isEqualTo(SendingStatus.IN_FLIGHT_CONFLICT);
+
+    // STATE_MISMATCH: the delivery was never queued
+    DeliveryId prepared = ledger().createDelivery(new NewDelivery(E1, 1, "bk-prepared", 1));
+    AttemptId idMismatch = ledger().allocateAttemptId();
+    assertThat(ledger().beginSending(prepared, idMismatch, t1, attemptIntent(object)).status())
+        .isEqualTo(SendingStatus.STATE_MISMATCH);
+
+    // STALE_LEASE: the token was taken over
+    clock().advance(TTL);
+    LeaseToken t2 = acquire(E1, "B");
+    DeliveryId other = queuedDelivery(ledger(), E1, "bk-other", 1);
+    AttemptId idStale = ledger().allocateAttemptId();
+    assertThat(ledger().beginSending(other, idStale, t1, attemptIntent(object)).status())
+        .isEqualTo(SendingStatus.STALE_LEASE);
+
+    assertThat(ledger().manifestRows("", Optional.empty(), 100)).isEmpty();
+    assertThat(ledger().manifestRow(object.key())).isEmpty();
+    assertThat(stateOf(other)).isEqualTo(DeliveryState.QUEUED);
+    for (AttemptId unused : List.of(idInFlight, idMismatch, idStale)) {
+      assertThat(ledger().attempt(unused)).isEmpty();
+    }
+
+    // the unused id is still good, and only the call that applies records the object
+    assertThat(applied(ledger().beginSending(other, idStale, t2, attemptIntent(object))))
+        .isEqualTo(idStale);
+    assertThat(ledger().manifestRows("", Optional.empty(), 100))
+        .extracting(row -> row.attempt().orElseThrow())
+        .containsExactly(idStale);
+  }
+
+  @Test
+  default void aConflictingObjectRollsTheSendingTransitionBack() {
+    LeaseToken t1 = acquire(E1, "A");
+    ObjectEntry stored = objectEntry("sealed/cc/stored", ObjectClass.SEALED_FILE, "bytes-A", 10);
+    ledger().recordObjects(List.of(stored), Provenance.WRITTEN, Optional.empty());
+    ManifestRow before = ledger().manifestRow(stored.key()).orElseThrow();
+    DeliveryId d = queuedDelivery(ledger(), E1, "bk-conflict", 1);
+    AttemptId id = ledger().allocateAttemptId();
+    ObjectEntry fresh =
+        objectEntry("journal/scope/DeliveryIntent/9", ObjectClass.JOURNAL_A, "intent", 5);
+    ObjectEntry clash = objectEntry("sealed/cc/stored", ObjectClass.SEALED_FILE, "bytes-B", 10);
+
+    assertThatThrownBy(() -> ledger().beginSending(d, id, t1, attemptIntent(fresh, clash)))
+        .isInstanceOf(ManifestConflictException.class)
+        .message()
+        .contains(stored.key().path());
+
+    assertThat(stateOf(d)).isEqualTo(DeliveryState.QUEUED);
+    assertThat(ledger().attempt(id)).isEmpty();
+    assertThat(ledger().manifestRow(fresh.key())).isEmpty();
+    assertThat(ledger().manifestRows("", Optional.empty(), 100)).containsExactly(before);
+
+    // the attempt id is still unused: a clean intent on the same id applies
+    assertThat(applied(ledger().beginSending(d, id, t1, attemptIntent(fresh)))).isEqualTo(id);
+  }
+
+  @Test
+  default void anIntentWithoutObjectsBehavesAsBefore() {
+    LeaseToken t1 = acquire(E1, "A");
+    DeliveryId d = queuedDelivery(ledger(), E1, "bk-plain", 1);
+    AttemptId id = ledger().allocateAttemptId();
+    AttemptIntent plain = new AttemptIntent(Sha256.ofUtf8("artifact"), "file.xml");
+    assertThat(plain.objects()).isEmpty();
+
+    assertThat(applied(ledger().beginSending(d, id, t1, plain))).isEqualTo(id);
+    assertThat(stateOf(d)).isEqualTo(DeliveryState.SENDING);
+    assertThat(ledger().manifestRows("", Optional.empty(), 100)).isEmpty();
   }
 
   private <T> List<T> runConcurrently(int threads, IntFunction<T> work) throws Exception {

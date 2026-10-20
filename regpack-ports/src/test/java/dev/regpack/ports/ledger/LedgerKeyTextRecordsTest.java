@@ -8,6 +8,7 @@ import dev.regpack.model.EventIdentity;
 import dev.regpack.model.Leg;
 import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
+import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.DeliveryLedger.AttemptIntent;
 import dev.regpack.ports.ledger.DeliveryLedger.NewDelivery;
 import dev.regpack.ports.ledger.IngestLedger.Commit;
@@ -17,6 +18,7 @@ import dev.regpack.ports.ledger.ReportLedger.SubjectKey;
 import dev.regpack.ports.ledger.ReportLedger.TrnProposal;
 import dev.regpack.ports.ledger.ReportLedger.VersionOrigin;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -98,6 +100,71 @@ class LedgerKeyTextRecordsTest {
       assertThatThrownBy(() -> new AttemptIntent(Sha256.ofUtf8("a"), text))
           .isInstanceOf(IllegalArgumentException.class);
     }
+  }
+
+  private static ManifestLedger.ObjectEntry object(String path, long size) {
+    return new ManifestLedger.ObjectEntry(
+        EvidenceKey.of("manifest", path),
+        ManifestLedger.ObjectClass.SEALED_FILE,
+        Sha256.ofUtf8(path),
+        size);
+  }
+
+  @Test
+  void attemptIntentObjectsAreCopiedBoundedAndDuplicateFree() {
+    // the P3a constructor stays and means "no objects"
+    assertThat(new AttemptIntent(Sha256.ofUtf8("a"), "f.xml").objects()).isEmpty();
+
+    // copied: a later change of the caller's list does not reach the intent
+    List<ManifestLedger.ObjectEntry> given = new ArrayList<>(List.of(object("one", 1)));
+    AttemptIntent intent = new AttemptIntent(Sha256.ofUtf8("a"), "f.xml", given);
+    given.add(object("two", 2));
+    assertThat(intent.objects()).containsExactly(object("one", 1));
+    assertThatThrownBy(() -> intent.objects().add(object("three", 3)))
+        .isInstanceOf(UnsupportedOperationException.class);
+
+    // bounded: eight are accepted, nine are not
+    List<ManifestLedger.ObjectEntry> eight = new ArrayList<>();
+    for (int i = 0; i < DeliveryLedger.MAX_INTENT_OBJECTS; i++) {
+      eight.add(object("o" + i, i));
+    }
+    assertThat(new AttemptIntent(Sha256.ofUtf8("a"), "f.xml", eight).objects()).hasSize(8);
+    List<ManifestLedger.ObjectEntry> nine = new ArrayList<>(eight);
+    nine.add(object("o8", 8));
+    assertThatThrownBy(() -> new AttemptIntent(Sha256.ofUtf8("a"), "f.xml", nine))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    // duplicate free: one key twice is refused even when the entries differ otherwise
+    assertThatThrownBy(
+            () ->
+                new AttemptIntent(
+                    Sha256.ofUtf8("a"), "f.xml", List.of(object("same", 1), object("same", 2))))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    // the file name rule still applies, and a null list is a null error, not an empty one
+    assertThatThrownBy(
+            () -> new AttemptIntent(Sha256.ofUtf8("a"), "a" + NUL, List.of(object("one", 1))))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new AttemptIntent(Sha256.ofUtf8("a"), "f.xml", null))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void anObjectEntryHasNoNegativeSizeAndNoNull() {
+    EvidenceKey key = EvidenceKey.of("manifest", "k");
+    Sha256 hash = Sha256.ofUtf8("k");
+    assertThat(new ManifestLedger.ObjectEntry(key, ManifestLedger.ObjectClass.OTHER, hash, 0))
+        .isNotNull();
+    assertThatThrownBy(
+            () -> new ManifestLedger.ObjectEntry(key, ManifestLedger.ObjectClass.OTHER, hash, -1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () -> new ManifestLedger.ObjectEntry(null, ManifestLedger.ObjectClass.OTHER, hash, 1))
+        .isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> new LedgerDurability.Status(true, -1, "x"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new LedgerDurability.Status(true, 1, null))
+        .isInstanceOf(NullPointerException.class);
   }
 
   @Test

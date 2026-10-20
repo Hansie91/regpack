@@ -17,11 +17,13 @@ import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.model.json.Json;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DuplicateKeyException;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.LeaseLedger;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.ManifestConflictException;
 import dev.regpack.ports.ledger.TrnConflictException;
 import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import java.time.Duration;
@@ -38,6 +40,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * In-memory {@link LedgerStore}. Every public method is {@code synchronized} on one lock and
@@ -153,7 +156,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
     /** The exact ingest key is not looked up first, only (event, source, version). */
     EXACT_KEY_NOT_FIRST,
     /** The pending outbox lists the items of every kind. */
-    OUTBOX_KIND_IGNORED
+    OUTBOX_KIND_IGNORED,
+    /** A key that is recorded again with another hash overwrites the row instead of conflicting. */
+    MANIFEST_OVERWRITES_ON_CONFLICT,
+    /** A beginSending that does not apply still records the objects of its intent. */
+    MANIFEST_RECORDED_ON_FAILED_BEGIN,
+    /** A manifest conflict in beginSending leaves the state change and the attempt row behind. */
+    BEGIN_SENDING_NOT_ATOMIC_WITH_MANIFEST
   }
 
   /** Constant stand-in for the day under IDEMPOTENCY_KEY_IGNORES_DAY. */
@@ -193,6 +202,11 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private long nextDeliveryId = 1;
   private final Map<AttemptId, Attempt> attempts = new HashMap<>();
   private long nextAttemptId = 1;
+
+  /** The object manifest by key path; String order is the UTF-16 code-unit order of the store. */
+  private final TreeMap<String, ManifestRow> manifest = new TreeMap<>();
+
+  private Status durability = new Status(false, 0, "in-memory ledger");
 
   /** The clock is the "database clock" for leases (T11). */
   public InMemoryLedgerStore(Clock clock) {
@@ -1040,6 +1054,10 @@ public final class InMemoryLedgerStore implements LedgerStore {
       if (attempts.containsKey(attemptId)) {
         throw new DuplicateKeyException("attempt id already used: " + attemptId.value());
       }
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (flaw == Flaw.MANIFEST_RECORDED_ON_FAILED_BEGIN) {
+        recordLocked(intent.objects(), Provenance.WRITTEN, Optional.of(attemptId));
+      }
       if (!isCurrent(delivery.key().endpoint(), token)) {
         return new SendingResult(SendingStatus.STALE_LEASE, Optional.empty());
       }
@@ -1053,6 +1071,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
       attempts.put(
           attemptId,
           new Attempt(attemptId, id, token, intent.artifactSha256(), intent.fileName(), false));
+      try {
+        // the manifest rows come last in the unit, as in the schema
+        recordLocked(intent.objects(), Provenance.WRITTEN, Optional.of(attemptId));
+      } catch (ManifestConflictException e) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest
+        if (flaw != Flaw.BEGIN_SENDING_NOT_ATOMIC_WITH_MANIFEST) {
+          deliveries.put(id, delivery);
+          attempts.remove(attemptId);
+        }
+        throw e;
+      }
       return new SendingResult(SendingStatus.APPLIED, Optional.of(attemptId));
     }
   }
@@ -1081,6 +1110,93 @@ public final class InMemoryLedgerStore implements LedgerStore {
               stored.fileName(),
               true));
       return true;
+    }
+  }
+
+  @Override
+  public void recordObjects(
+      List<ObjectEntry> entries, Provenance provenance, Optional<AttemptId> attempt) {
+    Objects.requireNonNull(entries, "entries");
+    Objects.requireNonNull(provenance, "provenance");
+    Objects.requireNonNull(attempt, "attempt");
+    List<ObjectEntry> copy = List.copyOf(entries);
+    Set<EvidenceKey> keys = new HashSet<>();
+    for (ObjectEntry entry : copy) {
+      if (!keys.add(entry.key())) {
+        throw new IllegalArgumentException("two entries of one call have one key");
+      }
+    }
+    synchronized (lock) {
+      recordLocked(copy, provenance, attempt);
+    }
+  }
+
+  /** All or nothing: every entry is checked before the first row is stored. */
+  private void recordLocked(
+      List<ObjectEntry> entries, Provenance provenance, Optional<AttemptId> attempt) {
+    Instant now = clock.now();
+    List<ManifestRow> toStore = new ArrayList<>();
+    for (ObjectEntry entry : entries) {
+      ManifestRow stored = manifest.get(entry.key().path());
+      if (stored == null) {
+        toStore.add(new ManifestRow(entry, provenance, attempt, now));
+      } else if (!stored.entry().sha256().equals(entry.sha256())) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest
+        if (flaw != Flaw.MANIFEST_OVERWRITES_ON_CONFLICT) {
+          throw new ManifestConflictException(
+              "object key is recorded with another hash: " + entry.key().path());
+        }
+        toStore.add(new ManifestRow(entry, provenance, attempt, now));
+      }
+    }
+    for (ManifestRow row : toStore) {
+      manifest.put(row.entry().key().path(), row);
+    }
+  }
+
+  @Override
+  public Optional<ManifestRow> manifestRow(EvidenceKey key) {
+    Objects.requireNonNull(key, "key");
+    synchronized (lock) {
+      return Optional.ofNullable(manifest.get(key.path()));
+    }
+  }
+
+  @Override
+  public List<ManifestRow> manifestRows(String prefix, Optional<EvidenceKey> after, int limit) {
+    Objects.requireNonNull(prefix, "prefix");
+    Objects.requireNonNull(after, "after");
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    int max = Math.min(limit, MAX_ROWS_PER_CALL);
+    List<ManifestRow> rows = new ArrayList<>();
+    synchronized (lock) {
+      for (ManifestRow row : manifest.tailMap(prefix, true).values()) {
+        String path = row.entry().key().path();
+        if (rows.size() >= max || !path.startsWith(prefix)) {
+          break;
+        }
+        if (after.isEmpty() || path.compareTo(after.get().path()) > 0) {
+          rows.add(row);
+        }
+      }
+    }
+    return List.copyOf(rows);
+  }
+
+  @Override
+  public Status durability() {
+    synchronized (lock) {
+      return durability;
+    }
+  }
+
+  /** Test double only: what {@link #durability()} answers from now on. */
+  public void setDurability(Status status) {
+    Objects.requireNonNull(status, "status");
+    synchronized (lock) {
+      this.durability = status;
     }
   }
 

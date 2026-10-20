@@ -11,10 +11,12 @@ import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.DecisionContext;
+import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.DecisionLedger;
 import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.IngestLedger;
 import dev.regpack.ports.ledger.LeaseLedger;
+import dev.regpack.ports.ledger.ManifestLedger;
 import dev.regpack.ports.ledger.ReportLedger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -288,6 +290,41 @@ public final class LedgerFixtures {
   /** The fixed attempt intent that {@link #begin} uses: a fixed digest and {@code file.xml}. */
   public static DeliveryLedger.AttemptIntent attemptIntent() {
     return new DeliveryLedger.AttemptIntent(Sha256.ofUtf8("artifact"), "file.xml");
+  }
+
+  /** The fixed attempt intent of {@link #attemptIntent()} that also names {@code objects}. */
+  public static DeliveryLedger.AttemptIntent attemptIntent(ManifestLedger.ObjectEntry... objects) {
+    return new DeliveryLedger.AttemptIntent(
+        Sha256.ofUtf8("artifact"), "file.xml", List.of(objects));
+  }
+
+  /**
+   * An evidence key of exactly 512 characters (the most a key may have) made of six segments, five
+   * of 100 characters and one of 7, that use every character of the key alphabet but the slash.
+   */
+  public static EvidenceKey maximumLengthKey() {
+    String hundred = "Ab0=,+-._".repeat(11) + "z";
+    EvidenceKey key =
+        new EvidenceKey(String.join("/", hundred, hundred, hundred, hundred, hundred, "Ab0=,+-"));
+    if (key.path().length() != 512) {
+      throw new AssertionError("the longest key has " + key.path().length() + " characters");
+    }
+    return key;
+  }
+
+  /**
+   * An object entry of class {@code SEALED_FILE} under the evidence key {@code path} whose stored
+   * hash is {@code SHA-256(hashTag)} and whose size is 10 bytes.
+   */
+  public static ManifestLedger.ObjectEntry objectEntry(String path, String hashTag) {
+    return objectEntry(path, ManifestLedger.ObjectClass.SEALED_FILE, hashTag, 10);
+  }
+
+  /** The general form: every component of an object entry is given. */
+  public static ManifestLedger.ObjectEntry objectEntry(
+      String path, ManifestLedger.ObjectClass objectClass, String hashTag, long sizeBytes) {
+    return new ManifestLedger.ObjectEntry(
+        new EvidenceKey(path), objectClass, Sha256.ofUtf8(hashTag), sizeBytes);
   }
 
   /**

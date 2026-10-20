@@ -26,8 +26,10 @@ import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DecisionLedger.BatchCommit;
 import dev.regpack.ports.ledger.DecisionLedger.CommitStatus;
 import dev.regpack.ports.ledger.DecisionLedger.Committed;
+import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.DeliveryLedger.AttemptIntent;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
+import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.DeliveryLedger.NewDelivery;
 import dev.regpack.ports.ledger.IngestLedger.Commit;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
@@ -40,6 +42,9 @@ import dev.regpack.ports.ledger.LeaseLedger.LeaseGrant;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseResult;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.ManifestLedger.ManifestRow;
+import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
+import dev.regpack.ports.ledger.ManifestLedger.ObjectEntry;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.ReportLedger.NewVersion;
 import dev.regpack.ports.ledger.ReportLedger.ReportableCommit;
@@ -339,6 +344,48 @@ public interface StorableValuesLedgerContract {
     String businessKey = euro.repeat(512);
     DeliveryId id = ledger().createDelivery(new NewDelivery(wide, 1, businessKey, 1));
     assertThat(ledger().delivery(id).orElseThrow().key().businessKey()).isEqualTo(businessKey);
+  }
+
+  /**
+   * EF22: the widest manifest values go through the sending unit as well: an attempt intent with
+   * the most objects it may name, one of them under the longest key and with the largest size, and
+   * every class of object.
+   */
+  @Test
+  default void aSendingUnitStoresEightManifestObjectsUnderTheLongestKeyAndTheLargestSize() {
+    EndpointKey ep = endpoint("W");
+    LeaseToken token =
+        ((LeaseResult.Granted) ledger().acquire(ep, "holder", Duration.ofSeconds(60)))
+            .grant()
+            .token();
+    DeliveryId delivery = ledger().createDelivery(new NewDelivery(ep, 1, "bk-wide", 1));
+    ledger().transition(delivery, DeliveryState.PREPARED, DeliveryState.QUEUED);
+    List<ObjectEntry> objects = new ArrayList<>();
+    objects.add(
+        new ObjectEntry(
+            LedgerFixtures.maximumLengthKey(),
+            ObjectClass.JOURNAL_A,
+            Sha256.ofUtf8("wide"),
+            1_000_000_000_000L));
+    ObjectClass[] classes = ObjectClass.values();
+    for (int i = 1; i < DeliveryLedger.MAX_INTENT_OBJECTS; i++) {
+      objects.add(LedgerFixtures.objectEntry("wide/" + i, classes[i % classes.length], "h" + i, i));
+    }
+    assertThat(objects).hasSize(8);
+    var attempt = ledger().allocateAttemptId();
+
+    assertThat(
+            ledger()
+                .beginSending(
+                    delivery, attempt, token, new AttemptIntent(Sha256.ofUtf8("a"), "f", objects))
+                .attempt())
+        .contains(attempt);
+
+    for (ObjectEntry object : objects) {
+      ManifestRow row = ledger().manifestRow(object.key()).orElseThrow();
+      assertThat(row.entry()).isEqualTo(object);
+      assertThat(row.attempt()).contains(attempt);
+    }
   }
 
   /** A lone surrogate in a text of the body has no canonical JSON: refused by both adapters. */

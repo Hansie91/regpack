@@ -9,6 +9,7 @@ import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.LedgerStore;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -264,6 +265,32 @@ public final class PgLedgerStore implements LedgerStore {
   @Override
   public Optional<Attempt> attempt(AttemptId id) {
     return deliveries.attempt(id);
+  }
+
+  // ManifestLedger: a placeholder until T12 (PgManifest); it throws so that nothing is silently
+  // lost
+
+  @Override
+  public void recordObjects(
+      List<ObjectEntry> entries, Provenance provenance, Optional<AttemptId> attempt) {
+    throw new IllegalStateException("not built until T12");
+  }
+
+  @Override
+  public Optional<ManifestRow> manifestRow(EvidenceKey key) {
+    throw new IllegalStateException("not built until T12");
+  }
+
+  @Override
+  public List<ManifestRow> manifestRows(String prefix, Optional<EvidenceKey> after, int limit) {
+    throw new IllegalStateException("not built until T12");
+  }
+
+  // LedgerDurability: a placeholder until T17 (PgLedgerDurability)
+
+  @Override
+  public Status durability() {
+    throw new IllegalStateException("not built until T17");
   }
 
   // ReportLedger (T18)

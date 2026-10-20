@@ -385,6 +385,10 @@ final class PgDeliveries {
     Objects.requireNonNull(attemptId, "attemptId");
     Objects.requireNonNull(token, "token");
     Objects.requireNonNull(intent, "intent");
+    // placeholder until T12 (PgManifest): objects must not be dropped silently
+    if (!intent.objects().isEmpty()) {
+      throw new IllegalStateException("not built until T12");
+    }
   }
 
   /**
