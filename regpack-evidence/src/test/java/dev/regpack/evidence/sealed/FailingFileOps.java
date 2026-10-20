@@ -61,6 +61,11 @@ final class FailingFileOps implements FileOps {
     return add(op, when, false, false, false, 1);
   }
 
+  /** Every call of {@code op} on a path that satisfies {@code when} fails before it acts. */
+  FailingFileOps failAlways(Op op, Predicate<Path> when) {
+    return add(op, when, false, false, false, UNLIMITED);
+  }
+
   /** The next call of {@code op} does its work and then fails with an IOException. */
   FailingFileOps failNextAfterEffect(Op op) {
     return add(op, p -> true, false, true, false, 1);

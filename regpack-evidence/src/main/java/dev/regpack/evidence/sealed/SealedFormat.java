@@ -339,7 +339,13 @@ public final class SealedFormat {
     }
   }
 
-  private static void requireStorable(Instant instant) {
+  /**
+   * A pure check, with no I/O: the files can hold this instant (microsecond precision, years 0000
+   * to 9999).
+   *
+   * @throws IllegalArgumentException when they cannot
+   */
+  static void requireStorable(Instant instant) {
     if (instant.getNano() % 1000 != 0) {
       throw new IllegalArgumentException("an instant has at most microsecond precision");
     }
