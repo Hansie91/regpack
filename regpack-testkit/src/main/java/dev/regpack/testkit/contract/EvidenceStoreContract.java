@@ -8,6 +8,7 @@ import dev.regpack.ports.evidence.EvidenceIntegrityException;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceRetentionException;
 import dev.regpack.ports.evidence.EvidenceStore;
+import dev.regpack.ports.evidence.EvidenceStore.Durability;
 import dev.regpack.ports.evidence.EvidenceStore.PutOutcome;
 import dev.regpack.ports.evidence.EvidenceStore.PutRequest;
 import dev.regpack.ports.evidence.EvidenceStore.Retention;
@@ -19,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
@@ -260,6 +262,236 @@ public interface EvidenceStoreContract {
       assertThat(created).isEqualTo(1);
       assertThat(integrity).isEqualTo(threads - 1);
       assertThat(store().get(K).orElseThrow().bytes()).isEqualTo(utf8(winner));
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  // M28, M33 (D-E2): a never-put key is a caller error, and an outage comes first.
+
+  @Test
+  default void extendRetentionOfAMissingKeyIsRejected() {
+    Instant later = clock().now().plus(Duration.ofDays(1));
+    simulateOutage(true);
+    assertThatThrownBy(() -> store().extendRetention(K, later))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    simulateOutage(false);
+    assertThatThrownBy(() -> store().extendRetention(K, later))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(K.path());
+    assertThat(store().get(K)).isEmpty();
+    assertThat(store().list("landing/", Optional.empty(), 10)).isEmpty();
+  }
+
+  @Test
+  default void setLegalHoldOfAMissingKeyIsRejected() {
+    simulateOutage(true);
+    assertThatThrownBy(() -> store().setLegalHold(K, true))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    simulateOutage(false);
+    assertThatThrownBy(() -> store().setLegalHold(K, true))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(K.path());
+    assertThatThrownBy(() -> store().setLegalHold(K, false))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(store().get(K)).isEmpty();
+    assertThat(store().list("landing/", Optional.empty(), 10)).isEmpty();
+  }
+
+  @Test
+  default void aKeyMayBeAPrefixOfAnotherKey() {
+    EvidenceKey shorter = EvidenceKey.of("a", "b");
+    EvidenceKey longer = EvidenceKey.of("a", "b", "c");
+    store().put(request(longer, "longer", "text/plain", fiveYears()));
+    store().put(request(shorter, "shorter", "text/plain", fiveYears()));
+    assertThat(store().get(shorter).orElseThrow().bytes()).isEqualTo(utf8("shorter"));
+    assertThat(store().get(longer).orElseThrow().bytes()).isEqualTo(utf8("longer"));
+    assertThat(store().list("a/", Optional.empty(), 10)).containsExactly(shorter, longer);
+    assertThat(store().list("a/", Optional.of(shorter), 10)).containsExactly(longer);
+  }
+
+  @Test
+  default void listPrefixNeedNotEndAtASegmentBoundary() {
+    EvidenceKey shorter = EvidenceKey.of("a", "b");
+    EvidenceKey longer = EvidenceKey.of("a", "b", "c");
+    EvidenceKey other = EvidenceKey.of("a", "c");
+    for (EvidenceKey key : List.of(other, longer, shorter)) {
+      store().put(request(key, "v", "text/plain", fiveYears()));
+    }
+    assertThat(store().list("a/b", Optional.empty(), 10)).containsExactly(shorter, longer);
+    assertThat(store().list("a/b/", Optional.empty(), 10)).containsExactly(longer);
+    assertThat(store().list("a", Optional.empty(), 10)).containsExactly(shorter, longer, other);
+  }
+
+  @Test
+  default void listPagesWalkAllKeysOnce() {
+    List<EvidenceKey> expected = new ArrayList<>();
+    for (int i = 0; i < 250; i++) {
+      EvidenceKey key = EvidenceKey.of("page", "k" + (1000 + i));
+      expected.add(key);
+      store().put(request(key, "v" + i, "text/plain", fiveYears()));
+    }
+    List<EvidenceKey> full = store().list("page/", Optional.empty(), 1000);
+    assertThat(full).containsExactlyElementsOf(expected);
+    List<EvidenceKey> walked = new ArrayList<>();
+    Optional<EvidenceKey> after = Optional.empty();
+    int pages = 0;
+    while (pages < 5) {
+      List<EvidenceKey> page = store().list("page/", after, 100);
+      assertThat(page).hasSizeLessThanOrEqualTo(100);
+      pages++;
+      if (page.isEmpty()) {
+        break;
+      }
+      walked.addAll(page);
+      after = Optional.of(page.get(page.size() - 1));
+    }
+    assertThat(pages).isEqualTo(4);
+    assertThat(walked).containsExactlyElementsOf(full);
+    assertThat(new HashSet<>(walked)).hasSize(250);
+  }
+
+  @Test
+  default void emptyAndLargeObjectsRoundTrip() {
+    EvidenceKey empty = EvidenceKey.of("size", "empty");
+    EvidenceKey large = EvidenceKey.of("size", "large");
+    byte[] largeBytes = new byte[3 * 1024 * 1024];
+    for (int i = 0; i < largeBytes.length; i++) {
+      largeBytes[i] = (byte) (i * 31 + (i >>> 8) + 7);
+    }
+    assertThat(store().put(new PutRequest(empty, new byte[0], "text/plain", fiveYears())))
+        .isEqualTo(PutOutcome.CREATED);
+    assertThat(
+            store().put(new PutRequest(large, largeBytes, "application/octet-stream", fiveYears())))
+        .isEqualTo(PutOutcome.CREATED);
+    StoredObject gotEmpty = store().get(empty).orElseThrow();
+    assertThat(gotEmpty.bytes()).isEmpty();
+    assertThat(gotEmpty.sha256())
+        .isEqualTo(new Sha256("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    StoredObject gotLarge = store().get(large).orElseThrow();
+    assertThat(gotLarge.bytes()).isEqualTo(largeBytes);
+    assertThat(gotLarge.sha256()).isEqualTo(Sha256.of(largeBytes));
+    // The same bytes again are the same object, also at this size.
+    assertThat(
+            store().put(new PutRequest(large, largeBytes, "application/octet-stream", fiveYears())))
+        .isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+  }
+
+  @Test
+  default void keysDifferingOnlyInCaseAreDistinct() {
+    EvidenceKey upper = EvidenceKey.of("a", "KeyX");
+    EvidenceKey lower = EvidenceKey.of("a", "keyx");
+    assertThat(store().put(request(upper, "upper", "text/plain", fiveYears())))
+        .isEqualTo(PutOutcome.CREATED);
+    assertThat(store().put(request(lower, "lower", "text/plain", fiveYears())))
+        .isEqualTo(PutOutcome.CREATED);
+    assertThat(store().get(upper).orElseThrow().bytes()).isEqualTo(utf8("upper"));
+    assertThat(store().get(lower).orElseThrow().bytes()).isEqualTo(utf8("lower"));
+    assertThat(store().get(upper).orElseThrow().key()).isEqualTo(upper);
+    assertThat(store().get(lower).orElseThrow().key()).isEqualTo(lower);
+    assertThat(store().list("a/", Optional.empty(), 10)).containsExactly(upper, lower);
+  }
+
+  @Test
+  default void aMaximumLengthKeyRoundTrips() {
+    String segment = "m".repeat(100);
+    EvidenceKey key = EvidenceKey.of(segment, segment, segment, segment, segment, "n".repeat(7));
+    assertThat(key.path()).hasSize(512);
+    assertThat(store().put(request(key, "max", "text/plain", fiveYears())))
+        .isEqualTo(PutOutcome.CREATED);
+    StoredObject got = store().get(key).orElseThrow();
+    assertThat(got.key()).isEqualTo(key);
+    assertThat(got.bytes()).isEqualTo(utf8("max"));
+    assertThat(store().list(segment + "/", Optional.empty(), 10)).containsExactly(key);
+    assertThat(store().put(request(key, "max", "text/plain", fiveYears())))
+        .isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+  }
+
+  @Test
+  default void mediaTypeIsKeptVerbatim() {
+    List<String> mediaTypes =
+        List.of(
+            "application/vnd.regpack.journal+json",
+            "Text/Plain;Charset=UTF-8",
+            "application/x-odd; a=\"b c\"; d=e",
+            "application/octet-stream");
+    List<EvidenceKey> keys = new ArrayList<>();
+    for (int i = 0; i < mediaTypes.size(); i++) {
+      EvidenceKey key = EvidenceKey.of("media", "m" + i);
+      keys.add(key);
+      store().put(request(key, "v", mediaTypes.get(i), fiveYears()));
+    }
+    for (int i = 0; i < mediaTypes.size(); i++) {
+      assertThat(store().get(keys.get(i)).orElseThrow().mediaType()).isEqualTo(mediaTypes.get(i));
+    }
+  }
+
+  @Test
+  default void aStoreOfAnEvidenceProfileDeclaresItsDurabilityConsistently() {
+    String profile = store().grade().profile();
+    Durability durability = store().durability();
+    assertThat(profile).isIn("P-SEALED", "P-WORM", "P-MEMORY");
+    if (profile.equals("P-MEMORY")) {
+      assertThat(durability).isEqualTo(new Durability(false, 0));
+    } else {
+      assertThat(durability.synchronousAcknowledgement()).isTrue();
+      assertThat(durability.independentFailureDomains()).isGreaterThanOrEqualTo(1);
+    }
+  }
+
+  @Test
+  default void retentionAndLegalHoldSurviveReopen() {
+    Retention original = fiveYears();
+    store().put(request(K, "hello", "text/plain", original));
+    Instant later = original.retainUntil().plus(Duration.ofDays(365));
+    store().extendRetention(K, later);
+    store().setLegalHold(K, true);
+    StoredObject before = store().get(K).orElseThrow();
+    StoredObject after = reopen().get(K).orElseThrow();
+    assertThat(after.retention().retainUntil()).isEqualTo(later);
+    assertThat(after.retention().retentionClass()).isEqualTo(original.retentionClass());
+    assertThat(after.legalHold()).isTrue();
+    assertThat(after.bytes()).isEqualTo(before.bytes());
+    assertThat(after.writtenAt()).isEqualTo(before.writtenAt());
+    // A released hold also survives a reopen, and so does the extended retention.
+    store().setLegalHold(K, false);
+    assertThat(reopen().get(K).orElseThrow().legalHold()).isFalse();
+    assertThat(reopen().get(K).orElseThrow().retention().retainUntil()).isEqualTo(later);
+  }
+
+  @Test
+  default void concurrentPutsOfTheSameKeyWithTheSameBytesAllSucceedWithOneCreated()
+      throws Exception {
+    int threads = 8;
+    Retention retention = fiveYears();
+    CountDownLatch release = new CountDownLatch(1);
+    ExecutorService pool = Executors.newFixedThreadPool(threads);
+    try {
+      List<Future<PutOutcome>> futures = new ArrayList<>();
+      for (int i = 0; i < threads; i++) {
+        Callable<PutOutcome> task =
+            () -> {
+              release.await();
+              return store().put(request(K, "same bytes", "text/plain", retention));
+            };
+        futures.add(pool.submit(task));
+      }
+      release.countDown();
+      int created = 0;
+      int identical = 0;
+      for (Future<PutOutcome> future : futures) {
+        PutOutcome outcome = future.get();
+        if (outcome == PutOutcome.CREATED) {
+          created++;
+        } else {
+          assertThat(outcome).isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+          identical++;
+        }
+      }
+      assertThat(created).isEqualTo(1);
+      assertThat(identical).isEqualTo(threads - 1);
+      assertThat(store().get(K).orElseThrow().bytes()).isEqualTo(utf8("same bytes"));
+      assertThat(store().list("landing/", Optional.empty(), 10)).containsExactly(K);
     } finally {
       pool.shutdownNow();
     }

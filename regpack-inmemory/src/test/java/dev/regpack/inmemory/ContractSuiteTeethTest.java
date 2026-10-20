@@ -5,6 +5,7 @@ import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClass
 
 import dev.regpack.inmemory.mutants.AbaAsNoopLedgerContractTest;
 import dev.regpack.inmemory.mutants.AsAtNotCheckedLedgerContractTest;
+import dev.regpack.inmemory.mutants.CaseFoldedKeysEvidenceContractTest;
 import dev.regpack.inmemory.mutants.ExactKeyNotFirstLedgerContractTest;
 import dev.regpack.inmemory.mutants.HighestVersionIsMinLedgerContractTest;
 import dev.regpack.inmemory.mutants.IdempotencyIgnoresContextLedgerContractTest;
@@ -12,6 +13,7 @@ import dev.regpack.inmemory.mutants.IdempotencyIgnoresDayLedgerContractTest;
 import dev.regpack.inmemory.mutants.IgnoreLeaseTokenLedgerContractTest;
 import dev.regpack.inmemory.mutants.IgnoreRestoreEpochLedgerContractTest;
 import dev.regpack.inmemory.mutants.LeaseTtlUnboundedLedgerContractTest;
+import dev.regpack.inmemory.mutants.ListIgnoresAfterEvidenceContractTest;
 import dev.regpack.inmemory.mutants.NoInFlightGuardLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoTakeoverInDoubtLedgerContractTest;
 import dev.regpack.inmemory.mutants.NoWithdrawalGuardLedgerContractTest;
@@ -23,6 +25,7 @@ import dev.regpack.inmemory.mutants.OverwriteOnDuplicateJournalContractTest;
 import dev.regpack.inmemory.mutants.PageUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.RedeliveryReingestsLedgerContractTest;
 import dev.regpack.inmemory.mutants.ShortenRetentionEvidenceContractTest;
+import dev.regpack.inmemory.mutants.SilentMissingKeyEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SubjectNotRegimeScopedLedgerContractTest;
 import dev.regpack.inmemory.mutants.SuppressAgainstAnyVersionLedgerContractTest;
 import dev.regpack.inmemory.mutants.TakeoverTouchesOtherEndpointsLedgerContractTest;
@@ -56,6 +59,13 @@ class ContractSuiteTeethTest {
         OverwriteOnDuplicateEvidenceContractTest.class,
         Set.of("putSameKeyDifferentBytesIsIntegrityAlarmAndKeepsOriginal"));
     expected.put(ShortenRetentionEvidenceContractTest.class, Set.of("retentionCanOnlyBeExtended"));
+    // the hardening of the EvidenceStore suite (P3b1, M28 and M33)
+    expected.put(
+        CaseFoldedKeysEvidenceContractTest.class, Set.of("keysDifferingOnlyInCaseAreDistinct"));
+    expected.put(ListIgnoresAfterEvidenceContractTest.class, Set.of("listPagesWalkAllKeysOnce"));
+    expected.put(
+        SilentMissingKeyEvidenceContractTest.class,
+        Set.of("extendRetentionOfAMissingKeyIsRejected", "setLegalHoldOfAMissingKeyIsRejected"));
     // the journal-format contract (P3b1): a store that overwrites on a duplicate key
     expected.put(
         OverwriteOnDuplicateJournalContractTest.class,

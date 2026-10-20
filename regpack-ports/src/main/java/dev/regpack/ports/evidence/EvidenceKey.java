@@ -4,10 +4,11 @@ import java.util.regex.Pattern;
 
 /**
  * Address of an evidence object: segments of {@code [A-Za-z0-9._=,+-]+} joined by '/'. Empty, "."
- * and ".." segments and paths over 512 characters are rejected.
+ * and ".." segments, segments over 100 characters and paths over 512 characters are rejected.
  */
 public record EvidenceKey(String path) {
   private static final int MAX_LENGTH = 512;
+  private static final int MAX_SEGMENT_LENGTH = 100;
   private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9._=,+-]+");
 
   public EvidenceKey {
@@ -36,6 +37,10 @@ public record EvidenceKey(String path) {
   }
 
   private static void requireSegment(String segment) {
+    if (segment != null && segment.length() > MAX_SEGMENT_LENGTH) {
+      throw new IllegalArgumentException(
+          "EvidenceKey segment must be at most " + MAX_SEGMENT_LENGTH + " characters");
+    }
     if (segment == null
         || segment.equals(".")
         || segment.equals("..")

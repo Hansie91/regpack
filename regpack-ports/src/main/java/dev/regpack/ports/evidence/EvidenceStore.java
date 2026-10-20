@@ -153,8 +153,19 @@ public interface EvidenceStore {
    */
   List<EvidenceKey> list(String prefix, Optional<EvidenceKey> after, int limit);
 
-  /** Moves retain-until later; an earlier instant throws {@link EvidenceRetentionException}. */
+  /**
+   * Moves retain-until later; an earlier instant throws {@link EvidenceRetentionException}. A key
+   * that was never put throws {@link IllegalArgumentException} with the message {@code "no such
+   * evidence key: <path>"} (M28); during an outage {@link EvidenceUnavailableException} comes
+   * first. There is no delete, so a listed key cannot vanish; a lost object is found by {@code
+   * verify}, not by this call.
+   */
   void extendRetention(EvidenceKey key, Instant newRetainUntil);
 
+  /**
+   * Sets or clears the legal hold, which is separate from retention. A key that was never put
+   * throws {@link IllegalArgumentException} with the message {@code "no such evidence key: <path>"}
+   * (M33); during an outage {@link EvidenceUnavailableException} comes first.
+   */
   void setLegalHold(EvidenceKey key, boolean hold);
 }
