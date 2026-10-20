@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -441,6 +442,87 @@ class SealedEvidenceStoreTest {
     assertThat(writer.read(object.key())).contains(object);
   }
 
+  private void aDivergentPairIsAnAlarmOfItsOwnKindForPutAndForTheJournalWriter(Path tampered)
+      throws IOException {
+    SealedEvidenceStore store = open();
+    JournalWriter writer = new JournalWriter(store, RetentionPolicy.fixedDays(1826));
+    JournalObject object = transportResult(clock.now(), "http 202");
+    EvidenceKey key = object.key().evidenceKey();
+    assertThat(writer.write(object)).isEqualTo(JournalWriter.Outcome.CREATED);
+    // one volume is given a whole, self-consistent file of another payload under the same key
+    byte[] otherPayload = transportResult(clock.now(), "http 500").toBytes();
+    SealedTamper.replaceObject(
+        tampered, key, SealedTamper.fileWithOtherPayload(tampered, key, otherPayload));
+    SealedFormat.decodeObject(Files.readAllBytes(objectPath(tampered, key)), key.path());
+    byte[] onA = Files.readAllBytes(objectPath(volumeA, key));
+    byte[] onB = Files.readAllBytes(objectPath(volumeB, key));
+    assertThat(onA).isNotEqualTo(onB);
+    JournalObject later =
+        new JournalObject(
+            object.key(), object.type(), 1, object.clockInstant().plusSeconds(5), object.payload());
+
+    // the store: an alarm of its own kind for the bytes of either copy, and nothing is written
+    for (byte[] offered : List.of(object.toBytes(), otherPayload)) {
+      assertThatThrownBy(
+              () -> store.put(new PutRequest(key, offered, JournalWriter.MEDIA_TYPE, retention())))
+          .isInstanceOf(EvidenceCorruptionException.class)
+          .hasMessageContaining(key.path());
+    }
+    // the writer never acknowledges it, whichever copy holds the payload that is written
+    assertThatThrownBy(() -> writer.write(object))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(key.path());
+    assertThatThrownBy(() -> writer.write(later)).isInstanceOf(EvidenceCorruptionException.class);
+    assertThat(Files.readAllBytes(objectPath(volumeA, key))).isEqualTo(onA);
+    assertThat(Files.readAllBytes(objectPath(volumeB, key))).isEqualTo(onB);
+    assertThat(files(volumeA)).noneMatch(name -> name.contains("~tmp~"));
+    assertThat(files(volumeB)).noneMatch(name -> name.contains("~tmp~"));
+    assertThat(store.scrub()).containsExactly(key.path() + " DIVERGENT");
+  }
+
+  @Test
+  void aDivergentPairWithVolumeBChangedIsAnAlarmOfItsOwnKindAndNeverAcknowledgedByTheWriter()
+      throws IOException {
+    aDivergentPairIsAnAlarmOfItsOwnKindForPutAndForTheJournalWriter(volumeB);
+  }
+
+  @Test
+  void aDivergentPairWithVolumeAChangedIsAnAlarmOfItsOwnKindAndNeverAcknowledgedByTheWriter()
+      throws IOException {
+    aDivergentPairIsAnAlarmOfItsOwnKindForPutAndForTheJournalWriter(volumeA);
+  }
+
+  @Test
+  void aJournalRewriteWithAnotherInstantAfterAHalfDonePutIsNotAcknowledgedUntilBothVolumesHoldIt()
+      throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real());
+    SealedEvidenceStore store = open(failing);
+    JournalWriter writer = new JournalWriter(store, RetentionPolicy.fixedDays(1826));
+    JournalObject first = transportResult(clock.now(), "http 202");
+    EvidenceKey key = first.key().evidenceKey();
+    JournalObject later =
+        new JournalObject(
+            first.key(), first.type(), 1, first.clockInstant().plusSeconds(5), first.payload());
+    assertThat(later.toBytes()).isNotEqualTo(first.toBytes());
+    failing.failNext(Op.LINK, path -> path.startsWith(volumeB));
+    assertThatThrownBy(() -> writer.write(first)).isInstanceOf(EvidenceUnavailableException.class);
+    assertThat(objectPath(volumeA, key)).exists();
+    assertThat(objectPath(volumeB, key)).doesNotExist();
+
+    // volume b fails again: the rewrite has the same payload but is not acknowledged
+    failing.failNext(Op.LINK, path -> path.startsWith(volumeB));
+    assertThatThrownBy(() -> writer.write(later)).isInstanceOf(EvidenceUnavailableException.class);
+    assertThat(objectPath(volumeB, key)).doesNotExist();
+
+    // volume b works: the rewrite does not return before volume b holds the first object
+    assertThat(writer.write(later)).isEqualTo(JournalWriter.Outcome.ALREADY_PRESENT_SAME_PAYLOAD);
+    assertThat(Files.readAllBytes(objectPath(volumeB, key)))
+        .isEqualTo(Files.readAllBytes(objectPath(volumeA, key)));
+    assertThat(store.scrub()).isEmpty();
+    assertThat(writer.read(first.key())).contains(first);
+    assertThat(files(volumeB)).noneMatch(name -> name.contains("~tmp~"));
+  }
+
   @Test
   void aMediaTypeTooLongForTheHeaderIsRefusedAndStoresNothing() throws IOException {
     SealedEvidenceStore store = open();
@@ -749,6 +831,204 @@ class SealedEvidenceStoreTest {
         .hasMessageContaining(KEY.path());
 
     assertThat(race.fired()).isEqualTo(3);
+  }
+
+  // ------------------------------------- a retention write is not acknowledged on presence alone
+
+  private static List<Path> syncsOf(RecordingFileOps recording) {
+    return recording.paths(Op.SYNC_DIRECTORY);
+  }
+
+  private void aRetryOfARetentionWriteSyncsTheMetaDirectoryOfEveryVolumeThatHoldsAMeta(
+      Consumer<SealedEvidenceStore> write) throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true);
+    RecordingFileOps recording = RecordingFileOps.claimingDirectorySync(failing);
+    SealedEvidenceStore store = open(recording);
+    store.put(request(KEY, "hello"));
+    Path directoryOfA = objectPath(volumeA, KEY).getParent();
+    Path directoryOfB = objectPath(volumeB, KEY).getParent();
+
+    // the meta replace succeeds on both volumes; the sync of the directory of volume b fails
+    failing.failNext(Op.SYNC_DIRECTORY, directoryOfB::equals);
+    assertThatThrownBy(() -> write.accept(store)).isInstanceOf(EvidenceUnavailableException.class);
+    SealedFormat.Meta written = volume(volumeA, "vol-a").readMeta(KEY).orElseThrow();
+    assertThat(volume(volumeB, "vol-b").readMeta(KEY)).contains(written);
+
+    // the retry finds equal metas, writes nothing, and still syncs both directories, a then b
+    recording.clear();
+    write.accept(store);
+    assertThat(syncsOf(recording)).containsExactly(directoryOfA, directoryOfB);
+    assertThat(recording.paths(Op.REPLACE)).isEmpty();
+    assertThat(volume(volumeA, "vol-a").readMeta(KEY)).contains(written);
+
+    // and a retry whose sync fails again is not an acknowledgement either
+    failing.failNext(Op.SYNC_DIRECTORY, directoryOfB::equals);
+    assertThatThrownBy(() -> write.accept(store)).isInstanceOf(EvidenceUnavailableException.class);
+    failing.failNext(Op.SYNC_DIRECTORY, directoryOfA::equals);
+    assertThatThrownBy(() -> write.accept(store)).isInstanceOf(EvidenceUnavailableException.class);
+
+    recording.clear();
+    write.accept(store);
+    assertThat(syncsOf(recording)).containsExactly(directoryOfA, directoryOfB);
+    assertThat(volume(volumeA, "vol-a").readMeta(KEY)).contains(written);
+    assertThat(volume(volumeB, "vol-b").readMeta(KEY)).contains(written);
+  }
+
+  @Test
+  void aRetriedRetentionExtensionAfterAFailedDirectorySyncIsNotAcknowledgedOnPresenceAlone()
+      throws IOException {
+    Instant later = retention().retainUntil().plus(Duration.ofDays(365));
+    aRetryOfARetentionWriteSyncsTheMetaDirectoryOfEveryVolumeThatHoldsAMeta(
+        store -> store.extendRetention(KEY, later));
+  }
+
+  @Test
+  void aRetriedLegalHoldAfterAFailedDirectorySyncIsNotAcknowledgedOnPresenceAlone()
+      throws IOException {
+    aRetryOfARetentionWriteSyncsTheMetaDirectoryOfEveryVolumeThatHoldsAMeta(
+        store -> store.setLegalHold(KEY, true));
+  }
+
+  @Test
+  void aRetentionWriteThatChangesNothingAndHoldsNoMetaSyncsNothing() throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true);
+    RecordingFileOps recording = RecordingFileOps.claimingDirectorySync(failing);
+    SealedEvidenceStore store = open(recording);
+    store.put(request(KEY, "hello"));
+    recording.clear();
+
+    // both metas are absent and the request is what the header already says: nothing was written
+    store.extendRetention(KEY, retention().retainUntil());
+    store.setLegalHold(KEY, false);
+
+    assertThat(recording.ops()).doesNotContain(Op.SYNC_DIRECTORY, Op.REPLACE, Op.WRITE_AND_FORCE);
+  }
+
+  // ----------------------------------------------- repairing a meta that another writer overtakes
+
+  @Test
+  void aRepairThatIsOvertakenWhileItWritesAMergedMetaFinishesThePairItself() throws IOException {
+    Instant base = retention().retainUntil();
+    Instant shorter = base.plus(Duration.ofDays(10));
+    Instant longer = base.plus(Duration.ofDays(100));
+    SealedVolume onA = volume(volumeA, "vol-a");
+    SealedVolume onB = volume(volumeB, "vol-b");
+    // volume b holds revision 9 (the maximum retention) by the time the merged revision 8 is
+    // written to volume a, so the write to volume b is refused: the repair must look again
+    BeforeMetaReplace race =
+        new BeforeMetaReplace(
+            FileOps.real(),
+            volumeA,
+            1,
+            firing ->
+                assertThat(onB.writeMeta(KEY, new SealedFormat.Meta(9, "landing", longer, true)))
+                    .isTrue());
+    SealedEvidenceStore store = open(race);
+    store.put(request(KEY, "hello"));
+    assertThat(onA.writeMeta(KEY, new SealedFormat.Meta(7, "landing", shorter, false))).isTrue();
+    assertThat(onB.writeMeta(KEY, new SealedFormat.Meta(6, "landing", longer, true))).isTrue();
+
+    assertThat(store.repair()).isZero();
+
+    assertThat(race.fired()).isEqualTo(1);
+    SealedFormat.Meta metaOfB = onB.readMeta(KEY).orElseThrow();
+    assertThat(metaOfB.rev()).isEqualTo(9);
+    assertThat(onA.readMeta(KEY)).contains(metaOfB);
+    assertThat(store.get(KEY).orElseThrow().retention().retainUntil()).isEqualTo(longer);
+  }
+
+  @Test
+  void aRepairThatIsOvertakenOnEveryTryIsNotAcknowledged() throws IOException {
+    Instant base = retention().retainUntil();
+    BeforeMetaReplace race = alwaysOvertaken();
+    SealedEvidenceStore store = open(race);
+    store.put(request(KEY, "hello"));
+    SealedVolume onA = volume(volumeA, "vol-a");
+    SealedVolume onB = volume(volumeB, "vol-b");
+    assertThat(onA.writeMeta(KEY, new SealedFormat.Meta(2, "landing", base.plusSeconds(10), false)))
+        .isTrue();
+    assertThat(onB.writeMeta(KEY, new SealedFormat.Meta(1, "landing", base.plusSeconds(100), true)))
+        .isTrue();
+
+    assertThatThrownBy(store::repair)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessageContaining(KEY.path());
+
+    assertThat(race.fired()).isEqualTo(3); // three tries, then the alarm
+  }
+
+  // ------------------------------------------------------------ a root that does not exist yet
+
+  private SealedEvidenceStore.Config nestedConfig(Path base) {
+    return new SealedEvidenceStore.Config(
+        base.resolve("n1").resolve("n2").resolve("vol-a"),
+        base.resolve("m1").resolve("vol-b"),
+        "vol-a",
+        "vol-b",
+        clock);
+  }
+
+  @Test
+  void aMissingRootAndItsMissingAncestorsAreCreatedWithTheirParentsSynced() throws IOException {
+    Path base = root.toRealPath().resolve("fresh");
+    Files.createDirectories(base);
+    RecordingFileOps recording = RecordingFileOps.claimingDirectorySync(FileOps.real());
+    SealedEvidenceStore.Config config = nestedConfig(base);
+
+    SealedEvidenceStore store = SealedEvidenceStore.open(config, recording);
+
+    // the parent of every directory that was created: base (for n1 and m1), n1, n2 and m1
+    assertThat(syncsOf(recording))
+        .contains(base, base.resolve("n1"), base.resolve("n1").resolve("n2"), base.resolve("m1"));
+    // ... and the parent of the root comes before the marker, which is the first file of a volume
+    int markerLink = -1;
+    int syncOfParent = -1;
+    List<RecordingFileOps.Call> calls = recording.calls();
+    for (int i = 0; i < calls.size(); i++) {
+      RecordingFileOps.Call call = calls.get(i);
+      if (markerLink < 0
+          && call.op() == Op.LINK
+          && call.path().getFileName().toString().equals(".sealed-volume")) {
+        markerLink = i;
+      }
+      if (syncOfParent < 0
+          && call.op() == Op.SYNC_DIRECTORY
+          && call.path().equals(base.resolve("n1").resolve("n2"))) {
+        syncOfParent = i;
+      }
+    }
+    assertThat(syncOfParent).isGreaterThanOrEqualTo(0).isLessThan(markerLink);
+    assertThat(store.degraded()).isFalse();
+
+    // an existing root is not synced again above itself
+    recording.clear();
+    SealedEvidenceStore.open(config, recording);
+    assertThat(syncsOf(recording))
+        .doesNotContain(
+            base, base.resolve("n1"), base.resolve("n1").resolve("n2"), base.resolve("m1"));
+  }
+
+  @Test
+  void aFailedSyncOfTheParentOfARootFailsTheOpenAndTheNextOpenSyncsItAgain() throws IOException {
+    Path base = root.toRealPath().resolve("fresh");
+    Files.createDirectories(base);
+    Path parentOfRootA = base.resolve("n1").resolve("n2");
+    FailingFileOps failing = new FailingFileOps(FileOps.real(), true);
+    RecordingFileOps recording = RecordingFileOps.claimingDirectorySync(failing);
+    SealedEvidenceStore.Config config = nestedConfig(base);
+    failing.failNext(Op.SYNC_DIRECTORY, parentOfRootA::equals);
+
+    assertThatThrownBy(() -> SealedEvidenceStore.open(config, recording))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    // the directories exist now, but the entry of the root in its parent was never synced
+    assertThat(config.volumeA()).isDirectory();
+
+    recording.clear();
+    SealedEvidenceStore store = SealedEvidenceStore.open(config, recording);
+
+    assertThat(syncsOf(recording)).contains(parentOfRootA, base.resolve("n1"), base);
+    assertThat(store.degraded()).isFalse();
+    assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
   }
 
   // ---------------------------------------------------------------- reads with a volume failing

@@ -4,6 +4,7 @@ import dev.regpack.ports.evidence.EvidenceCorruptionException;
 import dev.regpack.ports.evidence.EvidenceIntegrityException;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
+import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import java.util.List;
 import java.util.Objects;
@@ -13,9 +14,11 @@ import java.util.Optional;
  * Writes and reads journal objects through an {@link EvidenceStore} (spec 11.2). A put of an
  * existing key with the same {@code payload_sha256} is success, and one with another hash is an
  * integrity alarm, whatever the envelope's instant says. A damaged stored copy ({@link
- * EvidenceCorruptionException}) is never taken for "already present". The writer reads no clock:
- * the retention is asked from the {@link RetentionPolicy} for the class {@code journal} and the
- * ledger event time of the object. Messages carry key paths only.
+ * EvidenceCorruptionException}) is never taken for "already present". "Already present" is
+ * acknowledged only after the stored object has been put again through the store and that put has
+ * returned: a store that keeps two copies completes a missing one, or throws. The writer reads no
+ * clock: the retention is asked from the {@link RetentionPolicy} for the class {@code journal} and
+ * the ledger event time of the object. Messages carry key paths only.
  */
 public final class JournalWriter {
   /** The media type of every journal object. */
@@ -43,8 +46,10 @@ public final class JournalWriter {
   /**
    * Puts the object under its key.
    *
-   * @throws EvidenceCorruptionException a stored copy is damaged
+   * @throws EvidenceCorruptionException a stored copy is damaged, or the copies of a store differ
    * @throws EvidenceIntegrityException another payload hash is stored under the key
+   * @throws EvidenceUnavailableException the store cannot be written or read, also when it cannot
+   *     complete the stored object of an earlier write that had the same payload
    */
   public Outcome write(JournalObject object) {
     Objects.requireNonNull(object, "object");
@@ -63,10 +68,19 @@ public final class JournalWriter {
     } catch (EvidenceCorruptionException e) {
       throw e;
     } catch (EvidenceIntegrityException e) {
-      if (storedPayloadIs(key, object)) {
-        return Outcome.ALREADY_PRESENT_SAME_PAYLOAD;
+      Optional<EvidenceStore.StoredObject> stored = storedWithPayloadOf(key, object);
+      if (stored.isEmpty()) {
+        throw e;
       }
-      throw e;
+      // The store refused these bytes before it looked at the rest of its state (a store of two
+      // volumes may hold the stored object on one of them only). The write is acknowledged only
+      // when the stored object itself has been put again and that has succeeded: for such a store
+      // that publishes the missing copy, for any other it is an idempotent success. What the put
+      // throws (a damaged or divergent copy, an outage) is not absorbed.
+      store.put(
+          new EvidenceStore.PutRequest(
+              key, stored.get().bytes(), stored.get().mediaType(), stored.get().retention()));
+      return Outcome.ALREADY_PRESENT_SAME_PAYLOAD;
     }
   }
 
@@ -135,17 +149,23 @@ public final class JournalWriter {
         "not a class a journal key under a subject: " + key.path());
   }
 
-  private boolean storedPayloadIs(EvidenceKey key, JournalObject object) {
+  /**
+   * The stored object under the key if it is a journal object with the payload of {@code object}.
+   */
+  private Optional<EvidenceStore.StoredObject> storedWithPayloadOf(
+      EvidenceKey key, JournalObject object) {
     Optional<EvidenceStore.StoredObject> stored = store.get(key);
     if (stored.isEmpty()) {
-      return false;
+      return Optional.empty();
     }
     try {
-      return JournalObject.fromBytes(stored.get().bytes())
-          .payloadSha256()
-          .equals(object.payloadSha256());
+      boolean same =
+          JournalObject.fromBytes(stored.get().bytes())
+              .payloadSha256()
+              .equals(object.payloadSha256());
+      return same ? stored : Optional.empty();
     } catch (IllegalArgumentException e) {
-      return false;
+      return Optional.empty();
     }
   }
 }

@@ -92,7 +92,8 @@ final class SealedVolume {
   private final FileOps ops;
 
   /**
-   * @param root an absolute directory (it is created by the first write if it is missing)
+   * @param root an absolute directory (a store creates it with {@link #ensureRoot} when it opens; a
+   *     write creates it if it is missing)
    * @param volumeId 1 to 32 characters of a-z, 0-9 and '-'
    */
   SealedVolume(Path root, String volumeId, FileOps ops) {
@@ -119,6 +120,48 @@ final class SealedVolume {
   }
 
   // ---------------------------------------------------------------- the volume itself
+
+  /**
+   * Creates the root of the volume with its missing ancestors, and syncs the parent of every
+   * directory that this call (or an earlier call of this JVM that failed at a sync) created: the
+   * root's entry in its parent, and the entry of each created ancestor in its own. A root that
+   * exists is left alone. The ancestors above the first one that existed are not synced: they were
+   * there before, and their entries are the operator's. A sync that fails throws; the directories
+   * stay registered as unsynced, so the next call syncs them again. A no-op beyond the creation
+   * where the platform cannot sync a directory.
+   *
+   * @throws IOException when the root cannot be created or a sync fails
+   */
+  void ensureRoot() throws IOException {
+    DIRECTORY_LOCK.lock();
+    try {
+      boolean syncs = ops.supportsDirectorySync();
+      List<Path> missing = new ArrayList<>();
+      for (Path probe = root;
+          probe != null && !Files.isDirectory(probe);
+          probe = probe.getParent()) {
+        missing.add(probe);
+      }
+      if (!missing.isEmpty()) {
+        if (syncs) {
+          UNSYNCED.addAll(missing); // registered before the creation, as ensureDirectory does
+        }
+        ops.createDirectories(root);
+      }
+      if (syncs) {
+        // from the root up to the top of what was created, also what an earlier failed call left
+        for (Path directory = root; directory != null; directory = directory.getParent()) {
+          Path parent = directory.getParent();
+          if (parent != null && UNSYNCED.contains(directory)) {
+            ops.syncDirectory(parent);
+          }
+          UNSYNCED.remove(directory);
+        }
+      }
+    } finally {
+      DIRECTORY_LOCK.unlock();
+    }
+  }
 
   /**
    * Proves that this volume can make a hard link (A10): creates a file and a second name for it,
@@ -186,9 +229,24 @@ final class SealedVolume {
    * root is empty). A marker, an object, a meta or any other name makes it not empty.
    */
   boolean isEmpty() throws IOException {
+    return holdsNothing(false);
+  }
+
+  /**
+   * True when the root holds no object, no meta and no other name: the marker, temporary names and
+   * empty object directories do not count. A volume that is replaced or half initialised and has
+   * never stored anything is like this.
+   */
+  boolean holdsNothingButItsMarker() throws IOException {
+    return holdsNothing(true);
+  }
+
+  private boolean holdsNothing(boolean markerDoesNotCount) throws IOException {
     for (Path entry : ops.list(root)) {
       String name = nameOf(entry);
-      if (SealedNames.isTemporary(name) || (name.equals(OBJECTS) && !holdsFiles(entry))) {
+      if (SealedNames.isTemporary(name)
+          || (markerDoesNotCount && name.equals(MARKER))
+          || (name.equals(OBJECTS) && !holdsFiles(entry))) {
         continue;
       }
       return false;
@@ -357,6 +415,18 @@ final class SealedVolume {
     } finally {
       lock.unlock();
     }
+  }
+
+  /**
+   * Syncs the directory of the meta of the key, as {@link #writeMeta} does when the stored revision
+   * is the same or higher: a meta that is found present is not taken as durable, because the sync
+   * that followed its replace may have failed or never happened. Call it for a volume whose meta
+   * exists; it writes nothing. A no-op where the platform cannot sync a directory.
+   *
+   * @throws IOException when a sync fails
+   */
+  void resyncMeta(EvidenceKey key) throws IOException {
+    syncDirectories(directoryOf(key));
   }
 
   // ---------------------------------------------------------------- temporaries
@@ -539,9 +609,11 @@ final class SealedVolume {
   /**
    * Syncs the directory that holds a new or found entry, and the parent of every directory on the
    * way up to the root that was created and not yet synced. With {@code wholeChain} every directory
-   * from the holder up to the root is synced (each once), whatever the bookkeeping says; the parent
-   * of the root is synced only when this JVM created the root. A no-op where the platform cannot
-   * sync a directory.
+   * from the holder up to the root is synced (each once), whatever the bookkeeping says. The parent
+   * of the root is synced here only when this volume object created the root itself (a root that
+   * vanished after the open); a store creates its roots with {@link #ensureRoot}, which syncs the
+   * parent of the root and of each ancestor it created. A no-op where the platform cannot sync a
+   * directory.
    */
   private void syncDirectories(Path holder, boolean wholeChain) throws IOException {
     if (!ops.supportsDirectorySync()) {

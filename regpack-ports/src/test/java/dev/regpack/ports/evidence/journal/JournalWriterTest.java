@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,11 +27,16 @@ import org.junit.jupiter.api.Test;
 class JournalWriterTest {
   private static final RetentionPolicy FIVE_YEARS = RetentionPolicy.fixedDays(1826);
 
-  /** A minimal write-once map; {@code failWith} makes every put throw. */
+  /**
+   * A minimal write-once map; {@code failWith} makes every put throw, {@code failAtCall} makes the
+   * put with that number (counted from 1, over all puts) throw.
+   */
   private static final class MapStore implements EvidenceStore {
     final TreeMap<String, StoredObject> objects = new TreeMap<>();
     final List<PutRequest> puts = new ArrayList<>();
+    final Map<Integer, RuntimeException> failAtCall = new HashMap<>();
     RuntimeException failWith;
+    int calls;
 
     @Override
     public Grade grade() {
@@ -44,8 +50,12 @@ class JournalWriterTest {
 
     @Override
     public PutOutcome put(PutRequest request) {
+      calls++;
       if (failWith != null) {
         throw failWith;
+      }
+      if (failAtCall.containsKey(calls)) {
+        throw failAtCall.get(calls);
       }
       puts.add(request);
       StoredObject existing = objects.get(request.key().path());
@@ -181,13 +191,75 @@ class JournalWriterTest {
     store.failWith = alarm;
     assertThatThrownBy(() -> writer.write(object)).isSameAs(alarm);
     assertThat(writer.read(object.key())).contains(object);
-    // the counterpart: a plain integrity alarm over the same stored payload is already present
-    store.failWith = new EvidenceIntegrityException("a copy differs");
+    // the counterpart: a plain integrity alarm over the same stored payload is already present,
+    // once the stored object has been put again and that has succeeded
+    store.failWith = null;
+    store.failAtCall.put(store.calls + 1, new EvidenceIntegrityException("a copy differs"));
     assertThat(writer.write(object)).isEqualTo(JournalWriter.Outcome.ALREADY_PRESENT_SAME_PAYLOAD);
     // other store failures pass through unchanged as well
     EvidenceUnavailableException outage = new EvidenceUnavailableException("down");
     store.failWith = outage;
     assertThatThrownBy(() -> writer.write(object)).isSameAs(outage);
+  }
+
+  @Test
+  void anAbsorbedIntegrityAlarmPutsTheStoredObjectAgainAndAcknowledgesOnlyAfterThat() {
+    MapStore store = new MapStore();
+    JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
+    JournalObject first = JournalFixtures.object(JournalType.DELIVERY_INTENT);
+    assertThat(writer.write(first)).isEqualTo(JournalWriter.Outcome.CREATED);
+    EvidenceStore.StoredObject stored = store.objects.get(first.key().evidenceKey().path());
+    JournalObject later =
+        new JournalObject(first.key(), first.type(), 1, AT.plusSeconds(5), first.payload());
+    store.puts.clear();
+
+    // the store refuses the other bytes (the double does), the payload hash of the stored object is
+    // the same: the writer puts the STORED object again (its bytes, media type and retention)
+    assertThat(writer.write(later)).isEqualTo(JournalWriter.Outcome.ALREADY_PRESENT_SAME_PAYLOAD);
+
+    assertThat(store.puts).hasSize(2);
+    assertThat(store.puts.get(0).bytes()).isEqualTo(later.toBytes());
+    assertThat(store.puts.get(1))
+        .isEqualTo(
+            new EvidenceStore.PutRequest(
+                first.key().evidenceKey(),
+                first.toBytes(),
+                stored.mediaType(),
+                stored.retention()));
+    assertThat(writer.read(first.key())).contains(first);
+  }
+
+  @Test
+  void anExceptionOfThePutThatCompletesTheStoredObjectPropagatesAndNothingIsAcknowledged() {
+    JournalObject first = JournalFixtures.object(JournalType.DELIVERY_INTENT);
+    JournalObject later =
+        new JournalObject(first.key(), first.type(), 1, AT.plusSeconds(5), first.payload());
+    List<RuntimeException> failures =
+        List.of(
+            new EvidenceUnavailableException("volume b failed"),
+            new EvidenceCorruptionException("copies differ"),
+            new EvidenceIntegrityException("other bytes"));
+    for (RuntimeException failure : failures) {
+      MapStore store = new MapStore();
+      JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
+      assertThat(writer.write(first)).isEqualTo(JournalWriter.Outcome.CREATED);
+      // calls: 1 the first write, 2 the refused rewrite, 3 the put of the stored object
+      store.failAtCall.put(3, failure);
+
+      assertThatThrownBy(() -> writer.write(later)).isSameAs(failure);
+    }
+  }
+
+  @Test
+  void aPutThatSucceedsFirstTimeIsNotRepeated() {
+    MapStore store = new MapStore();
+    JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
+    JournalObject object = JournalFixtures.object(JournalType.DELIVERY_INTENT);
+
+    assertThat(writer.write(object)).isEqualTo(JournalWriter.Outcome.CREATED);
+    assertThat(writer.write(object)).isEqualTo(JournalWriter.Outcome.ALREADY_PRESENT_SAME_PAYLOAD);
+
+    assertThat(store.puts).hasSize(2);
   }
 
   @Test

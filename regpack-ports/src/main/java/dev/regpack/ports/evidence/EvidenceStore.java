@@ -150,8 +150,26 @@ public interface EvidenceStore {
 
   Durability durability();
 
+  /**
+   * Stores the object. A store that keeps several copies returns only after every copy exists, an
+   * existing key included (a retry completes a missing copy).
+   *
+   * @throws EvidenceIntegrityException the key holds other bytes
+   * @throws EvidenceCorruptionException (an {@link EvidenceIntegrityException}) a stored copy is
+   *     damaged, or the copies of a store that keeps several differ from each other; nothing is
+   *     written
+   * @throws EvidenceUnavailableException the store cannot reach what it needs, or cannot complete
+   *     every copy
+   */
   PutOutcome put(PutRequest request);
 
+  /**
+   * The stored object, if any.
+   *
+   * @throws EvidenceCorruptionException no copy of the key passes its own check, or the retention
+   *     record cannot be trusted
+   * @throws EvidenceUnavailableException the store cannot be reached
+   */
   Optional<StoredObject> get(EvidenceKey key);
 
   /**
@@ -168,14 +186,19 @@ public interface EvidenceStore {
    * key that was never put throws {@link IllegalArgumentException} with the message {@code "no such
    * evidence key: <path>"} (M28); during an outage {@link EvidenceUnavailableException} comes
    * first. There is no delete, so a listed key cannot vanish; a lost object is found by {@code
-   * verify}, not by this call.
+   * verify}, not by this call. A store that keeps several copies of the retention record returns
+   * only after every copy holds the requested state, also when an earlier call that failed had
+   * written some of them; a damaged retention record or object is an {@link
+   * EvidenceCorruptionException} and nothing is changed.
    */
   void extendRetention(EvidenceKey key, Instant newRetainUntil);
 
   /**
    * Sets or clears the legal hold, which is separate from retention. A key that was never put
    * throws {@link IllegalArgumentException} with the message {@code "no such evidence key: <path>"}
-   * (M33); during an outage {@link EvidenceUnavailableException} comes first.
+   * (M33); during an outage {@link EvidenceUnavailableException} comes first. As for {@link
+   * #extendRetention}: every copy of the record holds the requested state before the call returns,
+   * and a damaged record is an {@link EvidenceCorruptionException}.
    */
   void setLegalHold(EvidenceKey key, boolean hold);
 }

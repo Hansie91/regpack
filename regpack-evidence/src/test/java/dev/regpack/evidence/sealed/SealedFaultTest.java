@@ -19,6 +19,7 @@ import dev.regpack.ports.evidence.EvidenceStore.StoredObject;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.testkit.clock.ManualClock;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -812,13 +813,14 @@ class SealedFaultTest {
   /**
    * The caller's retry that the contract asks for: an unavailable answer is not an acknowledgement.
    */
-  private static Callable<Boolean> retrying(Runnable call) {
+  private static Callable<Boolean> retrying(Runnable call, AtomicInteger unavailableAnswers) {
     return () -> {
       for (int attempt = 1; ; attempt++) {
         try {
           call.run();
           return Boolean.TRUE;
         } catch (EvidenceUnavailableException e) {
+          unavailableAnswers.incrementAndGet();
           if (attempt >= 5) {
             throw e;
           }
@@ -831,6 +833,10 @@ class SealedFaultTest {
   void twoThreadsExtendingRetentionAndSettingAHoldLoseNeither() throws Exception {
     SealedEvidenceStore one = open();
     SealedEvidenceStore other = open(); // a second store over the same directories
+    // With two actors a call is overtaken at most once and then recomputed inside the store, so an
+    // "unavailable" answer (three overtakes in a row) is a rarity; a regression that makes it
+    // common, or permanent for one caller, shows in this count (T8 F1).
+    AtomicInteger unavailableAnswers = new AtomicInteger();
     // one store: the two calls of a key take turns under the key's lock
     for (int round = 0; round < 20; round++) {
       EvidenceKey key = new EvidenceKey("race/one-store-" + round);
@@ -838,8 +844,8 @@ class SealedFaultTest {
       Instant later = retention().retainUntil().plus(Duration.ofDays(30 + round));
       runTogether(
           List.of(
-              retrying(() -> one.extendRetention(key, later)),
-              retrying(() -> one.setLegalHold(key, true))));
+              retrying(() -> one.extendRetention(key, later), unavailableAnswers),
+              retrying(() -> one.setLegalHold(key, true), unavailableAnswers)));
       assertRetentionAndHoldBothKept(one, key, later);
     }
     // two stores: the revision of the meta file decides, and a call that lost is recomputed
@@ -849,11 +855,14 @@ class SealedFaultTest {
       Instant later = retention().retainUntil().plus(Duration.ofDays(30 + round));
       runTogether(
           List.of(
-              retrying(() -> one.extendRetention(key, later)),
-              retrying(() -> other.setLegalHold(key, true))));
+              retrying(() -> one.extendRetention(key, later), unavailableAnswers),
+              retrying(() -> other.setLegalHold(key, true), unavailableAnswers)));
       assertRetentionAndHoldBothKept(one, key, later);
       assertRetentionAndHoldBothKept(other, key, later);
     }
+    assertThat(unavailableAnswers.get())
+        .as("unavailable answers in 40 rounds")
+        .isLessThanOrEqualTo(5);
     assertThat(one.scrub()).isEmpty();
   }
 
@@ -964,16 +973,430 @@ class SealedFaultTest {
     SealedTamper.replaceObject(volumeB, KEY, otherFile);
 
     assertThat(store.scrub()).containsExactly("landing/k1 DIVERGENT");
-    // it is an alarm on the next write, whichever bytes are offered, and a read serves volume a
+    Map<String, String> before = bothVolumes();
+    // a divergent pair is an alarm of its own kind (EvidenceCorruptionException) on the next
+    // write, whichever bytes are offered, and a read serves volume a
     assertThatThrownBy(() -> store.put(request(KEY, "the first bytes")))
-        .isInstanceOf(EvidenceIntegrityException.class)
-        .isNotInstanceOf(EvidenceCorruptionException.class);
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(KEY.path());
     assertThatThrownBy(() -> store.put(new PutRequest(KEY, other, "text/plain", retention())))
-        .isInstanceOf(EvidenceIntegrityException.class)
-        .isNotInstanceOf(EvidenceCorruptionException.class);
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(KEY.path());
+    assertThat(bothVolumes()).as("nothing is written").isEqualTo(before);
     assertThat(store.get(KEY).orElseThrow().bytes()).isEqualTo(utf8("the first bytes"));
     // repair does not pick a side
     assertThat(store.repair()).isZero();
     assertThat(store.scrub()).containsExactly("landing/k1 DIVERGENT");
+  }
+
+  @Test
+  void aDivergentPairWithVolumeATamperedIsACorruptionAlarmToo() throws IOException {
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "the first bytes"));
+    byte[] other = utf8("other bytes under the same key");
+    SealedTamper.replaceObject(
+        volumeA, KEY, SealedTamper.fileWithOtherPayload(volumeA, KEY, other));
+    Map<String, String> before = bothVolumes();
+
+    assertThat(store.scrub()).containsExactly("landing/k1 DIVERGENT");
+    assertThatThrownBy(() -> store.put(request(KEY, "the first bytes")))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(KEY.path());
+    assertThatThrownBy(() -> store.put(new PutRequest(KEY, other, "text/plain", retention())))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(KEY.path());
+    assertThat(bothVolumes()).as("nothing is written").isEqualTo(before);
+  }
+
+  // ---------------------------------------------------------------- restart states of repair
+
+  @Test
+  void aRepairThatFailsMidwayLeavesTheStoreDegraded() throws IOException {
+    SealedEvidenceStore store = open();
+    List<EvidenceKey> keys = new ArrayList<>();
+    for (int i = 0; i < 5; i++) {
+      EvidenceKey key = new EvidenceKey("landing/k" + i);
+      keys.add(key);
+      store.put(request(key, "object " + i));
+    }
+    deleteTree(volumeB);
+    FailingFileOps failing = new FailingFileOps(FileOps.real());
+    SealedEvidenceStore replaced = open(failing);
+    assertThat(replaced.degraded()).isTrue();
+    // the third object cannot be linked on the replaced volume: two are copied before it
+    Path third = SealedTamper.objectPath(volumeB, keys.get(2));
+    failing.failNext(Op.LINK, third::equals);
+
+    assertThatThrownBy(replaced::repair).isInstanceOf(EvidenceUnavailableException.class);
+
+    // markers come last: a repair that did not finish leaves the volume unmarked and degraded
+    assertThat(replaced.degraded()).isTrue();
+    assertThat(replaced.durability()).isEqualTo(new Durability(false, 1));
+    assertThat(volumeB.resolve(MARKER)).doesNotExist();
+    assertThat(SealedTamper.objectPath(volumeB, keys.get(1))).exists();
+    assertThat(third).doesNotExist();
+    assertThatThrownBy(() -> replaced.put(request(new EvidenceKey("landing/new"), "new")))
+        .isInstanceOf(EvidenceUnavailableException.class);
+
+    // once the fault is gone the retry copies what is missing and only then marks the volume
+    assertThat(replaced.repair()).isEqualTo(3);
+    assertThat(replaced.degraded()).isFalse();
+    assertThat(replaced.durability().synchronousAcknowledgement()).isTrue();
+    assertThat(Files.readString(volumeB.resolve(MARKER))).isEqualTo("b");
+    assertThat(withoutMarker(digests(volumeB))).isEqualTo(withoutMarker(digests(volumeA)));
+    assertThat(replaced.scrub()).isEmpty();
+  }
+
+  private void repairOfAnEmptyUnmarkedVolumeWritesItsMarker(Path lost, String lostId)
+      throws IOException {
+    SealedEvidenceStore store = open(); // an empty store: a new pair, both marked
+    deleteTree(lost);
+    Files.createDirectories(lost); // a new disk, empty and unmarked
+    assertThat(store.degraded()).isTrue();
+    assertThatThrownBy(() -> store.put(request(KEY, "hello")))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessageContaining("volume " + lostId);
+
+    // nothing is missing, but the marker is: a repair that writes a marker only after it copied
+    // something would leave this store degraded for ever
+    assertThat(store.repair()).isZero();
+
+    assertThat(store.degraded()).isFalse();
+    assertThat(Files.readString(lost.resolve(MARKER))).isEqualTo(lostId);
+    assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
+    assertThat(store.scrub()).isEmpty();
+  }
+
+  @Test
+  void repairOfAnEmptyUnmarkedVolumeBWritesItsMarker() throws IOException {
+    repairOfAnEmptyUnmarkedVolumeWritesItsMarker(volumeB, "b");
+  }
+
+  @Test
+  void repairOfAnEmptyUnmarkedVolumeAWritesItsMarker() throws IOException {
+    repairOfAnEmptyUnmarkedVolumeWritesItsMarker(volumeA, "a");
+  }
+
+  // ---------------------------------------------------------------- the first open
+
+  private void aFirstOpenThatStoppedBetweenTheMarkersIsFinished(Path unmarked, String id)
+      throws IOException {
+    open(); // a new pair: both markers
+    Files.delete(unmarked.resolve(MARKER)); // the open stopped before this marker was written
+
+    SealedEvidenceStore reopened = open();
+
+    assertThat(reopened.degraded()).isFalse();
+    assertThat(reopened.durability().synchronousAcknowledgement()).isTrue();
+    assertThat(Files.readString(volumeA.resolve(MARKER))).isEqualTo("a");
+    assertThat(Files.readString(volumeB.resolve(MARKER))).isEqualTo("b");
+    assertThat(Files.readString(unmarked.resolve(MARKER))).isEqualTo(id);
+    assertThat(reopened.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
+  }
+
+  @Test
+  void aFirstOpenThatStoppedBeforeMarkerBIsFinishedByTheNextOpen() throws IOException {
+    aFirstOpenThatStoppedBetweenTheMarkersIsFinished(volumeB, "b");
+  }
+
+  @Test
+  void aFirstOpenWithMarkerAMissingIsFinishedByTheNextOpen() throws IOException {
+    aFirstOpenThatStoppedBetweenTheMarkersIsFinished(volumeA, "a");
+  }
+
+  @Test
+  void aFirstOpenThatFailsBetweenTheMarkersIsFinishedByTheNextOpen() throws IOException {
+    FailingFileOps failing = new FailingFileOps(FileOps.real());
+    // the real interruption: the link of marker b fails after marker a was written
+    failing.failNext(Op.LINK, path -> path.equals(volumeB.resolve(MARKER)));
+
+    assertThatThrownBy(() -> open(failing)).isInstanceOf(EvidenceUnavailableException.class);
+    assertThat(volumeA.resolve(MARKER)).exists();
+    assertThat(volumeB.resolve(MARKER)).doesNotExist();
+
+    SealedEvidenceStore reopened = open();
+
+    assertThat(reopened.degraded()).isFalse();
+    assertThat(Files.readString(volumeB.resolve(MARKER))).isEqualTo("b");
+  }
+
+  @Test
+  void aMissingMarkerBesideAnObjectStaysAReplacedDisk() throws IOException {
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "hello"));
+    SealedTamper.deleteObject(volumeB, KEY); // volume b holds nothing, volume a holds the object
+    Files.delete(volumeB.resolve(MARKER));
+
+    SealedEvidenceStore degraded = open();
+
+    assertThat(degraded.degraded()).isTrue();
+    assertThat(degraded.durability()).isEqualTo(new Durability(false, 1));
+    assertThat(volumeB.resolve(MARKER)).doesNotExist();
+    assertThatThrownBy(() -> degraded.put(request(new EvidenceKey("landing/k2"), "second")))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessageContaining("volume b");
+    assertThat(degraded.repair()).isEqualTo(1);
+    assertThat(degraded.degraded()).isFalse();
+    assertThat(Files.readString(volumeB.resolve(MARKER))).isEqualTo("b");
+  }
+
+  @Test
+  void aMissingMarkerOnTheVolumeThatHoldsTheObjectStaysAReplacedDisk() throws IOException {
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "hello"));
+    SealedTamper.deleteObject(volumeA, KEY);
+    Files.delete(volumeA.resolve(MARKER)); // the unmarked volume is the empty one: a replaced disk
+
+    SealedEvidenceStore degraded = open();
+
+    assertThat(degraded.degraded()).isTrue();
+    assertThat(volumeA.resolve(MARKER)).doesNotExist();
+    assertThat(degraded.repair()).isEqualTo(1);
+    assertThat(degraded.degraded()).isFalse();
+  }
+
+  private void aMissingMarkerBesideAMetaStaysAReplacedDisk(Path withMeta, String id, Path unmarked)
+      throws IOException {
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "hello"));
+    // no object is left anywhere: only a retention record on one volume
+    SealedTamper.deleteObject(volumeA, KEY);
+    SealedTamper.deleteObject(volumeB, KEY);
+    assertThat(
+            volume(withMeta, id)
+                .writeMeta(
+                    KEY, new SealedFormat.Meta(1, "landing", retention().retainUntil(), true)))
+        .isTrue();
+    Files.delete(unmarked.resolve(MARKER));
+
+    SealedEvidenceStore degraded = open();
+
+    assertThat(degraded.degraded()).isTrue();
+    assertThat(unmarked.resolve(MARKER)).doesNotExist();
+  }
+
+  @Test
+  void aMissingMarkerBesideAMetaOnTheMarkedVolumeStaysAReplacedDisk() throws IOException {
+    aMissingMarkerBesideAMetaStaysAReplacedDisk(volumeA, "a", volumeB);
+  }
+
+  @Test
+  void aMissingMarkerBesideAMetaOnTheUnmarkedVolumeStaysAReplacedDisk() throws IOException {
+    aMissingMarkerBesideAMetaStaysAReplacedDisk(volumeB, "b", volumeB);
+  }
+
+  /** Runs {@code hook} once, before the first listing of the root of {@code volume}. */
+  private static final class BeforeFirstListing implements FileOps {
+    private final FileOps delegate;
+    private final Path volume;
+    private final AtomicInteger fired = new AtomicInteger();
+    private final Runnable hook;
+
+    BeforeFirstListing(FileOps delegate, Path volume, Runnable hook) {
+      this.delegate = delegate;
+      this.volume = volume;
+      this.hook = hook;
+    }
+
+    int fired() {
+      return fired.get();
+    }
+
+    @Override
+    public List<Path> list(Path dir) throws IOException {
+      if (dir.equals(volume) && fired.getAndIncrement() == 0) {
+        hook.run();
+      }
+      return delegate.list(dir);
+    }
+
+    @Override
+    public void createDirectories(Path dir) throws IOException {
+      delegate.createDirectories(dir);
+    }
+
+    @Override
+    public void writeAndForce(Path file, byte[] bytes) throws IOException {
+      delegate.writeAndForce(file, bytes);
+    }
+
+    @Override
+    public void link(Path existing, Path newName) throws IOException {
+      delegate.link(existing, newName);
+    }
+
+    @Override
+    public void replace(Path source, Path target) throws IOException {
+      delegate.replace(source, target);
+    }
+
+    @Override
+    public void syncDirectory(Path dir) throws IOException {
+      delegate.syncDirectory(dir);
+    }
+
+    @Override
+    public boolean supportsDirectorySync() {
+      return delegate.supportsDirectorySync();
+    }
+
+    @Override
+    public byte[] read(Path file) throws IOException {
+      return delegate.read(file);
+    }
+
+    @Override
+    public void delete(Path file) throws IOException {
+      delegate.delete(file);
+    }
+  }
+
+  @Test
+  void twoOpenersOfAFreshPairDoNotRefuseOrDegradeEachOther() throws IOException {
+    // The other opener writes marker a after this one has read both markers as missing and before
+    // it looks at volume a: it must see a new store being marked, not volumes with content.
+    BeforeFirstListing race =
+        new BeforeFirstListing(
+            FileOps.real(),
+            volumeA,
+            () -> {
+              try {
+                volume(volumeA, "a").writeMarker();
+              } catch (IOException e) {
+                throw new UncheckedIOException(e);
+              }
+            });
+
+    SealedEvidenceStore store = open(race);
+
+    assertThat(race.fired()).isGreaterThanOrEqualTo(1);
+    assertThat(store.degraded()).isFalse();
+    assertThat(Files.readString(volumeA.resolve(MARKER))).isEqualTo("a");
+    assertThat(Files.readString(volumeB.resolve(MARKER))).isEqualTo("b");
+    assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
+  }
+
+  // ---------------------------------------------------------------- losing the name on volume a
+
+  /**
+   * Passes every call on, but runs {@code hook} once just before the first link that gives {@code
+   * name} on {@code volume}: another writer wins the name.
+   */
+  private static final class BeforeObjectLink implements FileOps {
+    private final FileOps delegate;
+    private final Path volume;
+    private final String name;
+    private final AtomicInteger fired = new AtomicInteger();
+    private final Runnable hook;
+
+    BeforeObjectLink(FileOps delegate, Path volume, String name, Runnable hook) {
+      this.delegate = delegate;
+      this.volume = volume;
+      this.name = name;
+      this.hook = hook;
+    }
+
+    int fired() {
+      return fired.get();
+    }
+
+    @Override
+    public void link(Path existing, Path newName) throws IOException {
+      if (newName.startsWith(volume)
+          && newName.getFileName().toString().equals(name)
+          && fired.getAndIncrement() == 0) {
+        hook.run();
+      }
+      delegate.link(existing, newName);
+    }
+
+    @Override
+    public void createDirectories(Path dir) throws IOException {
+      delegate.createDirectories(dir);
+    }
+
+    @Override
+    public void writeAndForce(Path file, byte[] bytes) throws IOException {
+      delegate.writeAndForce(file, bytes);
+    }
+
+    @Override
+    public void replace(Path source, Path target) throws IOException {
+      delegate.replace(source, target);
+    }
+
+    @Override
+    public void syncDirectory(Path dir) throws IOException {
+      delegate.syncDirectory(dir);
+    }
+
+    @Override
+    public boolean supportsDirectorySync() {
+      return delegate.supportsDirectorySync();
+    }
+
+    @Override
+    public byte[] read(Path file) throws IOException {
+      return delegate.read(file);
+    }
+
+    @Override
+    public void delete(Path file) throws IOException {
+      delegate.delete(file);
+    }
+
+    @Override
+    public List<Path> list(Path dir) throws IOException {
+      return delegate.list(dir);
+    }
+  }
+
+  @Test
+  void aWriterThatLosesTheNameOnTheFirstVolumeNeverCopiesItsOwnBytesToTheSecond()
+      throws IOException {
+    byte[] winnerPayload = utf8("the winner's bytes");
+    byte[] winnerFile =
+        SealedFormat.encodeObject(
+            new SealedFormat.Header(
+                KEY.path(),
+                "text/plain",
+                Sha256.of(winnerPayload),
+                winnerPayload.length,
+                clock.now(),
+                "landing",
+                retention().retainUntil()),
+            winnerPayload);
+    SealedVolume onA = volume(volumeA, "a");
+    // the winner takes the name on volume a after the loser has read both volumes as empty and
+    // before the loser links its own file there
+    BeforeObjectLink race =
+        new BeforeObjectLink(
+            FileOps.real(),
+            volumeA,
+            SealedNames.object("k1"),
+            () -> {
+              try {
+                assertThat(onA.publish(KEY, winnerFile)).isTrue();
+              } catch (IOException e) {
+                throw new UncheckedIOException(e);
+              }
+            });
+    SealedEvidenceStore loser = open(race);
+
+    assertThatThrownBy(() -> loser.put(request(KEY, "the loser's bytes")))
+        .isInstanceOf(EvidenceIntegrityException.class)
+        .isNotInstanceOf(EvidenceCorruptionException.class);
+
+    assertThat(race.fired()).isEqualTo(1);
+    assertThat(SealedTamper.objectPath(volumeB, KEY))
+        .as("no copy of the loser's bytes")
+        .doesNotExist();
+    assertThat(Files.readAllBytes(SealedTamper.objectPath(volumeA, KEY))).isEqualTo(winnerFile);
+    assertThat(temporaryFiles(volumeA)).isEmpty();
+    assertThat(temporaryFiles(volumeB)).isEmpty();
+    // the winner's own bytes still complete the second volume
+    assertThat(open().put(new PutRequest(KEY, winnerPayload, "text/plain", retention())))
+        .isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+    assertThat(Files.readAllBytes(SealedTamper.objectPath(volumeB, KEY))).isEqualTo(winnerFile);
   }
 }

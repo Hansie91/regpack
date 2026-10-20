@@ -9,7 +9,6 @@ import dev.regpack.ports.evidence.EvidenceRetentionException;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -31,14 +30,19 @@ import java.util.regex.Pattern;
  * says how many failure domains the two volumes span only as far as {@link VolumeProbe} can show.
  *
  * <p><b>Put.</b> Under a 64-way striped lock of the key, both volumes are read first. A damaged
- * copy on either volume is an {@link EvidenceCorruptionException}, a copy with other bytes an
- * {@link EvidenceIntegrityException}, and nothing is written in either case. If exactly one volume
- * holds the key, its verified file is published to the other, so the volumes stay byte-identical
- * and the first header (media type, write time, retention class) is kept. If neither holds it, the
- * object file is built and published to volume a, then to volume b; the call returns after both.
- * The result is {@code CREATED} only when neither volume held the key. A failure on the second
- * volume is an {@link EvidenceUnavailableException}; the object stays on the first volume, is
- * served from it, and a retry completes the second.
+ * copy on either volume, and two whole copies whose payloads differ (what {@link #scrub()} calls
+ * DIVERGENT), are an {@link EvidenceCorruptionException}; a copy with other bytes than the request
+ * is an {@link EvidenceIntegrityException}; nothing is written in any of these cases. If exactly
+ * one volume holds the key, its verified file is published to the other, so the volumes stay
+ * byte-identical and the first header (media type, write time, retention class) is kept. If neither
+ * holds it, the object file is built and published to volume a, then to volume b; the call returns
+ * after both. The result is {@code CREATED} only when neither volume held the key. A failure on the
+ * second volume is an {@link EvidenceUnavailableException}; the object stays on the first volume,
+ * is served from it, and a retry with the same bytes completes the second. A retry with other bytes
+ * (a journal rewrite with another {@code clock_instant}) is refused as other bytes before it
+ * touches the second volume; {@code JournalWriter} then puts the stored object itself again, which
+ * completes the second volume or throws, so that it never acknowledges a write that only one volume
+ * holds.
  *
  * <p><b>Reads.</b> {@code get} serves the first copy that passes its own seal (volume a, then b).
  * Retention and legal hold are kept in the object header and in meta files with a revision; the
@@ -139,8 +143,11 @@ public final class SealedEvidenceStore implements EvidenceStore {
   private record Effective(
       Instant retainUntil, boolean legalHold, long topRevision, boolean same) {}
 
-  /** The header of the first valid copy and the retention state read with it. */
-  private record Snapshot(SealedFormat.Header header, Effective effective) {}
+  /**
+   * The header of the first valid copy, the retention state read with it, and the volumes whose
+   * meta is present (volume a first).
+   */
+  private record Snapshot(SealedFormat.Header header, Effective effective, List<Vol> metaHolders) {}
 
   private enum Health {
     OK(""),
@@ -198,11 +205,13 @@ public final class SealedEvidenceStore implements EvidenceStore {
   }
 
   /**
-   * Both roots are created first and their real paths must differ with neither containing the
-   * other. Two missing markers on two empty roots are a new store (both markers are written); one
-   * missing marker is a replaced volume (the store is degraded and nothing is written); a marker
-   * with another id, or two missing markers on volumes that hold objects, refuse the open. Stale
-   * temporary files of dead processes are swept.
+   * Both roots are created first (with their parents synced, see {@link SealedVolume#ensureRoot})
+   * and their real paths must differ with neither containing the other. Two missing markers on two
+   * empty roots are a new store (both markers are written); one missing marker is a replaced volume
+   * (the store is degraded and nothing is written), unless neither volume holds an object or a
+   * meta: that is a first open that was interrupted between its two markers, and the open writes
+   * the missing one. A marker with another id, or two missing markers on volumes that hold objects,
+   * refuse the open. Stale temporary files of dead processes are swept.
    */
   static SealedEvidenceStore open(Config config, FileOps ops) {
     Objects.requireNonNull(config, "config");
@@ -210,8 +219,8 @@ public final class SealedEvidenceStore implements EvidenceStore {
     Path realA;
     Path realB;
     try {
-      createRoot(ops, config.volumeA());
-      createRoot(ops, config.volumeB());
+      new SealedVolume(config.volumeA(), config.volumeIdA(), ops).ensureRoot();
+      new SealedVolume(config.volumeB(), config.volumeIdB(), ops).ensureRoot();
       realA = config.volumeA().toRealPath();
       realB = config.volumeB().toRealPath();
     } catch (IOException e) {
@@ -230,13 +239,6 @@ public final class SealedEvidenceStore implements EvidenceStore {
     return store;
   }
 
-  /** Creates a root that is missing; an existing directory (a link to one included) is left. */
-  private static void createRoot(FileOps ops, Path root) throws IOException {
-    if (!Files.isDirectory(root)) {
-      ops.createDirectories(root);
-    }
-  }
-
   private void initialise() {
     for (Vol vol : volumes) {
       run(vol, () -> vol.volume().checkHardLinks());
@@ -249,14 +251,44 @@ public final class SealedEvidenceStore implements EvidenceStore {
       boolean fresh =
           on(first, () -> first.volume().isEmpty()) && on(second, () -> second.volume().isEmpty());
       if (!fresh) {
-        throw new EvidenceUnavailableException(
-            "both volumes are unmarked but hold objects: not a store this code created");
+        // Another opener may have written marker a between our reads of the markers and of the
+        // volume: look at the markers once more before the volumes are called foreign.
+        markerOfFirst = on(first, () -> first.volume().markerId());
+        markerOfSecond = on(second, () -> second.volume().markerId());
+        requireOwnMarker(first, markerOfFirst);
+        requireOwnMarker(second, markerOfSecond);
+        if (markerOfFirst.isEmpty() && markerOfSecond.isEmpty()) {
+          throw new EvidenceUnavailableException(
+              "both volumes are unmarked but hold objects: not a store this code created");
+        }
+      } else {
+        run(first, () -> first.volume().writeMarker());
+        run(second, () -> second.volume().writeMarker());
+        markerOfFirst = Optional.of(first.id());
+        markerOfSecond = Optional.of(second.id());
       }
-      run(first, () -> first.volume().writeMarker());
-      run(second, () -> second.volume().writeMarker());
+    }
+    if (markerOfFirst.isEmpty() != markerOfSecond.isEmpty()) {
+      finishInterruptedInitialisation(markerOfFirst.isEmpty() ? first : second);
     }
     for (Vol vol : volumes) {
       run(vol, () -> vol.volume().sweepTemporaries());
+    }
+  }
+
+  /**
+   * One marker is missing. If neither volume holds an object or a meta, nothing was ever stored
+   * that a replaced disk could have lost: the first open stopped between its two markers (a crash,
+   * an I/O error, another opener that is still at it), and the missing marker is written (volume a
+   * first, as the first open does). Otherwise the volume is a replaced disk and is left to {@link
+   * #repair()}.
+   */
+  private void finishInterruptedInitialisation(Vol unmarked) {
+    boolean nothingStored =
+        on(first, () -> first.volume().holdsNothingButItsMarker())
+            && on(second, () -> second.volume().holdsNothingButItsMarker());
+    if (nothingStored) {
+      run(unmarked, () -> unmarked.volume().writeMarker());
     }
   }
 
@@ -359,6 +391,7 @@ public final class SealedEvidenceStore implements EvidenceStore {
       Copy onSecond = readCopy(second, key);
       refuseDamaged(first, onFirst, key);
       refuseDamaged(second, onSecond, key);
+      refuseDivergent(onFirst, onSecond, key);
       refuseOtherBytes(onFirst, digest, key);
       refuseOtherBytes(onSecond, digest, key);
       boolean neitherHeldIt = onFirst.kind() == Kind.ABSENT && onSecond.kind() == Kind.ABSENT;
@@ -418,6 +451,24 @@ public final class SealedEvidenceStore implements EvidenceStore {
     if (copy.kind() == Kind.CORRUPT) {
       throw new EvidenceCorruptionException(
           "damaged copy of " + key.path() + " on volume " + vol.id());
+    }
+  }
+
+  /**
+   * Two whole copies of one key whose payloads differ are an alarm of their own kind (found by
+   * {@link #scrub()} as DIVERGENT): neither volume can be taken for the truth, so nothing is
+   * written and nothing is acknowledged, whatever bytes the caller offers.
+   */
+  private static void refuseDivergent(Copy onFirst, Copy onSecond, EvidenceKey key) {
+    if (onFirst.kind() == Kind.PRESENT
+        && onSecond.kind() == Kind.PRESENT
+        && !onFirst
+            .decoded()
+            .orElseThrow()
+            .header()
+            .sha256()
+            .equals(onSecond.decoded().orElseThrow().header().sha256())) {
+      throw new EvidenceCorruptionException("the two copies of " + key.path() + " differ");
     }
   }
 
@@ -550,6 +601,7 @@ public final class SealedEvidenceStore implements EvidenceStore {
                   + newRetainUntil);
         }
         if (newRetainUntil.equals(current.retainUntil()) && current.same()) {
+          resyncMetas(key, snapshot);
           return;
         }
         SealedFormat.Meta next =
@@ -579,6 +631,7 @@ public final class SealedEvidenceStore implements EvidenceStore {
         Snapshot snapshot = snapshot(key);
         Effective current = snapshot.effective();
         if (hold == current.legalHold() && current.same()) {
+          resyncMetas(key, snapshot);
           return;
         }
         SealedFormat.Meta next =
@@ -594,6 +647,18 @@ public final class SealedEvidenceStore implements EvidenceStore {
       }
     } finally {
       lock.unlock();
+    }
+  }
+
+  /**
+   * The requested state already holds, so nothing is written; but a meta that is found is not
+   * acknowledged on presence alone (the call that wrote it may have failed at its directory sync,
+   * or died after the replace). The directory of every meta that exists is synced, volume a first;
+   * where no meta exists nothing was written and nothing needs a sync.
+   */
+  private void resyncMetas(EvidenceKey key, Snapshot snapshot) {
+    for (Vol vol : snapshot.metaHolders()) {
+      run(vol, () -> vol.volume().resyncMeta(key));
     }
   }
 
@@ -639,14 +704,19 @@ public final class SealedEvidenceStore implements EvidenceStore {
     }
     MetaRead metaOfFirst = readMeta(first, key);
     MetaRead metaOfSecond = readMeta(second, key);
+    List<Vol> metaHolders = new ArrayList<>();
     for (Vol vol : volumes) {
-      if ((vol == first ? metaOfFirst : metaOfSecond).kind() == Kind.CORRUPT) {
+      MetaRead read = vol == first ? metaOfFirst : metaOfSecond;
+      if (read.kind() == Kind.CORRUPT) {
         throw new EvidenceCorruptionException(
             "damaged retention record of " + key.path() + " on volume " + vol.id());
       }
+      if (read.kind() == Kind.PRESENT) {
+        metaHolders.add(vol);
+      }
     }
     SealedFormat.Header header = valid.decoded().orElseThrow().header();
-    return new Snapshot(header, effective(header, metaOfFirst, metaOfSecond));
+    return new Snapshot(header, effective(header, metaOfFirst, metaOfSecond), metaHolders);
   }
 
   /** Maximum retention over the header and the metas, the hold of the higher revision. */
@@ -685,10 +755,12 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * {@link #scrub()} reports it; an existing copy is never overwritten), a meta of a higher
    * revision is copied over a lower one (unless the lower one holds a later retain-until: then a
    * new revision with the later retain-until goes to both volumes, so that a repair never shortens
-   * retention), and a volume without its marker is then marked. Idempotent.
+   * retention), and a volume without its marker is then marked (markers come last, so a repair that
+   * fails midway leaves the store degraded). Idempotent.
    *
    * @return the number of objects copied
-   * @throws EvidenceUnavailableException when a volume cannot be read or written
+   * @throws EvidenceUnavailableException when a volume cannot be read or written, or when another
+   *     writer keeps changing the meta of a key (three tries, as for {@link #extendRetention})
    */
   public int repair() {
     int copied = 0;
@@ -723,38 +795,52 @@ public final class SealedEvidenceStore implements EvidenceStore {
     return 0;
   }
 
+  /**
+   * Brings the two metas of a key together. A write that finds a revision as high as its own on a
+   * volume (another writer got in first) is not ignored: the metas are read again and the step is
+   * recomputed, three times, as {@link #extendRetention} does.
+   */
   private void repairMeta(EvidenceKey key) {
-    MetaRead onFirst = readMeta(first, key);
-    MetaRead onSecond = readMeta(second, key);
-    if (onFirst.kind() == Kind.CORRUPT || onSecond.kind() == Kind.CORRUPT) {
-      return; // never replaced; scrub reports it
+    for (int attempt = 1; ; attempt++) {
+      MetaRead onFirst = readMeta(first, key);
+      MetaRead onSecond = readMeta(second, key);
+      if (onFirst.kind() == Kind.CORRUPT || onSecond.kind() == Kind.CORRUPT) {
+        return; // never replaced; scrub reports it
+      }
+      long revisionOfFirst =
+          onFirst.kind() == Kind.PRESENT ? onFirst.meta().orElseThrow().rev() : -1;
+      long revisionOfSecond =
+          onSecond.kind() == Kind.PRESENT ? onSecond.meta().orElseThrow().rev() : -1;
+      if (revisionOfFirst == revisionOfSecond) {
+        return; // nothing to copy; two metas of one revision are merged by every reader
+      }
+      boolean firstIsHigher = revisionOfFirst > revisionOfSecond;
+      SealedFormat.Meta higher = (firstIsHigher ? onFirst : onSecond).meta().orElseThrow();
+      Vol lowerVolume = firstIsHigher ? second : first;
+      MetaRead lower = firstIsHigher ? onSecond : onFirst;
+      if (lower.kind() == Kind.PRESENT
+          && lower.meta().orElseThrow().retainUntil().isAfter(higher.retainUntil())) {
+        // Copying the higher revision over this one would shorten the retention that a reader sees
+        // (the maximum over all metas). A new revision above both carries the longer retention, and
+        // the legal hold of the higher revision, to both volumes. If another writer got in first,
+        // writeToBoth says so and the metas are read again.
+        SealedFormat.Meta merged =
+            new SealedFormat.Meta(
+                higher.rev() + 1,
+                higher.retentionClass(),
+                lower.meta().orElseThrow().retainUntil(),
+                higher.legalHold());
+        if (writeToBoth(key, merged)) {
+          return;
+        }
+        requireAnotherTry(key, attempt);
+        continue;
+      }
+      if (writeMeta(lowerVolume, key, higher)) {
+        return;
+      }
+      requireAnotherTry(key, attempt); // the lower volume holds a revision as high by now
     }
-    long revisionOfFirst = onFirst.kind() == Kind.PRESENT ? onFirst.meta().orElseThrow().rev() : -1;
-    long revisionOfSecond =
-        onSecond.kind() == Kind.PRESENT ? onSecond.meta().orElseThrow().rev() : -1;
-    if (revisionOfFirst == revisionOfSecond) {
-      return; // nothing to copy; two metas of one revision are merged by every reader
-    }
-    boolean firstIsHigher = revisionOfFirst > revisionOfSecond;
-    SealedFormat.Meta higher = (firstIsHigher ? onFirst : onSecond).meta().orElseThrow();
-    Vol lowerVolume = firstIsHigher ? second : first;
-    MetaRead lower = firstIsHigher ? onSecond : onFirst;
-    if (lower.kind() == Kind.PRESENT
-        && lower.meta().orElseThrow().retainUntil().isAfter(higher.retainUntil())) {
-      // Copying the higher revision over this one would shorten the retention that a reader sees
-      // (the maximum over all metas). A new revision above both carries the longer retention, and
-      // the legal hold of the higher revision, to both volumes. If another writer got in first,
-      // its meta was computed as the maximum over both metas as well, so nothing is lost.
-      SealedFormat.Meta merged =
-          new SealedFormat.Meta(
-              higher.rev() + 1,
-              higher.retentionClass(),
-              lower.meta().orElseThrow().retainUntil(),
-              higher.legalHold());
-      writeToBoth(key, merged);
-      return;
-    }
-    writeMeta(lowerVolume, key, higher);
   }
 
   /**
