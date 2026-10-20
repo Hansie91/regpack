@@ -683,8 +683,9 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * Brings a replaced or lagging volume back: every object that one volume holds and the other does
    * not is copied (its file is decoded and hash-checked first; a damaged source is skipped, and
    * {@link #scrub()} reports it; an existing copy is never overwritten), a meta of a higher
-   * revision is copied over a lower one, and a volume without its marker is then marked.
-   * Idempotent.
+   * revision is copied over a lower one (unless the lower one holds a later retain-until: then a
+   * new revision with the later retain-until goes to both volumes, so that a repair never shortens
+   * retention), and a volume without its marker is then marked. Idempotent.
    *
    * @return the number of objects copied
    * @throws EvidenceUnavailableException when a volume cannot be read or written
@@ -731,11 +732,29 @@ public final class SealedEvidenceStore implements EvidenceStore {
     long revisionOfFirst = onFirst.kind() == Kind.PRESENT ? onFirst.meta().orElseThrow().rev() : -1;
     long revisionOfSecond =
         onSecond.kind() == Kind.PRESENT ? onSecond.meta().orElseThrow().rev() : -1;
-    if (revisionOfFirst > revisionOfSecond) {
-      writeMeta(second, key, onFirst.meta().orElseThrow());
-    } else if (revisionOfSecond > revisionOfFirst) {
-      writeMeta(first, key, onSecond.meta().orElseThrow());
+    if (revisionOfFirst == revisionOfSecond) {
+      return; // nothing to copy; two metas of one revision are merged by every reader
     }
+    boolean firstIsHigher = revisionOfFirst > revisionOfSecond;
+    SealedFormat.Meta higher = (firstIsHigher ? onFirst : onSecond).meta().orElseThrow();
+    Vol lowerVolume = firstIsHigher ? second : first;
+    MetaRead lower = firstIsHigher ? onSecond : onFirst;
+    if (lower.kind() == Kind.PRESENT
+        && lower.meta().orElseThrow().retainUntil().isAfter(higher.retainUntil())) {
+      // Copying the higher revision over this one would shorten the retention that a reader sees
+      // (the maximum over all metas). A new revision above both carries the longer retention, and
+      // the legal hold of the higher revision, to both volumes. If another writer got in first,
+      // its meta was computed as the maximum over both metas as well, so nothing is lost.
+      SealedFormat.Meta merged =
+          new SealedFormat.Meta(
+              higher.rev() + 1,
+              higher.retentionClass(),
+              lower.meta().orElseThrow().retainUntil(),
+              higher.legalHold());
+      writeToBoth(key, merged);
+      return;
+    }
+    writeMeta(lowerVolume, key, higher);
   }
 
   /**
