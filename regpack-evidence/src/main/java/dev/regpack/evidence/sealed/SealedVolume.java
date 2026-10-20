@@ -299,14 +299,17 @@ final class SealedVolume {
     return OptionalInt.of(((Number) Files.getAttribute(file, "unix:nlink")).intValue());
   }
 
-  /** The id stored in the marker file, or empty when the volume has no marker. */
+  /**
+   * The id stored in the marker file, or empty when the volume has no marker. Trailing white space
+   * (the newline an operator's editor adds) is not part of the id.
+   */
   Optional<String> markerId() throws IOException {
     try {
       byte[] bytes = ops.read(root.resolve(MARKER));
       if (bytes.length > MAX_MARKER_BYTES) {
         throw new IOException("volume " + volumeId + ": the marker is not a volume marker");
       }
-      return Optional.of(new String(bytes, UTF_8));
+      return Optional.of(new String(bytes, UTF_8).stripTrailing());
     } catch (NoSuchFileException e) {
       return Optional.empty();
     }

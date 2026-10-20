@@ -1209,7 +1209,65 @@ class SealedEvidenceStoreTest {
     Files.delete(volumeA.resolve(".sealed-volume"));
     Files.delete(volumeB.resolve(".sealed-volume"));
 
-    assertThatThrownBy(this::open).isInstanceOf(EvidenceUnavailableException.class);
+    assertThatThrownBy(this::open)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessageContaining("roots are not empty");
+  }
+
+  @Test
+  void aRootThatHoldsOnlyAFileSystemHousekeepingDirectoryIsRefusedWithoutClaimingObjects()
+      throws IOException {
+    Files.createDirectories(volumeA.resolve("lost+found"));
+    Files.createDirectories(volumeB.resolve("lost+found"));
+
+    assertThatThrownBy(this::open)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage(
+            "both volumes are unmarked and their roots are not empty (the root of a new store"
+                + " must be a new empty directory below the mount point)");
+    // a refusal writes nothing
+    assertThat(volumeA.resolve(".sealed-volume")).doesNotExist();
+    assertThat(volumeB.resolve(".sealed-volume")).doesNotExist();
+
+    // a sub-directory of the same roots is a new empty directory and opens
+    SealedEvidenceStore store =
+        SealedEvidenceStore.open(
+            new SealedEvidenceStore.Config(
+                volumeA.resolve("store"), volumeB.resolve("store"), "vol-a", "vol-b", clock),
+            FileOps.real());
+    assertThat(store.degraded()).isFalse();
+    assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
+  }
+
+  @Test
+  void aMarkerWithATrailingNewlineIsTheSameVolume() throws IOException {
+    open().put(request(KEY, "hello"));
+    Files.write(volumeA.resolve(".sealed-volume"), utf8("vol-a\n"));
+    Files.write(volumeB.resolve(".sealed-volume"), utf8("vol-b \r\n"));
+
+    SealedEvidenceStore store = open();
+
+    assertThat(store.degraded()).isFalse();
+    assertThat(store.get(KEY).orElseThrow().bytes()).isEqualTo(utf8("hello"));
+  }
+
+  @Test
+  void theRefusalOfAnotherVolumesMarkerNamesBothIds() throws IOException {
+    open();
+
+    assertThatThrownBy(
+            () ->
+                SealedEvidenceStore.open(
+                    new SealedEvidenceStore.Config(volumeA, volumeB, "x", "vol-b", clock),
+                    FileOps.real()))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("volume x: its marker names another volume (vol-a, not x)");
+
+    // a marker that is no volume id is not echoed
+    Files.write(volumeA.resolve(".sealed-volume"), utf8("../secret/file.txt"));
+    assertThatThrownBy(this::open)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("volume vol-a: its marker names another volume (not a volume id, not vol-a)");
   }
 
   @Test
@@ -1335,7 +1393,7 @@ class SealedEvidenceStoreTest {
         .contains("on Windows the JDK cannot force a directory")
         .contains("power loss")
         .contains("SMB")
-        .contains("The list call")
+        .contains("the list call walks the directory tree of both volumes")
         .contains("file-store identity")
         .contains("attested in the G8 record")
         .contains("plaintext")
@@ -1345,6 +1403,38 @@ class SealedEvidenceStoreTest {
         .contains("a deliberate edit that recomputes the trailer")
         .contains("a shortened or deleted meta, are not detected")
         .contains("both volumes already hold")
-        .contains("temporary file of the full object size");
+        .contains("has its link refused and deletes the file")
+        .contains("temporary file of the full object size")
+        // (3) scale
+        .contains("open() lists every directory of both volumes to sweep temporary files")
+        .contains("repair() and scrub() hold the key set of both volumes in memory")
+        .contains("a replaced volume blocks every write until repair() has finished")
+        // (11) one process owns a volume pair
+        .contains("One process owns a volume pair")
+        .contains("silently loses legal-hold and retention-extension updates")
+        .contains("unreliable on network file systems")
+        .contains("immutable per-revision meta file of P3c")
+        // (12) restart gap and lock coupling
+        .contains("After a restart the bookkeeping of unsynced directories is empty")
+        .contains("syncs only the directory that holds the link")
+        .contains("a stalled volume can hold up another")
+        .contains("the key stripe of the store first, then the meta lock of the volume")
+        // (13) the root of a volume
+        .contains("must be a new empty directory below the mount point")
+        .contains("lost+found, System Volume Information and $RECYCLE.BIN count as content")
+        // (14) sealed, not authenticated
+        .contains("sealed by the trailer, not authenticated")
+        .contains("signed manifests of P3c")
+        // (15) manual cures and unrecovered states
+        .contains("never replaced by repair")
+        .contains("until an operator moves the damaged file aside and runs repair()")
+        .contains("indistinguishable from two new volumes")
+        .contains("a restore by copying vol/* drops it")
+        // (16) a hold release that reached one volume
+        .contains("effective before it is acknowledged")
+        .contains("the hold of the higher revision")
+        // (17) Windows
+        .contains("reports synchronousAcknowledgement true although no directory is forced")
+        .contains("attestation of G8 and on SP-W");
   }
 }

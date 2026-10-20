@@ -72,6 +72,16 @@ import java.util.regex.Pattern;
  * and the store is write-closed ({@link #degraded()}) for as long as a replaced volume has no
  * marker, which a repair writes last: for a repair that is the time to read both copies of every
  * key.
+ *
+ * <p><b>One process owns a volume pair.</b> The read-compare-replace of a meta file is atomic only
+ * through locks that are shared inside one JVM, and {@link #open} takes no file lock. A second
+ * process over the same two directories (a rolling restart that overlaps, a sender that was not
+ * stopped after a failover, an operator tool) silently loses legal-hold and retention-extension
+ * updates. Advisory file locks are unreliable on network file systems; the durable cure is the
+ * immutable per-revision meta file of P3c. "Forced to the device" above holds for the data of a
+ * file; what {@link #limits()} says about directories (none forced on Windows, a gap after a
+ * restart on POSIX systems) bounds it, and {@link #limits()} lists everything else that is not
+ * shown.
  */
 public final class SealedEvidenceStore implements EvidenceStore {
   private static final Grade GRADE = new Grade("P-SEALED", "");
@@ -82,9 +92,12 @@ public final class SealedEvidenceStore implements EvidenceStore {
   /**
    * Where the two volumes are and how they are told apart.
    *
-   * @param volumeA the root of the first volume (absolute)
-   * @param volumeB the root of the second volume (absolute); the two real paths must differ and
-   *     neither may lie inside the other (checked by {@link #open})
+   * @param volumeA the root of the first volume (absolute); for a new store a new empty directory
+   *     below the mount point of the volume, not the mount point itself (lost+found, System Volume
+   *     Information and $RECYCLE.BIN count as content and make {@link #open} refuse two unmarked
+   *     roots)
+   * @param volumeB the root of the second volume (absolute), like {@code volumeA}; the two real
+   *     paths must differ and neither may lie inside the other (checked by {@link #open})
    * @param volumeIdA 1 to 32 characters of a-z, 0-9 and '-'; stored in the marker of volume a
    * @param volumeIdB like {@code volumeIdA}, and different from it
    * @param clock the source of the write time of an object
@@ -215,7 +228,8 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * Opens the store over the two directories of the configuration with the real file operations.
    *
    * @throws EvidenceUnavailableException when a directory cannot be used, a volume cannot make a
-   *     hard link, a marker names another volume, or both volumes are unmarked but hold objects
+   *     hard link, a marker names another volume, or both volumes are unmarked and a root is not
+   *     empty
    * @throws IllegalArgumentException when the two roots are one directory or one lies in the other
    *     (also through a link or another spelling of the path)
    */
@@ -235,6 +249,16 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * SealedVolume#sweepTemporaries}). Each volume also proves that it can make a hard link as the
    * publish protocol needs it, and sync its root where the platform can ({@link
    * SealedVolume#checkHardLinks}).
+   *
+   * <p><b>Operator notes.</b> The root of a new store must be a new empty directory below the mount
+   * point: lost+found, System Volume Information and $RECYCLE.BIN count as content, so two unmarked
+   * roots of which either holds an entry are refused with a text that names no file. A marker is
+   * read with its trailing white space removed. Two volumes that are not mounted (empty mount-point
+   * directories on the system disk) look like two new volumes and open as a new store on the system
+   * disk. The marker is a dot file: a restore by a shell glob over the volume leaves it out, and
+   * the next open refuses (two unmarked roots that hold objects); restore the directory itself or
+   * the marker. Opening takes no lock and sweeps every directory of both volumes (see {@link
+   * #limits()}, items 1 to 3 and 11 to 15); only one process may use a volume pair.
    */
   static SealedEvidenceStore open(Config config, FileOps ops) {
     Objects.requireNonNull(config, "config");
@@ -282,7 +306,8 @@ public final class SealedEvidenceStore implements EvidenceStore {
         requireOwnMarker(second, markerOfSecond);
         if (markerOfFirst.isEmpty() && markerOfSecond.isEmpty()) {
           throw new EvidenceUnavailableException(
-              "both volumes are unmarked but hold objects: not a store this code created");
+              "both volumes are unmarked and their roots are not empty (the root of a new store"
+                  + " must be a new empty directory below the mount point)");
         }
       } else {
         run(first, () -> first.volume().writeMarker());
@@ -317,8 +342,17 @@ public final class SealedEvidenceStore implements EvidenceStore {
 
   private static void requireOwnMarker(Vol vol, Optional<String> marker) {
     if (marker.isPresent() && !marker.get().equals(vol.id())) {
+      // Both ids are named so that an operator sees which configuration is wrong; a marker that is
+      // not a volume id is not echoed (it is file content, not a name this code wrote).
+      String found = VOLUME_ID.matcher(marker.get()).matches() ? marker.get() : "not a volume id";
       throw new EvidenceUnavailableException(
-          "volume " + vol.id() + ": its marker names another volume");
+          "volume "
+              + vol.id()
+              + ": its marker names another volume ("
+              + found
+              + ", not "
+              + vol.id()
+              + ")");
     }
   }
 
@@ -784,7 +818,16 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * <p>Each key is repaired under its lock. For a replaced volume the store stays write-closed
    * (every put is refused for the missing marker) from the open until the markers are written at
    * the end, so that time is the time to read both copies of every key, which has not been
-   * measured.
+   * measured. It holds the key set of both volumes in memory.
+   *
+   * <p><b>Operator notes.</b> A corrupt copy of an object or of a meta next to a valid one is never
+   * replaced: {@link #scrub()} reports it, {@code put} (object) and the retention methods (meta)
+   * fail closed on it, and {@code repair} returns without copying it. The cure is manual: move the
+   * damaged file aside (it stays as evidence of the damage), then run {@code repair()}, which finds
+   * the name absent and copies the valid file. A repair that returns normally has not shown that
+   * every key has two valid copies: run {@code scrub()} afterwards and expect it empty. A hold
+   * release that reached one volume only is already the hold of every reader (the higher revision
+   * wins), and a repair copies it to the other volume.
    *
    * @return the number of objects copied
    * @throws EvidenceUnavailableException when a volume cannot be read or written, or when another
@@ -933,11 +976,15 @@ public final class SealedEvidenceStore implements EvidenceStore {
     return "P-SEALED limits. SP-W has not been run, so none of the following is shown by a test. "
         + "(1) Directory durability: directory entries are forced on POSIX systems only; on "
         + "Windows the JDK cannot force a directory, so a new file name may not survive a power "
-        + "failure although its data was forced. "
+        + "failure although its data was forced; on POSIX systems the gap after a restart in "
+        + "item (12) applies. "
         + "(2) Not exercised: power loss, drives that acknowledge a flush early, SMB and other "
         + "network file systems, ReFS and Windows Server volume pairs. "
-        + "(3) The list call walks the directory tree of both volumes: its cost grows with the "
-        + "number of objects and has not been measured. "
+        + "(3) Scale: the list call walks the directory tree of both volumes; open() lists every "
+        + "directory of both volumes to sweep temporary files; repair() and scrub() hold the key "
+        + "set of both volumes in memory. The cost and the heap grow with the number of objects "
+        + "and are unmeasured (SP-W); a replaced volume blocks every write until repair() has "
+        + "finished. "
         + "(4) The number of failure domains is inferred from file-store identity (device number "
         + "and type, or the drive description); two file systems on one physical disk count as "
         + "two, and that the two volumes are independent is attested in the G8 record, not shown "
@@ -953,15 +1000,47 @@ public final class SealedEvidenceStore implements EvidenceStore {
         + "(8) The grade is tamper-evident, not immutable: someone with storage access can delete "
         + "or rewrite files. "
         + "(9) A put of a key that both volumes already hold (a journal re-ship, a retry) still "
-        + "writes, forces and discards a temporary file of the full object size on each volume "
-        + "before it syncs the directories, so its cost grows with the object size; it has not "
-        + "been measured. "
+        + "writes and forces a temporary file of the full object size on each volume, has its "
+        + "link refused and deletes the file, only to trigger the directory-sync chain; its cost "
+        + "grows with the object size and has not been measured. "
         + "(10) Temporary files that a crashed writer leaves are swept when the store is opened. "
         + "Their owner is told by the process id in this process-id namespace and by the age of "
         + "the file (older than the start of this JVM); two stores in different containers or "
         + "hosts over one directory are not told apart, and one can sweep the file that the other "
         + "is still writing (its put then fails and is retried). Sharing a volume between "
-        + "processes is not claimed.";
+        + "processes is not claimed (see item (11)). "
+        + "(11) One process owns a volume pair. A second process over the same two directories "
+        + "silently loses legal-hold and retention-extension updates: the read-compare-replace of "
+        + "a meta file is atomic only through locks that are shared inside one JVM. Advisory file "
+        + "locks are unreliable on network file systems; the durable cure is the immutable "
+        + "per-revision meta file of P3c. "
+        + "(12) Restart gap and lock coupling. After a restart the bookkeeping of unsynced "
+        + "directories is empty, so a publish whose link succeeds in directories that a crashed "
+        + "earlier attempt created syncs only the directory that holds the link (the "
+        + "refused-link path syncs the whole chain). The directory lock and the 64 meta locks are "
+        + "static and shared by every volume and store in the JVM, so a stalled volume can hold "
+        + "up another; the lock order is the key stripe of the store first, then the meta lock of "
+        + "the volume. "
+        + "(13) The root of a volume must be a new empty directory below the mount point: "
+        + "lost+found, System Volume Information and $RECYCLE.BIN count as content, and two "
+        + "unmarked roots of which either holds any entry are refused. "
+        + "(14) The header and meta fields are sealed by the trailer, not authenticated: the "
+        + "format finds any flipped bit, but not a deliberate edit that recomputes the trailer; "
+        + "that needs the signed manifests of P3c. "
+        + "(15) Manual cures and unrecovered states. A corrupt copy next to a valid one (object or "
+        + "meta) is reported by scrub and never replaced by repair; put (for an object) and the "
+        + "retention methods (for a meta) fail closed on it until an operator moves the damaged "
+        + "file aside and runs repair(). Two unmounted volumes (empty mount-point directories on "
+        + "the system disk) are indistinguishable from two new volumes and open as a new store on "
+        + "the system disk; the production send gate refuses fewer than two failure domains. The "
+        + "marker is a dot file, and a restore by copying vol/* drops it, after which open "
+        + "refuses. "
+        + "(16) A hold release that reached one volume only is effective before it is "
+        + "acknowledged: the hold of two metas of different revisions is the hold of the higher "
+        + "revision. "
+        + "(17) On Windows durability() reports synchronousAcknowledgement true although no "
+        + "directory is forced there; a send-gate decision on Windows therefore rests on the "
+        + "attestation of G8 and on SP-W.";
   }
 
   // ---------------------------------------------------------------- reading one volume
