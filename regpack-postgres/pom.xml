@@ -23,6 +23,8 @@
     <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
     <dependency><groupId>org.checkerframework</groupId><artifactId>checker-qual</artifactId><version>${checker-qual.version}</version></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
+    <!-- T14b: P-SEALED and the sealer for the I1 scenarios on real PostgreSQL; test scope only, in this direction only -->
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-evidence</artifactId><scope>test</scope></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-tools</artifactId><scope>test</scope></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-bench</artifactId><scope>test</scope></dependency>
   </dependencies>
