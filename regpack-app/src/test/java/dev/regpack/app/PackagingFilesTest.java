@@ -200,6 +200,7 @@ class PackagingFilesTest {
             "spikes",
             "ledger-pg",
             "ledger-capacity",
+            "ledger-durability",
             "smoke-linux",
             "smoke-windows",
             "smoke-kubernetes");
@@ -505,6 +506,822 @@ class PackagingFilesTest {
     assertThat(job).anyMatch(l -> l.contains("::notice title=capacity"));
     assertThat(job).anyMatch(l -> l.contains("head -n 5"));
     assertThat(ci).containsOnlyOnce("name: regpack-dist\n          path: |");
+  }
+
+  private static final String PINNED_IMAGE =
+      "postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336";
+
+  /**
+   * T19, AP-3 and AP-6: the job ledger-durability starts its own primary and quorum standby from
+   * the one digest-pinned image of the real-store job (the same digest), on the host network of a
+   * GitHub-hosted runner; it holds no secret, token or password, starts no service container,
+   * publishes no port, runs docker only through allow-listed verbs (the workflow: stop, logs, exec,
+   * rm; the script: pull, run, exec), uses sudo only for the two install lines of AP-6, tolerates
+   * no failure, and bounds the job and its long steps by a timeout.
+   */
+  @Test
+  void ledgerDurabilityJobIsGuardedPinnedAndFreeOfCredentials() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    String script = asciiLfText(repoRoot().resolve(CiDurabilityJob.SCRIPT));
+    List<String> job = jobLines(ci, "ledger-durability");
+    List<String> scriptLines = List.of(script.split("\n", -1));
+
+    // the checker finds nothing in the real files
+    assertThat(CiDurabilityJob.problems(ci, script)).isEmpty();
+    assertThat(script).startsWith("#!/usr/bin/env bash\n").endsWith("\n");
+
+    // a GitHub-hosted runner, bounded, a real server required, the loopback URL, no other env
+    assertThat(job).contains("    runs-on: ubuntu-24.04", "    timeout-minutes: 30");
+    assertThat(job.stream().filter(l -> l.strip().startsWith("runs-on:"))).hasSize(1);
+    assertThat(job)
+        .contains(
+            "      REGPACK_PG_REQUIRED: 'true'",
+            "      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres");
+    assertThat(job.stream().filter(l -> l.matches(" {6}[A-Z_]+: .*"))).hasSize(2);
+
+    // checkout and setup-java are those of the job ledger-pg, with the same SHAs and comments
+    List<String> ledgerPg = jobLines(ci, "ledger-pg");
+    assertThat(java.util.Collections.indexOfSubList(ledgerPg, CiDurabilityJob.CHECKOUT))
+        .isNotNegative();
+    assertThat(java.util.Collections.indexOfSubList(ledgerPg, CiDurabilityJob.SETUP_JAVA))
+        .isNotNegative();
+    assertThat(java.util.Collections.indexOfSubList(job, CiDurabilityJob.CHECKOUT)).isNotNegative();
+    assertThat(java.util.Collections.indexOfSubList(job, CiDurabilityJob.SETUP_JAVA))
+        .isNotNegative();
+
+    // no secret, no token, no password, no sudo, no service container, no published port
+    assertThat(job).noneMatch(l -> l.contains("secrets."));
+    assertThat(job).noneMatch(l -> l.contains("GITHUB_TOKEN"));
+    assertThat(job).noneMatch(l -> l.toLowerCase(java.util.Locale.ROOT).contains("password"));
+    assertThat(job).noneMatch(l -> l.contains("sudo"));
+    assertThat(job)
+        .noneMatch(
+            l ->
+                l.strip().equals("services:")
+                    || l.strip().equals("ports:")
+                    || l.strip().startsWith("image:")
+                    || l.strip().startsWith("container:"));
+    assertThat(ci).doesNotContainPattern("jdbc:postgresql://[^/\\s]*@");
+    assertThat(ci).doesNotContainPattern("(?i)[?&]password=");
+    assertThat(job)
+        .noneMatch(l -> l.contains("continue-on-error") || l.contains("|| true"))
+        .noneMatch(l -> l.startsWith("    if:"));
+
+    // the image: the same digest as the real-store job, once, in the script
+    assertThat(ledgerPg).contains("        image: " + PINNED_IMAGE);
+    assertThat(scriptLines.stream().filter(l -> l.startsWith("IMAGE=")))
+        .containsExactly("IMAGE='" + PINNED_IMAGE + "'");
+    assertThat(script).containsOnlyOnce("postgres:18.6-trixie");
+    assertThat(String.join("\n", job)).doesNotContain("postgres:");
+
+    // docker: the workflow stops, reads logs, execs and removes; the script pulls, runs and execs
+    assertThat(CiDurabilityJob.dockerVerbs(job)).containsOnly("stop", "logs", "exec", "rm");
+    assertThat(CiDurabilityJob.dockerVerbs(scriptLines)).containsOnly("pull", "run", "exec");
+    assertThat(script).doesNotContain("docker volume").doesNotContain("--privileged");
+    List<String> runs = scriptLines.stream().filter(l -> l.startsWith("docker run ")).toList();
+    assertThat(runs).hasSize(3);
+    for (String run : runs) {
+      assertThat(run).contains(" --network host ").contains(" \"$IMAGE\" ");
+      String options = run.substring(0, run.indexOf(" \"$IMAGE\" "));
+      assertThat(options)
+          .doesNotContain(" -p")
+          .doesNotContain(" -P")
+          .doesNotContain("--publish")
+          .doesNotContain("--privileged");
+    }
+    assertThat(runs.stream().filter(l -> l.startsWith("docker run -d ")))
+        .hasSize(2)
+        .allMatch(l -> l.contains(" -c listen_addresses=127.0.0.1 "));
+
+    // sudo: exactly the two install lines of AP-6
+    assertThat(CiDurabilityJob.codeLines(script).stream().filter(l -> l.contains("sudo")))
+        .containsExactly(
+            "sudo install -d -m 755 /mnt/regpack-pg",
+            "sudo install -d -o 999 -g 999 -m 700 /mnt/regpack-pg/primary /mnt/regpack-pg/standby");
+
+    // the three Maven steps: install, then the two selected integration-test runs, no flag that
+    // lets a run with no selected test pass
+    List<String> maven = job.stream().filter(l -> l.contains("./mvnw")).toList();
+    assertThat(maven).hasSize(3);
+    assertThat(maven).noneMatch(l -> l.contains("failsafe.failIfNoSpecifiedTests"));
+    assertThat(maven)
+        .filteredOn(l -> l.contains(" verify "))
+        .hasSize(2)
+        .allMatch(
+            l ->
+                l.contains("-pl regpack-postgres")
+                    && l.contains("-Dgroups=durability")
+                    && l.contains("-DexcludedGroups=none")
+                    && l.contains("-Dtest=NoUnitTestsInThisRun"));
+    assertThat(maven).anyMatch(l -> l.contains("-Dit.test=PgDurabilityUpIT "));
+    assertThat(maven).anyMatch(l -> l.contains("-Dit.test=PgDurabilityDownIT "));
+
+    // the phases, in order, each long step bounded
+    int up = job.indexOf("      - name: Start the primary and the quorum standby");
+    int upTests = job.indexOf("      - name: Durability tests with the standby up");
+    int stop = job.indexOf("      - name: Stop the standby");
+    int downTests = job.indexOf("      - name: Durability tests with the standby down");
+    int traceability = job.indexOf("      - name: Standby traceability");
+    assertThat(up).isNotNegative().isLessThan(upTests);
+    assertThat(upTests).isLessThan(stop);
+    assertThat(stop).isLessThan(downTests);
+    assertThat(downTests).isLessThan(traceability);
+    assertThat(job.stream().filter(l -> l.equals("        timeout-minutes: 10"))).hasSize(3);
+    assertThat(job).contains("        run: bash scripts/ci/pg-quorum-up.sh");
+    assertThat(job).contains("        run: docker stop regpack-standby");
+
+    // the reports are kept under a name of their own, and the distribution upload stays unique
+    assertThat(job).contains("          name: ledger-durability-reports");
+    assertThat(job).contains("          path: regpack-postgres/target/failsafe-reports/TEST-*.xml");
+    assertThat(ci).containsOnlyOnce("name: regpack-dist\n          path: |");
+
+    // the replication init script of the primary
+    assertThat(String.join("\n", scriptLines))
+        .contains(
+            "-v \"$PWD/scripts/ci/pg-init-replication.sh:"
+                + "/docker-entrypoint-initdb.d/10-replication.sh:ro\"");
+  }
+
+  /**
+   * The init script is the spike script, copied: the same three commands (strict mode, the PGDATA
+   * guard, the one pg_hba line), and nothing else.
+   */
+  @Test
+  void theReplicationInitScriptIsTheSpikeScriptCopiedAndNothingElse() throws IOException {
+    String init = asciiLfText(repoRoot().resolve(CiDurabilityJob.INIT_SCRIPT));
+    String spike = asciiLfText(repoRoot().resolve("spikes/scripts/pg-init-replication.sh"));
+    assertThat(CiDurabilityJob.initScriptProblems(init)).isEmpty();
+    assertThat(init).endsWith("\n");
+    assertThat(CiDurabilityJob.codeLines(init)).isEqualTo(CiDurabilityJob.codeLines(spike));
+    assertThat(CiDurabilityJob.codeLines(init))
+        .containsExactly(
+            "set -euo pipefail",
+            ": \"${PGDATA:?PGDATA is not set: this script runs only inside the postgres"
+                + " container}\"",
+            "echo \"host replication all 127.0.0.1/32 trust\" >> \"$PGDATA/pg_hba.conf\"");
+
+    java.util.Map<String, String> broken = new java.util.LinkedHashMap<>();
+    String replication =
+        "echo \"host replication all 127.0.0.1/32 trust\" >> \"$PGDATA/pg_hba.conf\"";
+    broken.put("an extra docker command", init + "docker rm -f regpack-primary\n");
+    broken.put("an extra sudo command", init + "sudo chmod 777 /\n");
+    broken.put("another network in pg_hba", init.replace("127.0.0.1/32", "0.0.0.0/0"));
+    broken.put("another database in pg_hba", init.replace("replication all", "all all"));
+    broken.put("no PGDATA guard", init.replace(": \"${PGDATA:?", "# \"${PGDATA:?"));
+    broken.put("no strict mode", init.replace("set -euo pipefail\n", ""));
+    broken.put("no pg_hba line", init.replace(replication + "\n", ""));
+    broken.put("a second pg_hba line", init + replication + "\n");
+    for (java.util.Map.Entry<String, String> copy : broken.entrySet()) {
+      assertThat(copy.getValue()).as(copy.getKey()).isNotEqualTo(init);
+      assertThat(CiDurabilityJob.initScriptProblems(copy.getValue()))
+          .as(copy.getKey())
+          .isNotEmpty();
+    }
+  }
+
+  /** One way of neutering the durability job: the two texts and the problem that must be named. */
+  private record Neutered(String ci, String script, String problem) {}
+
+  /** The first occurrence of {@code from} replaced, which must exist. */
+  private static String replaceFirst(String text, String from, String to) {
+    int at = text.indexOf(from);
+    assertThat(at).as("text: " + from).isNotNegative();
+    return text.substring(0, at) + to + text.substring(at + from.length());
+  }
+
+  /**
+   * The text with the first line that starts with {@code a} and that starting with {@code b}
+   * swapped.
+   */
+  private static String swapLines(String text, String a, String b) {
+    List<String> lines = new java.util.ArrayList<>(List.of(text.split("\n", -1)));
+    int first = -1;
+    int second = -1;
+    for (int i = 0; i < lines.size(); i++) {
+      if (first < 0 && lines.get(i).startsWith(a)) {
+        first = i;
+      } else if (second < 0 && lines.get(i).startsWith(b)) {
+        second = i;
+      }
+    }
+    assertThat(first).as("line starting with: " + a).isNotNegative();
+    assertThat(second).as("line starting with: " + b).isNotNegative();
+    java.util.Collections.swap(lines, first, second);
+    return String.join("\n", lines);
+  }
+
+  /**
+   * The workflow with the first {@code from} inside job ledger-durability replaced by {@code to}.
+   */
+  private static String inDurabilityJob(String ci, String from, String to) {
+    int job = ci.indexOf("\n  ledger-durability:\n");
+    assertThat(job).as("job ledger-durability").isNotNegative();
+    int at = ci.indexOf(from, job);
+    assertThat(at).as("text in job ledger-durability: " + from).isNotNegative();
+    return ci.substring(0, at) + to + ci.substring(at + from.length());
+  }
+
+  /** The broken copies of the real workflow and script, one single edit each. */
+  private static final class Copies {
+    private final String ci;
+    private final String script;
+    private final java.util.Map<String, Neutered> cases = new java.util.LinkedHashMap<>();
+
+    Copies(String ci, String script) {
+      this.ci = ci;
+      this.script = script;
+    }
+
+    /** The first {@code from} inside the job, replaced in the workflow. */
+    void yaml(String name, String from, String to, String problem) {
+      yaml(name, inDurabilityJob(ci, from, to), problem);
+    }
+
+    /** A workflow built by the caller. */
+    void yaml(String name, String changed, String problem) {
+      cases.put(name, new Neutered(changed, script, problem));
+    }
+
+    /** The first {@code from} in the script, replaced. */
+    void shell(String name, String from, String to, String problem) {
+      shell(name, replaceFirst(script, from, to), problem);
+    }
+
+    /** A script built by the caller. */
+    void shell(String name, String changed, String problem) {
+      cases.put(name, new Neutered(ci, changed, problem));
+    }
+
+    /** The script with {@code line} added after the wait for the standby. */
+    void command(String name, String line, String problem) {
+      shell(name, "wait_tcp 5433\n", "wait_tcp 5433\n" + line + "\n", problem);
+    }
+  }
+
+  /**
+   * The checker has teeth: each single edit that neuters the job or its script is reported, and
+   * under the name of the rule that the edit breaks (the expected fragment of the problem text),
+   * not merely as a generic difference from the approved text.
+   */
+  @Test
+  void theDurabilityJobCheckerReportsEachWayOfNeuteringTheJob() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    String script = asciiLfText(repoRoot().resolve(CiDurabilityJob.SCRIPT));
+    assertThat(CiDurabilityJob.problems(ci, script)).isEmpty();
+
+    String install = CiDurabilityJob.text(CiDurabilityJob.INSTALL);
+    String start = CiDurabilityJob.text(CiDurabilityJob.UP);
+    String upTests = CiDurabilityJob.text(CiDurabilityJob.UP_TESTS);
+    String stop = CiDurabilityJob.text(CiDurabilityJob.STOP);
+    String downTests = CiDurabilityJob.text(CiDurabilityJob.DOWN_TESTS);
+    String traceability = CiDurabilityJob.text(CiDurabilityJob.TRACEABILITY);
+    String annotate = CiDurabilityJob.text(CiDurabilityJob.ANNOTATE);
+    String diagnostics = CiDurabilityJob.text(CiDurabilityJob.DIAGNOSTICS);
+    String cleanup = CiDurabilityJob.text(CiDurabilityJob.CLEANUP);
+    String upload = CiDurabilityJob.text(CiDurabilityJob.UPLOAD);
+    String always = "        if: always()\n";
+    String failure = "        if: failure()\n";
+    String tolerated = "a failure may be tolerated";
+    String skipped = "may be skipped";
+    String swallowed = "a failure is swallowed";
+    String notRun = "does not run when";
+    String noSelect = "a flag lets a run with no selected integration test pass";
+    String outsideSet = "outside the approved set";
+    String standbyMode = "does not run in --realstore standby mode";
+    String notFound = "expected exactly one step";
+    String verifyUp =
+        "verify -pl regpack-postgres -Dspotless.check.skip=true -Dgroups=durability"
+            + " -DexcludedGroups=none -Dit.test=PgDurabilityUpIT";
+    String downSelected = "-Dit.test=PgDurabilityDownIT";
+    Copies c = new Copies(ci, script);
+
+    // a failure tolerated or a step skipped
+    c.yaml(
+        "continue-on-error on the up tests",
+        upTests,
+        upTests + "        continue-on-error: true\n",
+        tolerated);
+    c.yaml(
+        "continue-on-error on the job",
+        "    timeout-minutes: 30\n",
+        "    timeout-minutes: 30\n    continue-on-error: true\n",
+        tolerated);
+    c.yaml(
+        "a job-level condition",
+        "    runs-on: ubuntu-24.04\n",
+        "    if: false\n    runs-on: ubuntu-24.04\n",
+        "the job may be skipped");
+    c.yaml(
+        "a condition that skips the down tests",
+        "tests with the standby down\n",
+        "tests with the standby down\n        if: false\n",
+        skipped);
+    c.yaml(
+        "a condition that skips the up tests",
+        "tests with the standby up\n",
+        "tests with the standby up\n        if: ${{ false }}\n",
+        skipped);
+    c.yaml(
+        "|| true on the down tests",
+        "-Dsurefire.failIfNoSpecifiedTests=false\n      - name: Standby",
+        "-Dsurefire.failIfNoSpecifiedTests=false || true\n      - name: Standby",
+        swallowed);
+
+    // the gates and the cleanup run on every outcome, the diagnostics on failure
+    c.yaml(
+        "traceability without if always", traceability, traceability.replace(always, ""), notRun);
+    c.yaml("annotation without if always", annotate, annotate.replace(always, ""), notRun);
+    c.yaml("cleanup without if always", cleanup, cleanup.replace(always, ""), notRun);
+    c.yaml("report upload without if always", upload, upload.replace(always, ""), notRun);
+    c.yaml("diagnostics without if failure", diagnostics, diagnostics.replace(failure, ""), notRun);
+    c.yaml(
+        "diagnostics on every outcome", diagnostics, diagnostics.replace(failure, always), notRun);
+
+    // a missing or doubled step is named
+    c.yaml("no diagnostics step", diagnostics, "", notFound + " 'Container diagnostics', found 0");
+    c.yaml("no stop step", stop, "", notFound + " 'Stop the standby', found 0");
+    c.yaml(
+        "no down tests",
+        downTests,
+        "",
+        notFound + " 'Durability tests with the standby down', found 0");
+    c.yaml(
+        "no up tests", upTests, "", notFound + " 'Durability tests with the standby up', found 0");
+    c.yaml("no traceability step", traceability, "", notFound + " 'Standby traceability', found 0");
+    c.yaml(
+        "no annotation step",
+        annotate,
+        "",
+        notFound + " 'Test tallies and failure annotations', found 0");
+    c.yaml("no cleanup step", cleanup, "", notFound + " 'Remove the containers', found 0");
+    c.yaml(
+        "no start step",
+        start,
+        "",
+        notFound + " 'Start the primary and the quorum standby', found 0");
+    c.yaml("no install step", install, "", notFound);
+    c.yaml("no report upload", upload, "", notFound + " 'Upload durability test reports', found 0");
+    c.yaml("a second up tests step", upTests, upTests + upTests, "found 2");
+    c.yaml(
+        "a step outside the approved text",
+        upload,
+        upload + "      - run: echo done\n",
+        "a step outside the approved text");
+
+    // phases in the wrong order
+    c.yaml(
+        "the down tests before the stop",
+        stop + downTests,
+        downTests + stop,
+        "runs before the step 'Stop the standby'");
+    c.yaml(
+        "the stop before the up tests",
+        upTests + stop,
+        stop + upTests,
+        "the step 'Stop the standby' runs before the step 'Durability tests with the standby up'");
+    c.yaml(
+        "the up tests before the server is started",
+        start + upTests,
+        upTests + start,
+        "the step 'Durability tests with the standby up' runs before the step 'Start the primary and the quorum standby'");
+    c.yaml(
+        "the traceability before the down tests",
+        inDurabilityJob(inDurabilityJob(ci, traceability, ""), downTests, traceability + downTests),
+        "the step 'Standby traceability' runs before the step 'Durability tests with the standby down'");
+
+    // the selection of the tests and the traceability mode
+    c.yaml(
+        "the up step selects the down class",
+        "-Dit.test=PgDurabilityUpIT",
+        downSelected,
+        "does not select PgDurabilityUpIT");
+    c.yaml(
+        "the stop step stops the primary",
+        "docker stop regpack-standby",
+        "docker stop regpack-primary",
+        "is not the approved text");
+    c.yaml("a dropped --realstore standby", " --realstore standby", "", standbyMode);
+    c.yaml("traceability in skip mode", "--realstore standby", "--realstore skip", standbyMode);
+    c.yaml("traceability in only mode", "--realstore standby", "--realstore only", standbyMode);
+    c.yaml("another group", "-Dgroups=durability", "-Dgroups=mutant", outsideSet);
+
+    // flags and options that skip, ignore or let a run with no selected test pass
+    c.yaml(
+        "failsafe.failIfNoSpecifiedTests",
+        downSelected,
+        downSelected + " -Dfailsafe.failIfNoSpecifiedTests=false",
+        noSelect);
+    c.yaml("failIfNoTests", downSelected, downSelected + " -DfailIfNoTests=false", noSelect);
+    for (String flag :
+        List.of(
+            "-DskipTests",
+            "-DskipITs",
+            "-Dmaven.test.skip=true",
+            "-Dmaven.test.failure.ignore=true",
+            "-Dfailsafe.skip=true",
+            "-DtestFailureIgnore=true")) {
+      c.yaml(flag + " on the down tests", downSelected, downSelected + " " + flag, outsideSet);
+    }
+    for (String option : List.of("-fn", "--fail-never", "-fae", "-o", "-q")) {
+      c.yaml(
+          "the Maven option " + option,
+          verifyUp,
+          verifyUp.replace("verify ", "verify " + option + " "),
+          outsideSet);
+    }
+    c.yaml(
+        "another module verified",
+        "verify -pl regpack-postgres",
+        "verify -pl regpack-engine",
+        "-pl names another module than regpack-postgres");
+    c.yaml(
+        "no -am on the install",
+        "install -pl regpack-postgres -am",
+        "install -pl regpack-postgres",
+        "a step outside the approved text: - run: ./mvnw -DskipTests");
+    c.yaml(
+        "the workflow MAVEN_ARGS",
+        ci.replace("MAVEN_ARGS: -B -ntp --strict-checksums", "MAVEN_ARGS: -B -ntp -fn"),
+        "MAVEN_ARGS");
+
+    // the header: runner, bound, required server, credentials, containers of its own
+    c.yaml(
+        "a floating runner",
+        "    runs-on: ubuntu-24.04\n",
+        "    runs-on: ubuntu-latest\n",
+        "does not run on ubuntu-24.04");
+    c.yaml(
+        "a one-day job timeout",
+        "    timeout-minutes: 30\n",
+        "    timeout-minutes: 1440\n",
+        "is not bounded by timeout-minutes: 30");
+    c.yaml(
+        "a missing server skips the tests",
+        "REGPACK_PG_REQUIRED: 'true'",
+        "REGPACK_PG_REQUIRED: 'false'",
+        "REGPACK_PG_REQUIRED");
+    c.yaml(
+        "another server URL",
+        "127.0.0.1:5432/postgres",
+        "db.example.com:5432/postgres",
+        "REGPACK_PG_URL");
+    c.yaml(
+        "a secret",
+        "    steps:\n",
+        "      TOKEN: ${{ secrets.TOKEN }}\n    steps:\n",
+        "reads a secret or the token");
+    c.yaml(
+        "the token",
+        "    steps:\n",
+        "      T: ${{ github.token }}\n      U: $GITHUB_TOKEN\n    steps:\n",
+        "reads a secret or the token");
+    c.yaml(
+        "a password in the URL", "?user=postgres", "?user=postgres&password=x", "names a password");
+    c.yaml(
+        "a service container",
+        "    steps:\n",
+        "    services:\n      postgres:\n        image: postgres:18\n    steps:\n",
+        "starts a service container or publishes a port");
+    c.yaml(
+        "a published port in the job",
+        "    steps:\n",
+        "    ports:\n      - 5432:5432\n    steps:\n",
+        "starts a service container or publishes a port");
+    c.yaml(
+        "an unpinned checkout",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+        "actions/checkout@v7",
+        notFound + " 'uses: actions/checkout@3d3c42e5");
+
+    // docker and sudo in the workflow
+    for (String verb :
+        List.of(
+            "volume", "cp", "network", "build", "commit", "ps", "run", "pull", "kill", "login")) {
+      c.yaml(
+          "docker " + verb + " in the workflow",
+          "docker stop regpack-standby",
+          "docker " + verb + " regpack-standby",
+          "docker verb '" + verb + "' in the workflow");
+    }
+    c.yaml(
+        "a docker volume created by the cleanup",
+        "docker rm -f regpack-primary regpack-standby",
+        "docker rm -f regpack-primary regpack-standby && docker volume create x",
+        "docker verb 'volume' in the workflow");
+    c.yaml(
+        "a published port in a docker run of the workflow",
+        "docker stop regpack-standby",
+        "docker run -d -p 5432:5432 postgres:17",
+        "docker verb 'run' in the workflow");
+    c.yaml(
+        "sudo in the workflow",
+        "run: docker stop regpack-standby",
+        "run: sudo docker stop regpack-standby",
+        "sudo in the workflow");
+    c.yaml(
+        "a docker binary named by its path in the workflow",
+        "run: docker stop regpack-standby",
+        "run: /usr/bin/docker stop regpack-standby",
+        "a docker binary named by its path in the workflow");
+    c.yaml(
+        "--privileged in the workflow",
+        "docker stop regpack-standby",
+        "docker exec --privileged regpack-standby true",
+        "a privileged container");
+
+    assertThat(c.cases.size()).as("copies").isGreaterThanOrEqualTo(70);
+
+    assertEveryCopyIsReported(c, ci, script);
+  }
+
+  /** The assertion of the two teeth tests: every copy differs and is reported under its rule. */
+  private static void assertEveryCopyIsReported(Copies c, String ci, String script) {
+    for (java.util.Map.Entry<String, Neutered> copy : c.cases.entrySet()) {
+      Neutered n = copy.getValue();
+      assertThat(n.ci().equals(ci) && n.script().equals(script))
+          .as(copy.getKey() + " differs from the real files")
+          .isFalse();
+      assertThat(CiDurabilityJob.problems(n.ci(), n.script()))
+          .as(copy.getKey())
+          .anyMatch(p -> p.contains(n.problem()));
+    }
+  }
+
+  /**
+   * The same for the script: docker verbs, sudo, images, the options of docker run, the host
+   * network, the loopback listener, the quorum configuration and the order of the steps.
+   */
+  @Test
+  void theDurabilityScriptCheckerReportsEachWayOfNeuteringTheScript() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    String script = asciiLfText(repoRoot().resolve(CiDurabilityJob.SCRIPT));
+    assertThat(CiDurabilityJob.problems(ci, script)).isEmpty();
+
+    String swallowed = "a failure is swallowed";
+    String runOption = "docker run option outside the approved list: ";
+    String noHost = "a docker run without --network host";
+    String notLoopback = "a server that does not listen on 127.0.0.1 only";
+    String badSetting = "a server setting that weakens or preempts the durability fixture";
+    String badMount = "a mount outside /mnt/regpack-pg";
+    String sudoStray = "sudo is used outside the two install lines";
+    String primary = "--name regpack-primary --network host";
+    String standby = "--name regpack-standby --network host";
+    String pull = CiDurabilityJob.PULL;
+    String sudoRoot = CiDurabilityJob.SUDO_ROOT;
+    String sudoDirs = CiDurabilityJob.SUDO_DIRS;
+    String guard = CiDurabilityJob.GUARD;
+    String quorumWait = CiDurabilityJob.QUORUM_WAIT;
+    String alterLine = CiDurabilityJob.ALTER_LINE;
+    String showLine = CiDurabilityJob.SHOW_LINE;
+    String ready = CiDurabilityJob.READY;
+    Copies c = new Copies(ci, script);
+
+    // the script: docker verbs
+    for (String verb :
+        List.of(
+            "volume", "cp", "network", "build", "commit", "ps", "stop", "rm", "kill", "login",
+            "load")) {
+      c.shell(
+          "docker " + verb + " in the script",
+          pull,
+          pull + "\ndocker " + verb + " regpack-data",
+          "docker verb '" + verb + "' in the script");
+    }
+    c.shell(
+        "an option before the docker verb",
+        pull,
+        "docker -H tcp://127.0.0.1:2375 pull \"$IMAGE\"",
+        "docker verb '-H' in the script");
+    c.shell(
+        "a docker binary named by its path in the script",
+        pull,
+        "/usr/bin/docker pull \"$IMAGE\"",
+        "a docker binary named by its path in the script");
+    c.shell("no pull", pull + "\n", "", "the script has no pull of the pinned image");
+
+    // the script: sudo
+    c.shell("a stray sudo", sudoDirs, sudoDirs + "\nsudo chmod -R 777 /mnt/regpack-pg", sudoStray);
+    c.shell(
+        "a third sudo install", sudoDirs, sudoDirs + "\nsudo install -d -m 755 /tmp/x", sudoStray);
+    c.shell("a wider install mode", "-m 700", "-m 777", sudoStray);
+    c.shell(
+        "no first install line", sudoRoot + "\n", "", "the script has no first sudo install line");
+    c.shell(
+        "no second install line",
+        sudoDirs + "\n",
+        "",
+        "the script has no second sudo install line");
+
+    // the script: images
+    c.shell(
+        "a docker run of another image",
+        "\"$IMAGE\" -c listen_addresses=127.0.0.1 -c port=5433",
+        "postgres:17 -c listen_addresses=127.0.0.1 -c port=5433",
+        "a docker run of another image than the pinned one");
+    c.shell(
+        "a docker pull of another image",
+        pull,
+        "docker pull postgres:latest",
+        "a docker pull of another image than the pinned one");
+    c.shell(
+        "an unpinned image literal",
+        "@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336'",
+        "'",
+        "the image literal is not the pinned digest of ledger-pg");
+    c.shell(
+        "another digest",
+        "c4336'",
+        "c4337'",
+        "the image literal is not the pinned digest of ledger-pg");
+    c.shell(
+        "a second image assignment",
+        "cd \"$(dirname",
+        "IMAGE=postgres:17\ncd \"$(dirname",
+        "the image literal is not the pinned digest of ledger-pg");
+
+    // the script: options of docker run
+    c.shell("-p 5432:5432", primary, primary + " -p 5432:5432", runOption + "-p");
+    c.shell("--publish", primary, primary + " --publish=5432:5432", runOption + "--publish");
+    c.shell("-P", primary, primary + " -P", runOption + "-P");
+    c.shell("--privileged", standby, standby + " --privileged", runOption + "--privileged");
+    c.shell("--pid=host", standby, standby + " --pid=host", runOption + "--pid=host");
+    c.shell("--cap-add", standby, standby + " --cap-add SYS_ADMIN", runOption + "--cap-add");
+    c.shell("no host network on the standby", standby, "--name regpack-standby", noHost);
+    c.shell(
+        "a bridge network for the primary",
+        primary,
+        "--name regpack-primary --network bridge",
+        noHost);
+    c.shell(
+        "no host network on the base backup",
+        "docker run --rm --network host",
+        "docker run --rm",
+        noHost);
+    c.shell(
+        "the standby listens on every address",
+        "-c listen_addresses=127.0.0.1 -c port=5433",
+        "-c listen_addresses=* -c port=5433",
+        notLoopback);
+    c.shell(
+        "the primary has no listen_addresses",
+        "-c listen_addresses=127.0.0.1 -c port=5432",
+        "-c port=5432",
+        notLoopback);
+    c.shell(
+        "a second, wider listen_addresses",
+        "-c port=5433 -c hot_standby=on",
+        "-c port=5433 -c listen_addresses=* -c hot_standby=on",
+        notLoopback);
+    c.shell(
+        "the docker socket mounted",
+        standby,
+        standby + " -v /var/run/docker.sock:/var/run/docker.sock",
+        badMount);
+    c.shell("the root mounted", standby, standby + " -v /:/host", badMount);
+    c.shell(
+        "a mount that climbs out of the data root",
+        "-v /mnt/regpack-pg/primary:",
+        "-v /mnt/regpack-pg/../../etc:",
+        badMount);
+    c.shell(
+        "the init script mounted writable", "10-replication.sh:ro", "10-replication.sh", badMount);
+    c.shell(
+        "a password in the environment",
+        "-e POSTGRES_HOST_AUTH_METHOD=trust",
+        "-e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_PASSWORD=x",
+        "a docker run environment value outside the approved one");
+    c.shell(
+        "another authentication method",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
+        "POSTGRES_HOST_AUTH_METHOD=md5",
+        "a docker run environment value outside the approved one");
+    c.shell(
+        "the base backup as root",
+        "--user 999:999",
+        "--user 0:0",
+        "a docker run user other than 999:999");
+    c.shell(
+        "an exec as root",
+        "docker exec regpack-primary psql",
+        "docker exec -u root regpack-primary psql",
+        "a docker exec with an option");
+    c.shell(
+        "an exec into another container",
+        "docker exec regpack-primary psql",
+        "docker exec registry psql",
+        "a docker exec into another container than regpack-primary");
+    c.shell(
+        "a server with another name",
+        "--name regpack-standby",
+        "--name standby",
+        "a server container with another name than regpack-primary or regpack-standby");
+    c.shell(
+        "a detached base backup",
+        "docker run --rm --network host",
+        "docker run -d --network host",
+        "a server container with another name");
+    c.shell(
+        "a container that is neither detached nor removed",
+        "docker run --rm --network host",
+        "docker run --network host",
+        "a docker run that is neither a server (-d) nor the removed base backup (--rm)");
+    c.shell(
+        "no standby started",
+        "docker run -d --name regpack-standby",
+        "docker run --rm --name regpack-standby",
+        "the script does not start both servers");
+
+    // the script: guard, strict mode, swallowed failures, stray commands, continuation
+    c.shell(
+        "no runner guard",
+        guard + "\n",
+        "",
+        "the second command of the script is not the runner guard");
+    c.shell(
+        "no strict mode",
+        "set -euo pipefail\n",
+        "",
+        "the first command of the script is not set -euo pipefail");
+    c.command("|| true on a wait", "wait_tcp 5433 || true", swallowed);
+    c.command("set +e", "set +e", swallowed);
+    c.command("exit 0 before the end", "exit 0", swallowed);
+    c.shell(
+        "a backslash continuation",
+        " -c port=5433 ",
+        " -c port=5433 \\\n  ",
+        "continues on the next line");
+    for (String command :
+        List.of(
+            "curl -fsSL https://example.com",
+            "wget https://example.com",
+            "rm -rf /mnt/regpack-pg",
+            "apt-get install -y x",
+            "eval \"$X\"",
+            "chmod -R 777 /mnt/regpack-pg",
+            "cp -r /etc /mnt/regpack-pg",
+            "source /etc/profile")) {
+      c.command(
+          "the command " + command,
+          command,
+          "a command that is not allowed in the script: " + command.split(" ")[0]);
+    }
+
+    // the script: the quorum configuration and the order
+    c.shell(
+        "synchronous_standby_names at start-up",
+        "-c hot_standby=on\nwait_tcp 5432",
+        "-c hot_standby=on -c synchronous_standby_names='ANY 1 (standby1)'\nwait_tcp 5432",
+        badSetting);
+    c.shell("fsync off", "-c port=5432 ", "-c port=5432 -c fsync=off ", badSetting);
+    c.shell(
+        "synchronous_commit set on the server",
+        "-c port=5432 ",
+        "-c port=5432 -c synchronous_commit=local ",
+        badSetting);
+    c.shell(
+        "a quorum of two",
+        "SET synchronous_standby_names = 'ANY 1",
+        "SET synchronous_standby_names = 'ANY 2",
+        "the quorum setting is missing or changed");
+    c.shell(
+        "a first-in-line standby",
+        "'ANY 1 (standby1)'\" -c",
+        "'FIRST 1 (standby1)'\" -c",
+        "the quorum setting is missing or changed");
+    c.shell(
+        "no quorum wait", quorumWait + "\n", "", "the script has no wait for the quorum standby");
+    c.shell(
+        "the quorum waited for in the wrong state",
+        "sync_state = 'quorum'",
+        "sync_state = 'async'",
+        "the script has no wait for the quorum standby");
+    c.shell(
+        "the quorum set before the standby exists",
+        replaceFirst(script, alterLine + "\n", "")
+            .replace(
+                "docker run -d --name regpack-primary",
+                alterLine + "\ndocker run -d --name regpack-primary"),
+        "comes before");
+    c.shell(
+        "a synchronous_standby_names set elsewhere",
+        showLine,
+        "psql_at 5432 \"ALTER SYSTEM SET synchronous_standby_names = ''\"",
+        "synchronous_standby_names is set outside the approved line");
+    c.shell("no ready line", ready + "\n", "", "the script does not end with the ready line");
+    c.shell(
+        "the standby started before the base backup",
+        swapLines(
+            script,
+            "docker run --rm --network host --user 999:999 ",
+            "docker run -d --name regpack-standby "),
+        "comes before");
+    c.shell(
+        "the primary started before the data directories exist",
+        swapLines(script, sudoDirs, "docker run -d --name regpack-primary "),
+        "comes before");
+
+    assertThat(c.cases.size()).as("copies").isGreaterThanOrEqualTo(70);
+    assertEveryCopyIsReported(c, ci, script);
   }
 
   @Test

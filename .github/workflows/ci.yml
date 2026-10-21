@@ -329,6 +329,65 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  ledger-durability:
+    name: ledger durability (primary and quorum standby)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres
+      REGPACK_PG_REQUIRED: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - run: ./mvnw -DskipTests -Dspotless.check.skip=true install -pl regpack-postgres -am
+      - name: Start the primary and the quorum standby
+        timeout-minutes: 10
+        shell: bash
+        run: bash scripts/ci/pg-quorum-up.sh
+      - name: Durability tests with the standby up
+        timeout-minutes: 10
+        run: ./mvnw verify -pl regpack-postgres -Dspotless.check.skip=true -Dgroups=durability -DexcludedGroups=none -Dit.test=PgDurabilityUpIT -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
+      - name: Stop the standby
+        shell: bash
+        run: docker stop regpack-standby
+      - name: Durability tests with the standby down
+        timeout-minutes: 10
+        run: ./mvnw verify -pl regpack-postgres -Dspotless.check.skip=true -Dgroups=durability -DexcludedGroups=none -Dit.test=PgDurabilityDownIT -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
+      - name: Standby traceability
+        if: always()
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates traceability --file docs/traceability.md --root . --scan regpack-postgres/target --realstore standby
+      - name: Test tallies and failure annotations
+        if: always()
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-postgres/target
+      - name: Container diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          for c in regpack-primary regpack-standby; do
+            msg=$(docker logs --tail 30 "$c" 2>&1 | sed 's/%/%25/g' | paste -sd '|' -)
+            echo "::notice title=$c::$msg"
+          done
+          docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc "SELECT application_name, state, sync_state FROM pg_stat_replication" | sed 's/%/%25/g; s/^/::notice title=pg_stat_replication::/'
+      - name: Remove the containers
+        if: always()
+        shell: bash
+        run: docker rm -f regpack-primary regpack-standby
+      - name: Upload durability test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ledger-durability-reports
+          path: regpack-postgres/target/failsafe-reports/TEST-*.xml
+          if-no-files-found: warn
+
   smoke-linux:
     name: smoke (linux, systemd)
     needs: build
