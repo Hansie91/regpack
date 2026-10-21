@@ -179,6 +179,46 @@ class GatesTest {
   }
 
   @Test
+  void standbyModeIsParsedAndTheUsageNamesIt() throws IOException {
+    String file = table(true);
+    String[] base = {"traceability", "--file", file, "--root", repo.toString(), "--scan", "."};
+    var standby = run(append(base, "--realstore", "standby"));
+    assertThat(standby.rc()).isZero();
+    assertThat(standby.out().strip()).isEqualTo("traceability: OK rows=24 closed=0 open=24");
+
+    var bogus = run(append(base, "--realstore", "sometimes"));
+    assertThat(bogus.rc()).isEqualTo(2);
+    assertThat(bogus.err()).contains("[--realstore all|skip|only|standby]");
+
+    // the mode reads the standby lines only: a passing one closes a due I1 row
+    Path reports = repo.resolve("target/failsafe-reports");
+    Files.createDirectories(reports);
+    Files.writeString(
+        reports.resolve("TEST-a.B.xml"),
+        "<testsuite><testcase classname=\"a.B\" name=\"up\"/></testsuite>",
+        StandardCharsets.UTF_8);
+    StringBuilder md = new StringBuilder("exited_plans: P3\n\n");
+    for (int i = 1; i <= 24; i++) {
+      String id = i <= 14 ? "R" + i : "I" + (i - 14);
+      if (id.equals("I1")) {
+        md.append("| I1 | P3 | TEST | a.B#up | REALSTANDBY | BUILD | n |\n");
+      } else {
+        md.append("| ").append(id).append(" | P9 | NONE | - | NA | NA | n |\n");
+      }
+    }
+    Files.writeString(repo.resolve("traceability.md"), md.toString(), StandardCharsets.UTF_8);
+    var closed = run(append(base, "--realstore", "standby"));
+    assertThat(closed.rc()).isZero();
+    assertThat(closed.out().strip()).isEqualTo("traceability: OK rows=24 closed=1 open=23");
+    // the build jobs (skip) do not read the line, and the ledger job (only) does not either
+    var skip = run(append(base, "--realstore", "skip"));
+    assertThat(skip.out().lines().toList())
+        .containsExactly(
+            "traceability: INFO REALSTORE_DEFERRED:I1",
+            "traceability: OK rows=24 closed=0 open=24 deferred=1");
+  }
+
+  @Test
   void realStoreSkipPrintsDeferredRowsAndExitsWithZero() throws IOException {
     Path file = repo.resolve("traceability.md");
     StringBuilder md = new StringBuilder("exited_plans: P3\n\n");

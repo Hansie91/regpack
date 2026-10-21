@@ -19,3 +19,5 @@ spec-freeze	SP-R	REPORT_EXISTS	spec 16: the four reports exist before the owner 
 spec-freeze	SP-G	REPORT_EXISTS	spec 16: the four reports exist before the owner records the freeze
 spec-freeze	SP-L	REPORT_EXISTS	spec 16: the four reports exist before the owner records the freeze
 spec-freeze	SP-X	REPORT_EXISTS	spec 16: the four reports exist before the owner records the freeze
+P-SEALED-outside-tests	SP-W	REPORT_EXISTS	spec 16 entry: SP-W before the P-SEALED adapter is used outside tests
+P-WORM-non-aws	SP-O	REPORT_EXISTS	spec 16 entry: SP-O before a non-AWS store is called P-WORM or compliance mode in production

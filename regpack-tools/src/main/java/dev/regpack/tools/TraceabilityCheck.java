@@ -25,7 +25,8 @@ import org.w3c.dom.NodeList;
  * Checks the traceability file (spec 14.4): every requirement and invariant row has named evidence,
  * every cited artefact exists and records a pass, and a row whose closing plans have all exited
  * needs evidence that counts. Consistency-only golden cases never count, and for I1, I2, I9 and I10
- * only a real-store run counts.
+ * only a real-store run counts; for I1 and I10 a real-files run (P-SEALED on the real file system)
+ * and a real-standby run (the quorum standby job) count as well, for no other row.
  */
 public final class TraceabilityCheck {
   /** One evidence line of the table. */
@@ -40,18 +41,28 @@ public final class TraceabilityCheck {
   }
 
   /**
-   * Which evidence lines are evaluated. {@code ALL} is the build and the default. {@code SKIP}
-   * (build jobs that have no PostgreSQL) ignores lines with store {@code REALSTORE}: they are not
-   * looked up, do not count, and a due row of I1, I2, I9 or I10 that has such a line and no other
-   * counting line is reported as {@code REALSTORE_DEFERRED:<row>} (information, not a problem).
-   * {@code ONLY} (the real-store job) evaluates only lines with store {@code REALSTORE}; a due row
-   * of I1, I2, I9 or I10 needs one that passed, and a due row of any other id that has no such line
-   * is not evaluated and counts as open.
+   * Which evidence lines are evaluated. {@code ALL} is the default and evaluates every line.
+   *
+   * <p>{@code SKIP} (the build jobs, which have no PostgreSQL and no standby) ignores lines with
+   * store {@code REALSTORE} or {@code REALSTANDBY}: they are not looked up, do not count, and a due
+   * row of I1, I2, I9 or I10 that has such a line and no counting line is reported as {@code
+   * REALSTORE_DEFERRED:<row>} (information, not a problem). It evaluates the {@code REALFILES}
+   * lines (P-SEALED on the real file system of the job), which count as non-interim evidence for I1
+   * and I10 only.
+   *
+   * <p>{@code ONLY} (the job with a real PostgreSQL server) evaluates only lines with store {@code
+   * REALSTORE}; a due row of I1, I2, I9 or I10 needs one that passed, and a due row of any other id
+   * that has no such line is not evaluated and counts as open.
+   *
+   * <p>{@code STANDBY} (the job with a quorum standby) evaluates only lines with store {@code
+   * REALSTANDBY}, which count as non-interim evidence for I1 and I10 only; a due row that has no
+   * such line is not evaluated and counts as open.
    */
   public enum Mode {
     ALL,
     SKIP,
-    ONLY
+    ONLY,
+    STANDBY
   }
 
   /**
@@ -88,9 +99,14 @@ public final class TraceabilityCheck {
   private static final List<String> IDS = allIds();
   private static final Set<String> KINDS =
       Set.of("TEST", "GOLDEN", "BENCHMARK", "SPIKE", "GATE", "REVIEW", "NONE");
-  private static final Set<String> STORES = Set.of("UNIT", "INMEMORY", "REALSTORE", "NA");
+  private static final Set<String> STORES =
+      Set.of("UNIT", "INMEMORY", "REALFILES", "REALSTORE", "REALSTANDBY", "NA");
   private static final Set<String> CIS = Set.of("BUILD", "NIGHTLY", "RC", "NA");
   private static final Set<String> REAL_STORE_ONLY = Set.of("I1", "I2", "I9", "I10");
+
+  /** The rows for which a {@code REALFILES} or {@code REALSTANDBY} line is non-interim evidence. */
+  private static final Set<String> REAL_FILES_COUNT = Set.of("I1", "I10");
+
   private static final Set<String> SKIPPED_DIRECTORIES = Set.of(".git", "node_modules");
   private static final Pattern PLAN = Pattern.compile("P[0-9]+[a-d]?");
   private static final Pattern EXITED_LINE = Pattern.compile("^exited_plans:\\s*(.*)$");
@@ -160,14 +176,19 @@ public final class TraceabilityCheck {
       boolean counted = checkEvidence(row, due, repoRoot, reports, problems, mode);
       boolean needsRealStore = REAL_STORE_ONLY.contains(id);
       boolean hasRealStoreLine = row.evidence().stream().anyMatch(e -> isRealStore(e));
+      boolean hasDeferrableLine =
+          row.evidence().stream().anyMatch(e -> isRealStore(e) || isRealStandby(e));
+      boolean hasStandbyLine = row.evidence().stream().anyMatch(e -> isRealStandby(e));
       if (!due) {
         open++;
       } else if (counted) {
         closed++;
-      } else if (mode == Mode.SKIP && needsRealStore && hasRealStoreLine) {
+      } else if (mode == Mode.SKIP && needsRealStore && hasDeferrableLine) {
         deferred.add("REALSTORE_DEFERRED:" + id);
         open++;
       } else if (mode == Mode.ONLY && !needsRealStore && !hasRealStoreLine) {
+        open++;
+      } else if (mode == Mode.STANDBY && !hasStandbyLine) {
         open++;
       } else {
         problems.add("ROW_WITHOUT_EVIDENCE:" + id);
@@ -178,6 +199,33 @@ public final class TraceabilityCheck {
 
   private static boolean isRealStore(Evidence e) {
     return e.store().equals("REALSTORE");
+  }
+
+  private static boolean isRealStandby(Evidence e) {
+    return e.store().equals("REALSTANDBY");
+  }
+
+  /** Whether the mode looks the line up at all; a line it does not evaluate never counts. */
+  private static boolean evaluated(Mode mode, Evidence e) {
+    return switch (mode) {
+      case ALL -> true;
+      case SKIP -> !isRealStore(e) && !isRealStandby(e);
+      case ONLY -> isRealStore(e);
+      case STANDBY -> isRealStandby(e);
+    };
+  }
+
+  /**
+   * Whether a passing line is non-interim evidence for the row: a {@code REALSTORE} line always is,
+   * a {@code REALFILES} or {@code REALSTANDBY} line only for I1 and I10, and any other line unless
+   * the row is one of I1, I2, I9 and I10.
+   */
+  private static boolean countsFor(String rowId, Evidence e) {
+    return switch (e.store()) {
+      case "REALSTORE" -> true;
+      case "REALFILES", "REALSTANDBY" -> REAL_FILES_COUNT.contains(rowId);
+      default -> !REAL_STORE_ONLY.contains(rowId);
+    };
   }
 
   private static Map<String, Row> parse(
@@ -283,9 +331,7 @@ public final class TraceabilityCheck {
       Row row, boolean due, Path repoRoot, Reports reports, List<String> problems, Mode mode) {
     boolean counted = false;
     for (Evidence e : row.evidence()) {
-      if (e.kind().equals("NONE")
-          || (mode == Mode.SKIP && isRealStore(e))
-          || (mode == Mode.ONLY && !isRealStore(e))) {
+      if (e.kind().equals("NONE") || !evaluated(mode, e)) {
         continue;
       }
       String where = row.id() + ":" + e.ref();
@@ -305,8 +351,7 @@ public final class TraceabilityCheck {
         }
         case OWNERLESS, PASS -> {}
       }
-      boolean interim = REAL_STORE_ONLY.contains(row.id()) && !isRealStore(e);
-      if (status == Status.PASS && !interim) {
+      if (status == Status.PASS && countsFor(row.id(), e)) {
         counted = true;
       }
     }
