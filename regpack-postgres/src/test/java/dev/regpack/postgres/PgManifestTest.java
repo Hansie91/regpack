@@ -194,6 +194,38 @@ class PgManifestTest {
     assertThat("a".compareTo("ab")).isNegative();
   }
 
+  /**
+   * The range from the prefix up to the prefix and U+007F holds exactly the keys with the prefix
+   * only while every character an {@link EvidenceKey} can hold is below U+007F. If the alphabet of
+   * the key grows to a character at or above the bound, {@code PgManifest.RANGE_END} must grow with
+   * it (and the order of the {@code "C"} collation, which is by byte, must be rechecked for that
+   * character).
+   */
+  @Test
+  void everyCharacterOfAnEvidenceKeyIsBelowTheRangeEnd() {
+    char rangeEnd = PgManifest.upperBound("").charAt(0);
+    int accepted = 0;
+    char largest = 0;
+    for (int unit = 0; unit <= 0xFFFF; unit++) {
+      char c = (char) unit;
+      try {
+        new EvidenceKey("a" + c);
+      } catch (IllegalArgumentException refused) {
+        continue;
+      }
+      accepted++;
+      largest = (char) Math.max(largest, c);
+      assertThat((int) c)
+          .as(
+              "EvidenceKey accepts U+%04X, which is not below the range end U+%04X of PgManifest",
+              unit, (int) rangeEnd)
+          .isLessThan(rangeEnd);
+    }
+    // the loop saw the alphabet: letters, digits and the punctuation, the largest being z
+    assertThat(accepted).isGreaterThan(60);
+    assertThat(largest).isEqualTo((char) 0x7A);
+  }
+
   @Test
   void thePrefixTheUpperBoundAndTheAfterKeyAreBoundInThatOrder() {
     List<ManifestRow> none = manifest().manifestRows("sealed/ab/", Optional.empty(), 10);
@@ -473,11 +505,33 @@ class PgManifestTest {
     // the placeholder of T10 threw IllegalStateException("not built until T12")
     PgLedgerStore store = new PgLedgerStore(spy.over(null), clock, config);
 
+    // an empty list opens no connection: the call is the no-op of the port
     store.recordObjects(List.of(), Provenance.WRITTEN, Optional.empty());
+    assertThat(spy.events()).isEmpty();
     assertThat(store.manifestRow(new EvidenceKey("sealed/ab/one"))).isEmpty();
     assertThat(store.manifestRows("sealed/", Optional.empty(), 5)).isEmpty();
     assertThat(executed()).anyMatch(sql -> sql.equals(PgManifest.ROW_SQL));
     assertThat(executed()).anyMatch(sql -> sql.equals(PgManifest.ROWS_SQL));
+  }
+
+  @Test
+  void theStoreRecordsAnEntryThroughThisAdapterInOneCommittedUnit() {
+    ObjectEntry entry = objectEntry("sealed/ab/stored", ObjectClass.SEALED_FILE, "bytes", 3);
+    SqlSpy answering = new SqlSpy().answering(storedHashesOf(entry));
+    PgLedgerStore store = new PgLedgerStore(answering.over(null), clock, config);
+
+    store.recordObjects(List.of(entry), Provenance.WRITTEN, Optional.of(new AttemptId(5)));
+
+    // a store whose recordObjects does nothing, or does not delegate, sends neither statement
+    List<String> sent =
+        answering.events().stream()
+            .filter(e -> e.startsWith("execute: ") && e.contains("object_manifest"))
+            .map(e -> e.substring("execute: ".length()))
+            .toList();
+    assertThat(sent).containsExactly(PgManifest.RECORD_SQL, PgManifest.STORED_SQL);
+    assertThat(answering.events()).contains("bind 1=" + entry.key().path(), "commit");
+    assertThat(answering.events()).doesNotContain("rollback");
+    assertThat(answering.openConnections()).isZero();
   }
 
   // ---------------------------------------------------------------------------------------------

@@ -190,6 +190,7 @@ class ContractSuiteTeethTest {
         ManifestOverwritesOnConflictLedgerContractTest.class,
         Set.of(
             "recordingTheSameKeyWithAnotherHashIsAConflictAndStoresNothingOfTheCall",
+            "concurrentRecordsOfOneKeyWithDifferentHashesLeaveOneRowAndOneConflict",
             "aConflictingObjectRollsTheSendingTransitionBack"));
     expected.put(
         ManifestRecordedOnFailedBeginLedgerContractTest.class,

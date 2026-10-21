@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
@@ -25,7 +26,8 @@ import org.junit.jupiter.api.Test;
 /**
  * Checks that the schema mutants of T20 are what the plan's table says, without a server: a typo in
  * a constraint name or in a test name would make {@link PgSchemaTeethIT} fail (or, worse, pass
- * vacuously) only at CP-3. The real-store behaviour of the mutants is proven by that class.
+ * vacuously) only on a server: the six mutants of P3a first ran at P3a CP-3, the seventh (T12)
+ * first runs at P3b1 CP-1. The real-store behaviour of the mutants is proven by that class.
  */
 class SchemaMutantsTest {
   private static final Set<String> PLANNED_OBJECTS =
@@ -48,6 +50,71 @@ class SchemaMutantsTest {
     for (Entry entry : SchemaMutants.all()) {
       assertThat(entry.caughtBy()).as(entry.type().getSimpleName()).isNotEmpty();
     }
+  }
+
+  /**
+   * The seventh mutant is caught by a failure that says what it proves: the insert names the
+   * constraint as its arbiter, so without it the server answers 42704 and the adapter writes {@code
+   * sqlstate=42704}. A run in which the same test fails for another reason (a typo in the insert, a
+   * wrong parameter type) is a miss. The six mutants of P3a expect any failure.
+   */
+  @Test
+  void theSeventhMutantExpectsTheMissingArbiterAndTheSixOfP3aAnyFailure() {
+    Entry manifest =
+        SchemaMutants.all().stream()
+            .filter(e -> e.mutation().name().equals("object_manifest_pk"))
+            .findFirst()
+            .orElseThrow();
+    assertThat(manifest.expectedFailure()).isEqualTo("sqlstate=42704");
+    assertThat(manifest.expectedFailure()).isEqualTo(SchemaMutants.MISSING_ARBITER);
+    for (Entry entry : SchemaMutants.all()) {
+      if (!entry.mutation().name().equals("object_manifest_pk")) {
+        assertThat(entry.expectedFailure()).as(entry.type().getSimpleName()).isEmpty();
+      }
+    }
+  }
+
+  @Test
+  void aMutantIsCaughtOnlyByTheNamedTestsFailingWithTheExpectedText() {
+    Entry manifest =
+        SchemaMutants.all().stream()
+            .filter(e -> e.mutation().name().equals("object_manifest_pk"))
+            .findFirst()
+            .orElseThrow();
+    String test = manifest.caughtBy().iterator().next();
+    String arbiter =
+        "dev.regpack.ports.ledger.LedgerException: ledger statement failed: sqlstate=42704"
+            + " constraint=none";
+    String typo =
+        "dev.regpack.ports.ledger.LedgerException: ledger statement failed: sqlstate=42703"
+            + " constraint=none";
+
+    assertThat(SchemaMutants.misses(manifest, new MutantRunner.Outcome(1, Map.of(test, arbiter))))
+        .isEmpty();
+    // the cause chain is part of the text
+    assertThat(
+            SchemaMutants.misses(
+                manifest, new MutantRunner.Outcome(1, Map.of(test, "x: y\n" + arbiter))))
+        .isEmpty();
+    // a failure for another reason is no catch, and the miss quotes the text
+    assertThat(SchemaMutants.misses(manifest, new MutantRunner.Outcome(1, Map.of(test, typo))))
+        .singleElement()
+        .asString()
+        .contains(test)
+        .contains("sqlstate=42704")
+        .contains("sqlstate=42703");
+    // the test did not fail at all, or the launcher did not find it
+    assertThat(SchemaMutants.misses(manifest, new MutantRunner.Outcome(1, Map.of())))
+        .singleElement()
+        .asString()
+        .contains("was not caught by " + test);
+    assertThat(SchemaMutants.misses(manifest, new MutantRunner.Outcome(0, Map.of()))).hasSize(2);
+
+    // an entry without an expected text takes any failure
+    Entry any = new Entry(manifest.type(), manifest.mutation(), manifest.caughtBy());
+    assertThat(any.expectedFailure()).isEmpty();
+    assertThat(SchemaMutants.misses(any, new MutantRunner.Outcome(1, Map.of(test, typo))))
+        .isEmpty();
   }
 
   @Test

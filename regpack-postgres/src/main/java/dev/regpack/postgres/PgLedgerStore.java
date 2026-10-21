@@ -26,10 +26,11 @@ import javax.sql.DataSource;
  *
  * <p>Built in tasks: T15 ingest, outbox and context reads; T16 decisions and partitions; T17 leases
  * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work); P3b1
- * T12 the object manifest. No method is left unbuilt ({@code NoStubsLeftTest}); the durability
- * query of {@link dev.regpack.ports.ledger.LedgerDurability} is built in T17 of P3b1. The integrity
- * queries of T19 are not part of the {@link LedgerStore} port: {@link LedgerIntegrity} reads the
- * same schema through a {@link DataSource} and the schema name of the {@link Config}.
+ * T12 the object manifest. No method is left unbuilt except the durability query of {@link
+ * dev.regpack.ports.ledger.LedgerDurability}, which T17 of P3b1 builds ({@code NoStubsLeftTest}
+ * guards the other methods). The integrity queries of T19 are not part of the {@link LedgerStore}
+ * port: {@link LedgerIntegrity} reads the same schema through a {@link DataSource} and the schema
+ * name of the {@link Config}.
  */
 public final class PgLedgerStore implements LedgerStore {
   /**

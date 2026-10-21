@@ -37,6 +37,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -1172,14 +1173,18 @@ public final class InMemoryLedgerStore implements LedgerStore {
     int max = Math.min(limit, MAX_ROWS_PER_CALL);
     List<ManifestRow> rows = new ArrayList<>();
     synchronized (lock) {
-      for (ManifestRow row : manifest.tailMap(prefix, true).values()) {
-        String path = row.entry().key().path();
-        if (rows.size() >= max || !path.startsWith(prefix)) {
+      // start at the larger of the prefix and the key after which to list, so that a page costs
+      // its own size and not the number of keys before it; the keys of a prefix are contiguous
+      boolean afterPrefix = after.isPresent() && after.get().path().compareTo(prefix) >= 0;
+      NavigableMap<String, ManifestRow> candidates =
+          afterPrefix
+              ? manifest.tailMap(after.get().path(), false)
+              : manifest.tailMap(prefix, true);
+      for (ManifestRow row : candidates.values()) {
+        if (rows.size() >= max || !row.entry().key().path().startsWith(prefix)) {
           break;
         }
-        if (after.isEmpty() || path.compareTo(after.get().path()) > 0) {
-          rows.add(row);
-        }
+        rows.add(row);
       }
     }
     return List.copyOf(rows);

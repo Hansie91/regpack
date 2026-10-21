@@ -16,6 +16,23 @@ public interface LedgerDurabilityContract {
   /** A fresh ledger for each test. */
   LedgerStore ledger();
 
+  /**
+   * The rule about the shape of a status that the contract checks: a status that is synchronous
+   * names at least one standby. It is a method of its own so that a test can show that it bites
+   * (the in-memory ledger is never synchronous in the contract run; its own test sets a synchronous
+   * status and applies this check to it).
+   *
+   * @throws AssertionError when the status breaks the rule
+   */
+  static void requireASynchronousStatusToNameAStandby(Status status) {
+    assertThat(status).isNotNull();
+    if (status.synchronous()) {
+      assertThat(status.synchronousStandbys())
+          .as("a synchronous status names at least one standby")
+          .isGreaterThanOrEqualTo(1);
+    }
+  }
+
   @Test
   default void durabilityReturnsAStatusWithANonBlankDetail() {
     Status status = ledger().durability();
@@ -26,9 +43,6 @@ public interface LedgerDurabilityContract {
 
   @Test
   default void aSynchronousStatusNamesAtLeastOneStandby() {
-    Status status = ledger().durability();
-    if (status.synchronous()) {
-      assertThat(status.synchronousStandbys()).isGreaterThanOrEqualTo(1);
-    }
+    requireASynchronousStatusToNameAStandby(ledger().durability());
   }
 }

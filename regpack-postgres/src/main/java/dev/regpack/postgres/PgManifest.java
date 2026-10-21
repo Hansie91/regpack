@@ -181,6 +181,28 @@ final class PgManifest {
    * list must be distinct: {@link #recordObjects} checks it, an {@code AttemptIntent} guarantees
    * it.
    *
+   * <p>Three conditions on the caller, on which the correctness of this method and EF21 depend:
+   *
+   * <ol>
+   *   <li><b>Last, in a short unit.</b> Every inserted key is locked until the unit ends, and a
+   *       concurrent unit that records the same key waits for that lock for up to {@code
+   *       lock_timeout} and then fails with {@code 55P03}. So the call comes after the attempt row
+   *       and every other write of the unit (the manifest rows come last, EF21) and nothing slow (a
+   *       file write, a call to another system) follows it. In the lock order of {@link PgLeases}
+   *       the manifest keys come after the delivery rows: a unit that takes keys first and delivery
+   *       rows later can form a cycle with {@code beginSending}, which holds the delivery row and
+   *       waits for the key (one side then gets {@code 40P01}).
+   *   <li><b>READ COMMITTED.</b> The read-back after the insert must be a new snapshot, so that it
+   *       sees a row that a concurrent unit committed while this one waited for its key. {@link
+   *       Unit#begin} sets that level; a connection opened without it, on REPEATABLE READ or
+   *       stricter, cannot see the row, and the call fails with a {@link LedgerException} ("has no
+   *       manifest row after its insert") instead of recognising the conflict.
+   *   <li><b>Sorted inside, not outside.</b> This method inserts in key order whatever the order of
+   *       {@code entries}, so that two units with overlapping sets of keys cannot wait for each
+   *       other in a circle; a caller does not sort and must not split one set of keys over several
+   *       calls of one unit.
+   * </ol>
+   *
    * @param writtenAt the ledger time of a new row; one value for the whole call
    * @throws ManifestConflictException when a key is stored with another hash; the caller must roll
    *     its transaction back, which removes the rows that this call inserted before it found out

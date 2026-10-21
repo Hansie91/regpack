@@ -184,7 +184,10 @@ class SchemaDocMatchesMigrationsTest {
       document.forEach(entry -> allNames.add(entry.name()));
     }
     assertThat(allNames).as("a name is used by one script only").doesNotHaveDuplicates();
-    assertThat(SchemaDocument.allConstraintEntries()).hasSize(allNames.size());
+    // the union that MigratorIT reads: the documents in script order, each in its own order
+    assertThat(SchemaDocument.allConstraintEntries())
+        .extracting(Entry::name)
+        .containsExactlyElementsOf(allNames);
   }
 
   @Test
@@ -283,6 +286,27 @@ class SchemaDocMatchesMigrationsTest {
           .as("Pins created in %s", approval.decisions())
           .containsKey(approval.documentPin());
       assertThat(pins.get(approval.documentPin())).isEqualTo(recorded);
+    }
+  }
+
+  /**
+   * Every script of the catalogue has a pin in the record of its own document (the map {@code
+   * APPROVALS} names it), equal to its checksum: a new script cannot be added without its pin,
+   * whatever per-version method exists or does not.
+   */
+  @Test
+  void everyScriptOfTheCatalogueHasAPinEqualToItsChecksum() {
+    assertThat(scripts()).isNotEmpty();
+    for (ScriptCatalogue.Script script : scripts()) {
+      Approval approval = APPROVALS.get(script.name());
+      assertThat(approval).as("approval of %s", script.name()).isNotNull();
+      Map<String, String> pins = SchemaDocument.pins(approval.decisions());
+      assertThat(pins)
+          .as("Pins created in %s has a line for %s", approval.decisions(), script.name())
+          .containsKey(script.name());
+      assertThat(script.sha256())
+          .as("an applied script is never edited; a change is a new script: %s", script.name())
+          .isEqualTo(pins.get(script.name()));
     }
   }
 

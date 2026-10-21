@@ -25,6 +25,11 @@ class MutantRunnerTest {
     }
 
     @Test
+    default void failsByCause() {
+      throw new IllegalStateException("outer", new IllegalArgumentException("inner"));
+    }
+
+    @Test
     default void failsByException() {
       throw new IllegalStateException("this test fails by design");
     }
@@ -48,6 +53,22 @@ class MutantRunnerTest {
 
     assertThat(outcome.found()).isEqualTo(1);
     assertThat(outcome.failed()).containsExactly("failsByException");
+  }
+
+  @Test
+  void theFailureTextCarriesTheClassAndMessageOfTheExceptionAndOfItsCauses() {
+    MutantRunner.Outcome outcome = MutantRunner.run(Binding.class, Set.of("failsByCause"));
+
+    assertThat(outcome.failures()).containsOnlyKeys("failsByCause");
+    assertThat(outcome.failures().get("failsByCause").split("\n"))
+        .containsExactly(
+            "java.lang.IllegalStateException: outer", "java.lang.IllegalArgumentException: inner");
+    // a test that fails by assertion carries the assertion text
+    assertThat(MutantRunner.run(Binding.class, Set.of("failsByAssertion")).failures())
+        .containsOnlyKeys("failsByAssertion")
+        .extractingByKey("failsByAssertion")
+        .asString()
+        .contains("this test fails by design");
   }
 
   @Test

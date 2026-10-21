@@ -115,6 +115,84 @@ class MigratorIT {
             MigrationException.class, e -> assertThat(e.kind()).isEqualTo(Kind.DRIFT));
   }
 
+  /** The second script is covered by the checksum too, and the refusal names it. */
+  @Test
+  void refusesAChangedSecondScript() throws SQLException {
+    Migrator.migrate(dataSource, schema);
+    ScriptCatalogue.Script second = ScriptCatalogue.fromClasspath().find(2).orElseThrow();
+    update(
+        "UPDATE " + table("schema_migration") + " SET sha256 = '" + ZEROS + "' WHERE version = 2");
+    assertThatThrownBy(() -> Migrator.migrate(dataSource, schema))
+        .isInstanceOfSatisfying(
+            MigrationException.class,
+            e -> {
+              assertThat(e.kind()).isEqualTo(Kind.DRIFT);
+              assertThat(e.version()).isEqualTo(2);
+              assertThat(e.script()).isEqualTo(second.name());
+            });
+    // with the checksum put back the database is accepted again
+    update(
+        "UPDATE "
+            + table("schema_migration")
+            + " SET sha256 = '"
+            + second.sha256()
+            + "' WHERE version = 2");
+    assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
+  }
+
+  /**
+   * The production starting point of a database that the P3a build migrated: only V001 is stored.
+   * The first start of the next build applies V002 alone, leaves the rows of V001 and the data as
+   * they are, and is then idempotent.
+   */
+  @Test
+  void anUpgradeFromAV001OnlyDatabaseAppliesOnlyV002() throws SQLException {
+    ScriptCatalogue full = ScriptCatalogue.fromClasspath();
+    ScriptCatalogue.Script v001 = full.scripts().get(0);
+    assertThat(v001.name()).isEqualTo("V001__core.sql");
+    Migrator.Report p3a = Migrator.migrate(dataSource, schema, ScriptCatalogue.of(List.of(v001)));
+    assertThat(p3a.applied()).containsExactly(1);
+    assertThat(p3a.currentVersion()).isEqualTo(1);
+    assertThat(column("SELECT to_regclass(?)::text", schema + ".object_manifest"))
+        .as("the P3a database has no manifest")
+        .containsExactly((String) null);
+    update("INSERT INTO " + table("regime") + " (regime) VALUES ('survivor')");
+    String appliedAtOfV001 =
+        column("SELECT applied_at::text FROM " + table("schema_migration") + " WHERE version = 1")
+            .get(0);
+
+    Migrator.Report upgrade = Migrator.migrate(dataSource, schema);
+
+    assertThat(upgrade.applied())
+        .as("only the scripts after V001 are applied")
+        .containsExactlyElementsOf(
+            full.scripts().stream().skip(1).map(ScriptCatalogue.Script::version).toList());
+    assertThat(upgrade.applied()).startsWith(2);
+    assertThat(upgrade.currentVersion()).isEqualTo(full.latestVersion());
+    assertThat(
+            column(
+                "SELECT version::text || ' ' || name || ' ' || sha256 FROM "
+                    + table("schema_migration")
+                    + " ORDER BY version"))
+        .isEqualTo(
+            full.scripts().stream()
+                .map(s -> s.version() + " " + s.name() + " " + s.sha256())
+                .toList());
+    assertThat(
+            column(
+                "SELECT applied_at::text FROM " + table("schema_migration") + " WHERE version = 1"))
+        .as("the row of V001 is left alone")
+        .containsExactly(appliedAtOfV001);
+    assertThat(column("SELECT regime FROM " + table("regime")))
+        .as("the data of the P3a database survives")
+        .containsExactly("survivor");
+    assertThat(column("SELECT to_regclass(?)::text", schema + ".object_manifest"))
+        .as("the manifest exists after the upgrade")
+        .doesNotContainNull()
+        .hasSize(1);
+    assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
+  }
+
   @Test
   void refusesADatabaseNewerThanTheCode() throws SQLException {
     Migrator.migrate(dataSource, schema);
@@ -135,11 +213,24 @@ class MigratorIT {
   @Test
   void refusesAGapInTheStoredVersions() throws SQLException {
     Migrator.migrate(dataSource, schema);
-    // stored versions {3} instead of {1}: the history does not start at 1
+    // stored versions {2,3} instead of {1,2}: the history does not start at 1
     update("UPDATE " + table("schema_migration") + " SET version = 3 WHERE version = 1");
     assertThatThrownBy(() -> Migrator.migrate(dataSource, schema))
         .isInstanceOfSatisfying(
-            MigrationException.class, e -> assertThat(e.kind()).isEqualTo(Kind.GAP));
+            MigrationException.class,
+            e -> {
+              assertThat(e.kind()).isEqualTo(Kind.GAP);
+              assertThat(e.version()).as("the first version that is missing").isEqualTo(1);
+            });
+    // a hole in the middle: stored versions {1,3} instead of {1,2}
+    update("UPDATE " + table("schema_migration") + " SET version = 1 WHERE version = 2");
+    assertThatThrownBy(() -> Migrator.migrate(dataSource, schema))
+        .isInstanceOfSatisfying(
+            MigrationException.class,
+            e -> {
+              assertThat(e.kind()).isEqualTo(Kind.GAP);
+              assertThat(e.version()).as("the first version that is missing").isEqualTo(2);
+            });
   }
 
   @Test

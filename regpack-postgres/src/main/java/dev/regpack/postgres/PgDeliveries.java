@@ -280,6 +280,16 @@ final class PgDeliveries {
 
   /**
    * {@link #beginSending(DeliveryId, AttemptId, LeaseToken, AttemptIntent)} in the caller's unit.
+   *
+   * <p>The caller must roll its transaction back when this method throws, in particular on a {@link
+   * dev.regpack.ports.ledger.ManifestConflictException}: the conflict is found in Java after the
+   * state change, the attempt row and the manifest rows of the other keys were written, and no SQL
+   * error has aborted the transaction, so a caller that caught the exception and committed would
+   * keep the {@code SENDING} state, the attempt row and those rows. Today the only caller outside
+   * the tests is the port variant above, which runs in {@link Unit#inUnit}: that rolls back on any
+   * exception and passes it on (and the tests that call this method use an intent without objects).
+   * A later unit that composes this method with other writes and wants to survive the conflict must
+   * take a savepoint before it and roll back to it.
    */
   SendingResult beginSending(
       Connection connection,

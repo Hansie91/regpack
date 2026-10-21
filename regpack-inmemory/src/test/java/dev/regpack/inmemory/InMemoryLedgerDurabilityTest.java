@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.ports.ledger.LedgerDurability.Status;
 import dev.regpack.testkit.clock.ManualClock;
+import dev.regpack.testkit.contract.LedgerDurabilityContract;
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
@@ -27,5 +28,30 @@ class InMemoryLedgerDurabilityTest {
     assertThat(ledger.durability()).isEqualTo(synchronous);
     assertThatThrownBy(() -> ledger.setDurability(null)).isInstanceOf(NullPointerException.class);
     assertThat(ledger.durability()).isEqualTo(synchronous);
+  }
+
+  /**
+   * The contract method that the ledger can only pass vacuously (it is never synchronous in the
+   * contract run) bites here: the rule it applies accepts a synchronous status with standbys and
+   * refuses one without.
+   */
+  @Test
+  void theRuleOfTheContractAcceptsASynchronousStatusWithStandbysAndRefusesOneWithout() {
+    InMemoryLedgerStore ledger = ledger();
+    ledger.setDurability(new Status(true, 2, "x"));
+    LedgerDurabilityContract.requireASynchronousStatusToNameAStandby(ledger.durability());
+    ledger.setDurability(new Status(true, 1, "x"));
+    LedgerDurabilityContract.requireASynchronousStatusToNameAStandby(ledger.durability());
+    // not synchronous: the number of standbys is not asked
+    ledger.setDurability(new Status(false, 0, "x"));
+    LedgerDurabilityContract.requireASynchronousStatusToNameAStandby(ledger.durability());
+
+    // a status that claims to be synchronous and names no standby
+    ledger.setDurability(new Status(true, 0, "claims it"));
+    assertThatThrownBy(
+            () ->
+                LedgerDurabilityContract.requireASynchronousStatusToNameAStandby(
+                    ledger.durability()))
+        .isInstanceOf(AssertionError.class);
   }
 }
