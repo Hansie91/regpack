@@ -589,6 +589,11 @@ class PackagingFilesTest {
           .doesNotContain("--publish")
           .doesNotContain("--privileged");
     }
+    // the base backup asks for a fast checkpoint (RUNNER-2): the default one is spread and
+    // unbounded
+    assertThat(runs.stream().filter(l -> l.contains(" pg_basebackup ")))
+        .hasSize(1)
+        .allMatch(l -> l.contains(" -R -X stream -c fast -C -S standby1_slot "));
     assertThat(runs.stream().filter(l -> l.startsWith("docker run -d ")))
         .hasSize(2)
         .allMatch(l -> l.contains(" -c listen_addresses=127.0.0.1 "));
@@ -629,6 +634,15 @@ class PackagingFilesTest {
     assertThat(job.stream().filter(l -> l.equals("        timeout-minutes: 10"))).hasSize(3);
     assertThat(job).contains("        run: bash scripts/ci/pg-quorum-up.sh");
     assertThat(job).contains("        run: docker stop regpack-standby");
+    // a red Up phase must not skip the Down phase: both its steps run unless the run is cancelled
+    assertThat(job.get(stop + 1)).isEqualTo("        if: ${{ !cancelled() }}");
+    assertThat(job.get(downTests + 1)).isEqualTo("        if: ${{ !cancelled() }}");
+    assertThat(job.stream().filter(l -> l.equals("        if: ${{ !cancelled() }}"))).hasSize(2);
+    // the install step skips the integration tests of failsafe, which -DskipTests does not
+    assertThat(job)
+        .contains(
+            "      - run: ./mvnw -DskipTests -DskipITs -Dspotless.check.skip=true install -pl"
+                + " regpack-postgres -am");
 
     // the reports are kept under a name of their own, and the distribution upload stays unique
     assertThat(job).contains("          name: ledger-durability-reports");
@@ -640,6 +654,40 @@ class PackagingFilesTest {
         .contains(
             "-v \"$PWD/scripts/ci/pg-init-replication.sh:"
                 + "/docker-entrypoint-initdb.d/10-replication.sh:ro\"");
+  }
+
+  /**
+   * MAVEN-3: the traceability step of the durability job is the net under a selection that runs
+   * nothing (a class without its tag, a disabled method). So every test method of the two classes
+   * it runs is a REALSTANDBY line of row I1: a method that is skipped or missing from the reports
+   * turns that step red, not only the four methods that once carried the evidence.
+   */
+  @Test
+  void everyDurabilityTestMethodIsARealStandbyLineOfRowI1() throws IOException {
+    java.util.Set<String> lines = new java.util.TreeSet<>();
+    for (String line : asciiLfText(repoRoot().resolve("docs/traceability.md")).split("\n", -1)) {
+      String[] cells = line.split("\\|", -1);
+      if (cells.length > 6
+          && cells[1].strip().equals("I1")
+          && cells[5].strip().equals("REALSTANDBY")) {
+        lines.add(cells[4].strip());
+      }
+    }
+    java.util.Set<String> methods = new java.util.TreeSet<>();
+    for (String clazz : List.of("PgDurabilityUpIT", "PgDurabilityDownIT")) {
+      String source =
+          asciiLfText(
+              repoRoot()
+                  .resolve(
+                      "regpack-postgres/src/test/java/dev/regpack/postgres/" + clazz + ".java"));
+      java.util.regex.Matcher method =
+          java.util.regex.Pattern.compile("(?m)^  @Test\\n  void (\\w+)\\(").matcher(source);
+      while (method.find()) {
+        methods.add("dev.regpack.postgres." + clazz + "#" + method.group(1));
+      }
+    }
+    assertThat(methods).as("the test methods of the two classes").hasSize(8);
+    assertThat(lines).as("the REALSTANDBY lines of row I1").isEqualTo(methods);
   }
 
   /**
@@ -781,6 +829,8 @@ class PackagingFilesTest {
     String upload = CiDurabilityJob.text(CiDurabilityJob.UPLOAD);
     String always = "        if: always()\n";
     String failure = "        if: failure()\n";
+    String notCancelled = "        if: ${{ !cancelled() }}\n";
+    String notApprovedFor = "has a condition that is not approved for it";
     String tolerated = "a failure may be tolerated";
     String skipped = "may be skipped";
     String swallowed = "a failure is swallowed";
@@ -837,6 +887,47 @@ class PackagingFilesTest {
     c.yaml(
         "diagnostics on every outcome", diagnostics, diagnostics.replace(failure, always), notRun);
 
+    // the Down phase runs after a red Up phase (ITS-3), and only the cancelled run skips it
+    c.yaml("stop without its condition", stop, stop.replace(notCancelled, ""), notRun);
+    c.yaml(
+        "down tests without their condition",
+        downTests,
+        downTests.replace(notCancelled, ""),
+        notRun);
+    c.yaml(
+        "stop on success only",
+        stop,
+        stop.replace(notCancelled, "        if: ${{ success() }}\n"),
+        skipped);
+    c.yaml(
+        "down tests on a false condition",
+        downTests,
+        downTests.replace(notCancelled, "        if: ${{ false }}\n"),
+        skipped);
+    c.yaml("stop with if always", stop, stop.replace(notCancelled, always), notApprovedFor);
+    c.yaml(
+        "down tests with if failure", downTests, downTests.replace(notCancelled, failure), notRun);
+    c.yaml(
+        "down tests with if failure (the condition is named)",
+        downTests,
+        downTests.replace(notCancelled, failure),
+        notApprovedFor);
+    c.yaml(
+        "a not-cancelled condition on the up tests",
+        "tests with the standby up\n",
+        "tests with the standby up\n" + notCancelled,
+        notApprovedFor);
+    c.yaml(
+        "a not-cancelled condition instead of always on the traceability",
+        traceability,
+        traceability.replace(always, notCancelled),
+        notRun);
+    c.yaml(
+        "a not-cancelled condition on the cleanup",
+        cleanup,
+        cleanup.replace(always, notCancelled),
+        notApprovedFor);
+
     // a missing or doubled step is named
     c.yaml("no diagnostics step", diagnostics, "", notFound + " 'Container diagnostics', found 0");
     c.yaml("no stop step", stop, "", notFound + " 'Stop the standby', found 0");
@@ -860,6 +951,31 @@ class PackagingFilesTest {
         "",
         notFound + " 'Start the primary and the quorum standby', found 0");
     c.yaml("no install step", install, "", notFound);
+    c.yaml(
+        "an install that leaves the failsafe tests on (MAVEN-1)",
+        " -DskipITs -Dspotless",
+        " -Dspotless",
+        notFound + " '");
+    c.yaml(
+        "a diagnostics tail of 30 lines",
+        "docker logs --tail 60",
+        "docker logs --tail 30",
+        "the step 'Container diagnostics' " + "is not the approved text");
+    c.yaml(
+        "diagnostics without the activity of the primary",
+        "pg_stat_activity WHERE pid <> pg_backend_pid()",
+        "pg_stat_replication",
+        "the step 'Container diagnostics' " + "is not the approved text");
+    c.yaml(
+        "diagnostics without the quorum setting",
+        "\"SHOW synchronous_standby_names\"",
+        "\"SHOW server_version\"",
+        "the step 'Container diagnostics' " + "is not the approved text");
+    c.yaml(
+        "diagnostics that exec into the standby",
+        "docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc \"SHOW",
+        "docker exec regpack-standby psql -h 127.0.0.1 -p 5433 -U postgres -Atc \"SHOW",
+        "the step 'Container diagnostics' is not the approved text");
     c.yaml("no report upload", upload, "", notFound + " 'Upload durability test reports', found 0");
     c.yaml("a second up tests step", upTests, upTests + upTests, "found 2");
     c.yaml(
@@ -1098,6 +1214,11 @@ class PackagingFilesTest {
         "/usr/bin/docker pull \"$IMAGE\"",
         "a docker binary named by its path in the script");
     c.shell("no pull", pull + "\n", "", "the script has no pull of the pinned image");
+    c.shell(
+        "a base backup with the spread checkpoint of the default",
+        " -X stream -c fast ",
+        " -X stream ",
+        "the base backup does not ask for a fast checkpoint");
 
     // the script: sudo
     c.shell("a stray sudo", sudoDirs, sudoDirs + "\nsudo chmod -R 777 /mnt/regpack-pg", sudoStray);

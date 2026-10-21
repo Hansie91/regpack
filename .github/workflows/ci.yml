@@ -345,7 +345,7 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
-      - run: ./mvnw -DskipTests -Dspotless.check.skip=true install -pl regpack-postgres -am
+      - run: ./mvnw -DskipTests -DskipITs -Dspotless.check.skip=true install -pl regpack-postgres -am
       - name: Start the primary and the quorum standby
         timeout-minutes: 10
         shell: bash
@@ -354,9 +354,11 @@ jobs:
         timeout-minutes: 10
         run: ./mvnw verify -pl regpack-postgres -Dspotless.check.skip=true -Dgroups=durability -DexcludedGroups=none -Dit.test=PgDurabilityUpIT -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
       - name: Stop the standby
+        if: ${{ !cancelled() }}
         shell: bash
         run: docker stop regpack-standby
       - name: Durability tests with the standby down
+        if: ${{ !cancelled() }}
         timeout-minutes: 10
         run: ./mvnw verify -pl regpack-postgres -Dspotless.check.skip=true -Dgroups=durability -DexcludedGroups=none -Dit.test=PgDurabilityDownIT -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
       - name: Standby traceability
@@ -372,10 +374,12 @@ jobs:
         shell: bash
         run: |
           for c in regpack-primary regpack-standby; do
-            msg=$(docker logs --tail 30 "$c" 2>&1 | sed 's/%/%25/g' | paste -sd '|' -)
+            msg=$(docker logs --tail 60 "$c" 2>&1 | sed 's/%/%25/g' | paste -sd '|' -)
             echo "::notice title=$c::$msg"
           done
           docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc "SELECT application_name, state, sync_state FROM pg_stat_replication" | sed 's/%/%25/g; s/^/::notice title=pg_stat_replication::/'
+          docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc "SELECT pid, state, wait_event_type, wait_event, left(query, 60) FROM pg_stat_activity WHERE pid <> pg_backend_pid()" | sed 's/%/%25/g; s/^/::notice title=pg_stat_activity::/'
+          docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc "SHOW synchronous_standby_names" | sed 's/%/%25/g; s/^/::notice title=synchronous_standby_names::/'
       - name: Remove the containers
         if: always()
         shell: bash

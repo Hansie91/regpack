@@ -35,6 +35,7 @@ final class CiDurabilityJob {
 
   static final String ALWAYS = "        if: always()";
   static final String FAILURE = "        if: failure()";
+  static final String NOT_CANCELLED = "        if: ${{ !cancelled() }}";
   static final String NOT_APPROVED = "is not the approved text";
 
   private static final String PG_URL =
@@ -73,8 +74,8 @@ final class CiDurabilityJob {
 
   static final List<String> INSTALL =
       List.of(
-          "      - run: ./mvnw -DskipTests -Dspotless.check.skip=true install -pl regpack-postgres"
-              + " -am");
+          "      - run: ./mvnw -DskipTests -DskipITs -Dspotless.check.skip=true install -pl"
+              + " regpack-postgres -am");
 
   static final List<String> UP =
       List.of(
@@ -94,15 +95,19 @@ final class CiDurabilityJob {
           "        timeout-minutes: 10",
           TESTS.formatted("PgDurabilityUpIT"));
 
+  // the two steps of the Down phase run after a red Up phase too: it holds the discriminating
+  // evidence (ITS-3); only a cancelled run skips them
   static final List<String> STOP =
       List.of(
           "      - name: Stop the standby",
+          NOT_CANCELLED,
           "        shell: bash",
           "        run: docker stop regpack-standby");
 
   static final List<String> DOWN_TESTS =
       List.of(
           "      - name: Durability tests with the standby down",
+          NOT_CANCELLED,
           "        timeout-minutes: 10",
           TESTS.formatted("PgDurabilityDownIT"));
 
@@ -130,12 +135,19 @@ final class CiDurabilityJob {
           "        shell: bash",
           "        run: |",
           "          for c in regpack-primary regpack-standby; do",
-          "            msg=$(docker logs --tail 30 \"$c\" 2>&1 | sed 's/%/%25/g' | paste -sd '|' -)",
+          "            msg=$(docker logs --tail 60 \"$c\" 2>&1 | sed 's/%/%25/g' | paste -sd '|' -)",
           "            echo \"::notice title=$c::$msg\"",
           "          done",
           "          docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc"
               + " \"SELECT application_name, state, sync_state FROM pg_stat_replication\""
-              + " | sed 's/%/%25/g; s/^/::notice title=pg_stat_replication::/'");
+              + " | sed 's/%/%25/g; s/^/::notice title=pg_stat_replication::/'",
+          "          docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc"
+              + " \"SELECT pid, state, wait_event_type, wait_event, left(query, 60) FROM"
+              + " pg_stat_activity WHERE pid <> pg_backend_pid()\""
+              + " | sed 's/%/%25/g; s/^/::notice title=pg_stat_activity::/'",
+          "          docker exec regpack-primary psql -h 127.0.0.1 -p 5432 -U postgres -Atc"
+              + " \"SHOW synchronous_standby_names\""
+              + " | sed 's/%/%25/g; s/^/::notice title=synchronous_standby_names::/'");
 
   static final List<String> CLEANUP =
       List.of(
@@ -202,7 +214,7 @@ final class CiDurabilityJob {
   private static final Set<String> RUN_VALUE_OPTIONS =
       Set.of("--name", "--network", "--shm-size", "-e", "-v", "--user");
   private static final Set<String> INSTALL_PROPERTIES =
-      Set.of("-DskipTests", "-Dspotless.check.skip=true");
+      Set.of("-DskipTests", "-DskipITs", "-Dspotless.check.skip=true");
   private static final Set<String> VERIFY_PROPERTIES =
       Set.of(
           "-Dspotless.check.skip=true",
@@ -423,6 +435,21 @@ final class CiDurabilityJob {
       problems.add(
           "the step '" + title + "' does not run when a step fails (if: failure() is missing)");
     }
+    if (approved.contains(NOT_CANCELLED) && !step.contains(NOT_CANCELLED)) {
+      problems.add(
+          "the step '"
+              + title
+              + "' does not run when an earlier step fails (if: ${{ !cancelled() }} is missing)");
+    }
+    for (String condition : List.of(ALWAYS, FAILURE, NOT_CANCELLED)) {
+      if (step.contains(condition) && !approved.contains(condition)) {
+        problems.add(
+            "the step '"
+                + title
+                + "' has a condition that is not approved for it: "
+                + condition.strip());
+      }
+    }
     if (approved == TRACEABILITY
         && step.stream().noneMatch(l -> l.endsWith(" --realstore standby"))) {
       problems.add("the step '" + title + "' does not run in --realstore standby mode");
@@ -461,7 +488,10 @@ final class CiDurabilityJob {
       if (line.startsWith("    if:")) {
         problems.add("the job may be skipped: " + stripped);
       }
-      if (line.startsWith("        if:") && !line.equals(ALWAYS) && !line.equals(FAILURE)) {
+      if (line.startsWith("        if:")
+          && !line.equals(ALWAYS)
+          && !line.equals(FAILURE)
+          && !line.equals(NOT_CANCELLED)) {
         problems.add("a step may be skipped: " + stripped);
       }
       if (line.contains("secrets.")
@@ -592,6 +622,7 @@ final class CiDurabilityJob {
     sudoAndCommandProblems(code, problems);
     dockerProblems(pinned, code, problems);
     quorumProblems(code, problems);
+    baseBackupProblems(code, problems);
     orderProblems(code, problems);
     for (String line : code) {
       if (SWALLOWED.matcher(line).find()) {
@@ -649,6 +680,18 @@ final class CiDurabilityJob {
           && !line.equals(ALTER_LINE)
           && !line.equals(SHOW_LINE)) {
         problems.add("synchronous_standby_names is set outside the approved line: " + line);
+      }
+    }
+  }
+
+  /** The base backup starts with a fast checkpoint: the default spread one is not bounded. */
+  private static void baseBackupProblems(List<String> code, List<String> problems) {
+    for (String line : code) {
+      if (line.startsWith("docker run --rm ")
+          && line.contains(" pg_basebackup ")
+          && !line.contains(" -X stream -c fast ")) {
+        problems.add(
+            "the base backup does not ask for a fast checkpoint (-X stream -c fast): " + line);
       }
     }
   }

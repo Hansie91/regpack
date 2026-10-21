@@ -64,7 +64,7 @@ docker run -d --name regpack-primary --network host --shm-size=256m -e POSTGRES_
 wait_tcp 5432
 
 # 4. the standby: a base backup over trust on 127.0.0.1, then the hot standby on port 5433
-docker run --rm --network host --user 999:999 -v /mnt/regpack-pg/standby:/var/lib/postgresql "$IMAGE" pg_basebackup -h 127.0.0.1 -p 5432 -U postgres -D /var/lib/postgresql/18/docker -R -X stream -C -S standby1_slot -d "host=127.0.0.1 port=5432 user=postgres application_name=standby1"
+docker run --rm --network host --user 999:999 -v /mnt/regpack-pg/standby:/var/lib/postgresql "$IMAGE" pg_basebackup -h 127.0.0.1 -p 5432 -U postgres -D /var/lib/postgresql/18/docker -R -X stream -c fast -C -S standby1_slot -d "host=127.0.0.1 port=5432 user=postgres application_name=standby1"
 docker run -d --name regpack-standby --network host --shm-size=256m -v /mnt/regpack-pg/standby:/var/lib/postgresql "$IMAGE" -c listen_addresses=127.0.0.1 -c port=5433 -c hot_standby=on
 wait_tcp 5433
 

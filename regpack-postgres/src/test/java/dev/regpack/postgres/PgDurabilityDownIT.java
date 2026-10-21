@@ -32,6 +32,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Tag;
@@ -60,9 +61,15 @@ import org.junit.jupiter.api.io.TempDir;
  * wait for the unique key and be cut off by {@code lock_timeout} (SQLSTATE 55P03) after five
  * seconds. No method here runs a second seal while a commit waits: the call under test is the only
  * unit that writes, and the harness cancels its wait before anything else touches the ledger.
+ *
+ * <p>Every assertion carries the observed value in its description, and the cancel tests print
+ * their notice line before they assert: the failure annotation of the job keeps the first line of a
+ * failure message only. The class is bounded by a timeout in a thread of its own, because a commit
+ * that waits for a standby blocks in a socket read, which a timeout in the thread of the test
+ * cannot end (a normal test takes under 15 seconds, a cancel test about 7).
  */
 @Tag("durability")
-@Timeout(value = 5, unit = TimeUnit.MINUTES)
+@Timeout(value = 2, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class PgDurabilityDownIT {
   private static final String UNCONFIRMED = "commit not confirmed by the synchronous standby";
 
@@ -84,6 +91,25 @@ class PgDurabilityDownIT {
         : "none";
   }
 
+  /**
+   * One notice line for the log: what the call ended with (null-safe: a call that returned has no
+   * exception), the SQLSTATE of its cause, and who ended the wait.
+   */
+  private static void printCancelNotice(String title, String method, Waited waited) {
+    Throwable thrown = waited.thrown();
+    DurabilityHarness.notice(
+        title,
+        method
+            + ": "
+            + (thrown == null
+                ? "returned normally"
+                : thrown + " cause-sqlstate=" + sqlStateOf(thrown))
+            + " ended-by="
+            + (waited.cancelledByTheHarness()
+                ? "pg_cancel_backend"
+                : "the server (the statement timeout)"));
+  }
+
   // ---------------------------------------------------------------------------------------------
 
   @Test
@@ -92,8 +118,12 @@ class PgDurabilityDownIT {
       Status status = harness.underTest().durability();
 
       assertThat(status.synchronous()).as(status.detail()).isFalse();
-      assertThat(status.synchronousStandbys()).isZero();
-      assertThat(status.detail()).as("one standby is required, none streams").contains("0 of 1");
+      assertThat(status.synchronousStandbys())
+          .as("synchronous standbys streaming: %s", status.detail())
+          .isZero();
+      assertThat(status.detail())
+          .as("one standby is required, none streams: %s", status.detail())
+          .contains("0 of 1");
       LedgerDurabilityContract.requireASynchronousStatusToNameAStandby(status);
     }
   }
@@ -120,21 +150,31 @@ class PgDurabilityDownIT {
       SealOutcome outcome = sealing.seal(request);
 
       assertThat(outcome.status()).as(outcome.detail()).isEqualTo(SealStatus.GATE_CLOSED);
-      assertThat(outcome.attempt()).isEmpty();
+      assertThat(outcome.attempt())
+          .as("the attempt of a closed gate: %s (%s)", outcome.attempt(), outcome.detail())
+          .isEmpty();
       assertThat(outcome.detail())
-          .as("closed because the ledger is not acknowledged by a standby, not because it failed")
+          .as(
+              "closed because the ledger is not acknowledged by a standby, not because it failed:"
+                  + " %s",
+              outcome.detail())
           .contains(SendGate.LEDGER_NOT_SYNCHRONOUS)
           .doesNotContain(SendGate.LEDGER_UNREADABLE)
           .doesNotContain("failure domains");
-      assertThat(evidence.list("", Optional.empty(), 1_000)).as("nothing was put").isEmpty();
-      assertThat(harness.setup().manifestRows("", Optional.empty(), 1_000)).isEmpty();
-      assertThat(harness.setup().delivery(delivery).orElseThrow().state())
-          .isEqualTo(DeliveryState.QUEUED);
-      assertThat(harness.setup().allocateAttemptId())
-          .as("no attempt id was taken")
+      var put = evidence.list("", Optional.empty(), 1_000);
+      assertThat(put).as("nothing was put: %s", put).isEmpty();
+      var manifest = harness.setup().manifestRows("", Optional.empty(), 1_000);
+      assertThat(manifest).as("manifest rows: %s", manifest).isEmpty();
+      DeliveryState state = harness.setup().delivery(delivery).orElseThrow().state();
+      assertThat(state).as("the delivery state: %s", state).isEqualTo(DeliveryState.QUEUED);
+      AttemptId taken = harness.setup().allocateAttemptId();
+      assertThat(taken)
+          .as("no attempt id was taken, the next one is %s", taken)
           .isEqualTo(new AttemptId(1));
       // and the same gate stands in front of the first byte
-      assertThat(sealing.beforeFirstByte(endpoint, new AttemptId(1), token))
+      PreSendStatus beforeFirstByte = sealing.beforeFirstByte(endpoint, new AttemptId(1), token);
+      assertThat(beforeFirstByte)
+          .as("the status before the first byte: %s", beforeFirstByte)
           .isEqualTo(PreSendStatus.GATE_CLOSED);
     }
   }
@@ -172,27 +212,29 @@ class PgDurabilityDownIT {
               () -> sender.send(delivery, fileOf("BK-CANCEL"), () -> {}));
 
       Throwable thrown = waited.thrown();
+      // before the assertions: the annotation of a failure keeps one line, this notice keeps the
+      // rest
+      printCancelNotice("cancelled-commit-wait", "beginSending", waited);
       assertThat(thrown)
-          .as("a commit that waited for a standby that is not there must not return a result")
+          .as(
+              "a commit that waited for a standby that is not there must not return a result;"
+                  + " was: %s",
+              thrown)
           .isInstanceOf(LedgerException.class);
-      assertThat(thrown.getMessage()).startsWith(UNCONFIRMED);
-      DurabilityHarness.notice(
-          "cancelled-commit-wait",
-          "beginSending: "
-              + thrown.getMessage()
-              + " cause-sqlstate="
-              + sqlStateOf(thrown)
-              + " ended-by="
-              + (waited.cancelledByTheHarness()
-                  ? "pg_cancel_backend"
-                  : "the server (the statement timeout)"));
-      assertThat(destination.receivedFiles()).as("no transport call, no first byte").isEmpty();
-      assertThat(harness.setup().delivery(delivery).orElseThrow().state())
-          .as("committed locally")
+      assertThat(thrown.getMessage()).as("message of %s", thrown).startsWith(UNCONFIRMED);
+      List<?> received = destination.receivedFiles();
+      assertThat(received).as("no transport call, no first byte: %s", received).isEmpty();
+      DeliveryState state = harness.setup().delivery(delivery).orElseThrow().state();
+      assertThat(state)
+          .as("committed locally, the delivery state: %s", state)
           .isEqualTo(DeliveryState.SENDING);
       Attempt attempt = harness.setup().attempt(new AttemptId(1)).orElseThrow();
-      assertThat(attempt.delivery()).isEqualTo(delivery);
-      assertThat(attempt.commitIssued()).as("no marker yet").isFalse();
+      assertThat(attempt.delivery())
+          .as("the delivery of the attempt: %s", attempt)
+          .isEqualTo(delivery);
+      assertThat(attempt.commitIssued())
+          .as("no marker yet, commit_issued: %s", attempt.commitIssued())
+          .isFalse();
     }
   }
 
@@ -222,26 +264,23 @@ class PgDurabilityDownIT {
               () -> sender.send(delivery, fileOf("BK-MARKER"), () -> {}));
 
       Throwable thrown = waited.thrown();
+      printCancelNotice("cancelled-marker-wait", "markCommitIssued", waited);
       assertThat(thrown)
-          .as("a marker commit that waited for a standby that is not there must not succeed")
+          .as(
+              "a marker commit that waited for a standby that is not there must not succeed;"
+                  + " was: %s",
+              thrown)
           .isInstanceOf(LedgerException.class);
-      assertThat(thrown.getMessage()).startsWith(UNCONFIRMED);
-      DurabilityHarness.notice(
-          "cancelled-marker-wait",
-          "markCommitIssued: "
-              + thrown.getMessage()
-              + " cause-sqlstate="
-              + sqlStateOf(thrown)
-              + " ended-by="
-              + (waited.cancelledByTheHarness()
-                  ? "pg_cancel_backend"
-                  : "the server (the statement timeout)"));
-      assertThat(destination.receivedFiles()).as("the gate threw: no first byte").isEmpty();
+      assertThat(thrown.getMessage()).as("message of %s", thrown).startsWith(UNCONFIRMED);
+      List<?> received = destination.receivedFiles();
+      assertThat(received).as("the gate threw: no first byte: %s", received).isEmpty();
       AttemptId attemptId = sender.lastAttempt().orElseThrow();
       Attempt attempt = harness.setup().attempt(attemptId).orElseThrow();
-      assertThat(attempt.commitIssued()).as("committed locally").isTrue();
-      assertThat(harness.setup().delivery(delivery).orElseThrow().state())
-          .isEqualTo(DeliveryState.SENDING);
+      assertThat(attempt.commitIssued())
+          .as("committed locally, commit_issued: %s", attempt.commitIssued())
+          .isTrue();
+      DeliveryState state = harness.setup().delivery(delivery).orElseThrow().state();
+      assertThat(state).as("the delivery state: %s", state).isEqualTo(DeliveryState.SENDING);
     }
   }
 }
