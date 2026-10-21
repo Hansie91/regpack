@@ -31,7 +31,8 @@ import java.util.Optional;
  * nothing is reordered by a caller:
  *
  * <ol>
- *   <li>validate the request, before the gate, an attempt id and any put;
+ *   <li>validate the request (the hash, the delivery, the file name, the media type, the endpoint
+ *       and the texts of the intent object), before the gate, an attempt id and any put;
  *   <li>the send gate ({@link #gateResult()}); a closed gate writes nothing;
  *   <li>an attempt id from the ledger;
  *   <li>put the sealed bytes ({@link #putSealedBytes}), then the {@code DeliveryIntent} journal
@@ -62,6 +63,9 @@ import java.util.Optional;
 public class DurableSeal implements Sealing {
   /** The retention class name of sealed files (OI-6). */
   public static final String SEALED_RETENTION_CLASS = "sealed";
+
+  /** The longest media type text that a seal accepts, in characters. */
+  private static final int MAX_MEDIA_TYPE_LENGTH = 255;
 
   private final LedgerStore ledger;
   private final EvidenceStore evidence;
@@ -186,7 +190,9 @@ public class DurableSeal implements Sealing {
     try {
       epoch = readEpoch();
     } catch (RuntimeException e) {
-      // an outage, a damaged marker and a foreign key are all "unreadable": the send fails closed
+      // an outage, a damaged marker and a foreign key are all "unreadable": the send fails closed.
+      // The catch is broad on purpose and also swallows an injected crash, so no crash point of
+      // the harness may be placed on EvidenceStore.list or EvidenceStore.get (see CrashPoints)
       return PreSendStatus.EPOCH_MARKER_UNREADABLE;
     }
     if (epoch != token.restoreEpoch()) {
@@ -274,6 +280,7 @@ public class DurableSeal implements Sealing {
     if (!intent.fileName().equals(request.fileName())) {
       throw new IllegalArgumentException("the intent names another file than the request");
     }
+    requireStorableMediaType(request.mediaType());
     JournalScope scope = JournalScope.of(request.endpoint());
     DeliveryLedger.Delivery delivery =
         ledger
@@ -283,9 +290,31 @@ public class DurableSeal implements Sealing {
       throw new IllegalArgumentException("the delivery belongs to another endpoint");
     }
     // dry runs: a text that the journal or the ledger cannot hold, found before any effect
-    intentObject(request, scope, new DeliveryLedger.AttemptId(1), Instant.EPOCH, request.token());
+    intentObject(request, scope, new DeliveryLedger.AttemptId(1), Instant.EPOCH);
     new DeliveryLedger.AttemptIntent(intent.artifactSha256(), request.fileName());
     return new Validated(scope, delivery, bytes.length);
+  }
+
+  /**
+   * A media type that an evidence store may be unable to hold (an over-long header, a control
+   * character, an unpaired surrogate) is refused here, before an attempt id is taken, so that the
+   * outcome does not depend on the adapter. The message names the field and echoes nothing.
+   */
+  private static void requireStorableMediaType(String mediaType) {
+    boolean storable = !mediaType.isBlank() && mediaType.length() <= MAX_MEDIA_TYPE_LENGTH;
+    for (int i = 0; storable && i < mediaType.length(); ) {
+      int codePoint = mediaType.codePointAt(i);
+      // a lone surrogate comes back from codePointAt as itself, a pair as one supplementary point
+      boolean lone = codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE;
+      storable = !Character.isISOControl(codePoint) && !lone;
+      i += Character.charCount(codePoint);
+    }
+    if (!storable) {
+      throw new IllegalArgumentException(
+          "the media type of the request must be 1 to "
+              + MAX_MEDIA_TYPE_LENGTH
+              + " characters without a control character or an unpaired surrogate");
+    }
   }
 
   /**
@@ -297,7 +326,7 @@ public class DurableSeal implements Sealing {
   private SealContext context(
       SealRequest request, Validated validated, DeliveryLedger.AttemptId attempt) {
     Instant now = clock.now();
-    JournalObject intent = intentObject(request, validated.scope(), attempt, now, request.token());
+    JournalObject intent = intentObject(request, validated.scope(), attempt, now);
     byte[] intentBytes = intent.toBytes();
     List<ManifestLedger.ObjectEntry> entries = new ArrayList<>();
     entries.add(
@@ -323,8 +352,7 @@ public class DurableSeal implements Sealing {
       SealRequest request,
       JournalScope scope,
       DeliveryLedger.AttemptId attempt,
-      Instant clockInstant,
-      LeaseLedger.LeaseToken token) {
+      Instant clockInstant) {
     DeliveryIntentPayload intent = request.intent();
     Map<String, Object> payload = new LinkedHashMap<>();
     payload.put("attempt_id", attempt.value());
@@ -340,7 +368,7 @@ public class DurableSeal implements Sealing {
     return new JournalObject(
         new JournalKey.ClassA(
             scope,
-            token.restoreEpoch(),
+            request.token().restoreEpoch(),
             JournalType.DELIVERY_INTENT,
             Long.toString(attempt.value()),
             1),

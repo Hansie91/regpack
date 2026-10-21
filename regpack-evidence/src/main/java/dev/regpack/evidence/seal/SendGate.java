@@ -17,6 +17,13 @@ import java.util.Objects;
  * <p>There is no manifest condition yet (the manifest function and the signed manifest are P3c;
  * P-SEALED stays test-only until then). A side is read only when the requirement asks something of
  * it; {@link Requirement#none()} reads nothing.
+ *
+ * <p>The catch of {@link RuntimeException} is deliberate (any failure while reading either side
+ * closes the gate), and it swallows an injected {@code SimulatedCrash} too. No crash point of the
+ * crash-point harness may therefore be placed on {@code EvidenceStore.list}, {@code
+ * EvidenceStore.get}, {@code EvidenceStore.durability} or {@code LedgerDurability.durability}: the
+ * crash would be read as "unreadable" and not end the run. {@code CrashPoints} lists the points and
+ * a test pins that none is one of these calls.
  */
 public final class SendGate {
   /** The ledger does not report a synchronous commit with at least one standby. */
@@ -54,10 +61,6 @@ public final class SendGate {
       return new Requirement(false, false, 0);
     }
 
-    private boolean asksTheLedger() {
-      return ledgerSynchronous;
-    }
-
     private boolean asksTheEvidenceStore() {
       return evidenceSynchronous || minFailureDomains > 0;
     }
@@ -92,7 +95,7 @@ public final class SendGate {
     Objects.requireNonNull(ledger, "ledger");
     Objects.requireNonNull(evidence, "evidence");
     List<String> reasons = new ArrayList<>();
-    if (requirement.asksTheLedger()) {
+    if (requirement.ledgerSynchronous()) {
       checkLedger(ledger, reasons);
     }
     if (requirement.asksTheEvidenceStore()) {

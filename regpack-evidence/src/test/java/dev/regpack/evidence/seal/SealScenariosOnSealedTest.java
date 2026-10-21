@@ -1,5 +1,6 @@
 package dev.regpack.evidence.seal;
 
+import static dev.regpack.testkit.contract.SealScenarioContract.reportOf;
 import static dev.regpack.testkit.contract.SealScenarioContract.request;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -13,11 +14,11 @@ import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
-import dev.regpack.ports.ledger.LeaseLedger.LeaseResult;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.ManifestLedger.ManifestRow;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
+import dev.regpack.testkit.contract.SealScenarioContract;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -38,8 +39,6 @@ import org.junit.jupiter.api.io.TempDir;
  * a seal and to the seal itself, and need real directories.
  */
 class SealScenariosOnSealedTest extends AbstractSealScenarioTest {
-  private static final Duration TTL = Duration.ofSeconds(60);
-
   @TempDir Path root;
 
   private Path volumeA;
@@ -69,15 +68,7 @@ class SealScenariosOnSealedTest extends AbstractSealScenarioTest {
   }
 
   private LeaseToken lease(EndpointKey endpoint) {
-    LeaseResult result = ledger().acquire(endpoint, "A", TTL);
-    if (!(result instanceof LeaseResult.Granted granted)) {
-      throw new AssertionError("the lease was not granted: " + result);
-    }
-    return granted.grant().token();
-  }
-
-  private static byte[] reportOf(String businessKey) {
-    return ("<report>" + businessKey + "</report>").getBytes(StandardCharsets.UTF_8);
+    return SealScenarioContract.lease(ledger(), endpoint, "A");
   }
 
   @Test

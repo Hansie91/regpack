@@ -147,6 +147,15 @@ class SendGateTest {
     assertThat(evidenceOnly.check(untouchedLedger, evidence(true, 1)).open()).isTrue();
     assertThat(evidenceOnly.check(untouchedLedger, evidence(false, 0)).reasons())
         .containsExactly(SendGate.EVIDENCE_NOT_SYNCHRONOUS, SendGate.tooFewDomains(1));
+
+    // failure domains alone: a requirement that asks for domains asks the evidence store
+    SendGate domainsOnly = new SendGate(new SendGate.Requirement(false, false, 2));
+    assertThat(domainsOnly.check(untouchedLedger, evidence(false, 1)).reasons())
+        .containsExactly(SendGate.tooFewDomains(2));
+    assertThat(domainsOnly.check(untouchedLedger, evidence(false, 2)).open()).isTrue();
+    // and it does not ask for the acknowledgement: a store of two domains that does not
+    // acknowledge durably is enough here
+    assertThat(domainsOnly.check(untouchedLedger, evidence(false, 3)).reasons()).isEmpty();
   }
 
   @Test

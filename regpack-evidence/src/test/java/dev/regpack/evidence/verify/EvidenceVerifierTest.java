@@ -74,6 +74,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -423,6 +424,36 @@ class EvidenceVerifierTest {
     public void setLegalHold(EvidenceKey key, boolean hold) {
       delegate.setLegalHold(key, hold);
     }
+  }
+
+  /**
+   * A ledger that delegates every call to {@code ledger} after {@code beforeCall} has seen the name
+   * and the arguments of the call (the hook may throw).
+   */
+  private static LedgerStore ledgerWithHook(
+      LedgerStore ledger, BiConsumer<String, Object[]> beforeCall) {
+    return (LedgerStore)
+        Proxy.newProxyInstance(
+            LedgerStore.class.getClassLoader(),
+            new Class<?>[] {LedgerStore.class},
+            (proxy, method, args) -> {
+              beforeCall.accept(method.getName(), args);
+              try {
+                return method.invoke(ledger, args);
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
+  }
+
+  private static LedgerStore ledgerThatFailsOn(LedgerStore ledger, String methodName) {
+    return ledgerWithHook(
+        ledger,
+        (name, args) -> {
+          if (name.equals(methodName)) {
+            throw new LedgerException("scripted");
+          }
+        });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -903,23 +934,6 @@ class EvidenceVerifierTest {
     assertThat(tier.verifier.verify("").clean()).isTrue();
   }
 
-  private static LedgerStore ledgerThatFailsOn(LedgerStore ledger, String methodName) {
-    return (LedgerStore)
-        Proxy.newProxyInstance(
-            LedgerStore.class.getClassLoader(),
-            new Class<?>[] {LedgerStore.class},
-            (proxy, method, args) -> {
-              if (method.getName().equals(methodName)) {
-                throw new LedgerException("scripted");
-              }
-              try {
-                return method.invoke(ledger, args);
-              } catch (InvocationTargetException e) {
-                throw e.getCause();
-              }
-            });
-  }
-
   // -------------------------------------------------------------------------------------------
   // the class (b) sequence
 
@@ -1240,20 +1254,13 @@ class EvidenceVerifierTest {
     ledger.recordObjects(rows, Provenance.WRITTEN, Optional.empty());
     List<Integer> manifestLimits = new ArrayList<>();
     LedgerStore spied =
-        (LedgerStore)
-            Proxy.newProxyInstance(
-                LedgerStore.class.getClassLoader(),
-                new Class<?>[] {LedgerStore.class},
-                (proxy, method, args) -> {
-                  if (method.getName().equals("manifestRows")) {
-                    manifestLimits.add((Integer) args[2]);
-                  }
-                  try {
-                    return method.invoke(ledger, args);
-                  } catch (InvocationTargetException e) {
-                    throw e.getCause();
-                  }
-                });
+        ledgerWithHook(
+            ledger,
+            (name, args) -> {
+              if (name.equals("manifestRows")) {
+                manifestLimits.add((Integer) args[2]);
+              }
+            });
     ScriptedStore scripted = new ScriptedStore(evidence);
 
     Report report = new EvidenceVerifier(scripted, spied).verify("");

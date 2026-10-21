@@ -98,6 +98,10 @@ class SealingTeethTest {
         MarkerAlwaysAbsentScenarioTest.class,
         Set.of(EPOCH_DIFFERS, EPOCH_DAMAGED, EPOCH_DOWN, EPOCH_SAME));
     expected.put(AttemptScopedSealedKeyScenarioTest.class, Set.of(MANIFEST, SHARED));
+    // the finer mutants of the gate in front of the first byte: AlwaysClear is caught by "no gate
+    // at all"; these two keep the rest of the gate and drop one check each
+    expected.put(IgnoreMarkerAlreadySetScenarioTest.class, Set.of(CRASH_MARKER, CRASH_BYTE));
+    expected.put(LeaseCheckWithoutTokenScenarioTest.class, Set.of(TAKEOVER));
     // P-SEALED on real directories: a store that acknowledges and loses the intent object, and a
     // volume that acknowledges and keeps nothing (each of the two, one scenario of the loss of a
     // volume), and the two wrong sealers in front of a store that has lost a volume

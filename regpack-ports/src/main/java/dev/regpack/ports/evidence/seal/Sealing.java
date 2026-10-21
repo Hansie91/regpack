@@ -54,8 +54,9 @@ public interface Sealing {
    * and of the intent object ({@code intent.fileName()} must be the same text). The request is
    * validated before any effect: the hash of the bytes must be {@code intent.artifactSha256()}, the
    * intent must name {@code delivery}, the endpoint must have a journal scope (each part 1 to 24
-   * characters of {@code [A-Za-z0-9._-]}) and be the endpoint of the delivery, else {@link
-   * IllegalArgumentException}; a delivery that is not {@code QUEUED} is {@link
+   * characters of {@code [A-Za-z0-9._-]}) and be the endpoint of the delivery, and the media type
+   * must be 1 to 255 characters (not blank) without a control character or an unpaired surrogate,
+   * else {@link IllegalArgumentException}; a delivery that is not {@code QUEUED} is {@link
    * SealStatus#STATE_MISMATCH}.
    */
   record SealRequest(

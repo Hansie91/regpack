@@ -58,6 +58,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -71,6 +72,13 @@ import org.junit.jupiter.api.Test;
  * sender's, and when the gate is closed. The ports are wrapped in {@link FaultInjector} proxies,
  * the destination is the P0 simulator and the sender is the pair {@code seal} and {@code
  * transport.send} with {@code beforeFirstByte} as its commit gate.
+ *
+ * <p>No crash point of {@link CrashPoints} may be placed on {@code EvidenceStore.list}, {@code
+ * EvidenceStore.get}, {@code EvidenceStore.durability} or {@code LedgerDurability.durability}: the
+ * sealer reads these fail-closed (every {@link RuntimeException} is "unreadable"), so an injected
+ * crash would be swallowed and not end the run. Outages of those calls are staged with a {@code
+ * CallHook} that throws an {@code EvidenceUnavailableException}, as {@code
+ * anUnreachableEvidenceTierAtTheGateFailsClosed} does. A test of {@code CrashPoints} pins this.
  *
  * <p>The invariant is stated once, in {@code assertI1}: when the destination holds the file, the
  * evidence store holds the sealed object and the intent object, the manifest names both with the
@@ -145,6 +153,20 @@ public interface SealScenarioContract {
     return new SealRequest(endpoint, token, delivery, fileName, bytes, "application/xml", intent);
   }
 
+  /** The lease of {@code endpoint} for {@code holder}, for {@link #TTL}; fails if not granted. */
+  static LeaseToken lease(LedgerStore ledger, EndpointKey endpoint, String holder) {
+    LeaseResult result = ledger.acquire(endpoint, holder, TTL);
+    if (!(result instanceof LeaseResult.Granted granted)) {
+      throw new AssertionError("the lease was not granted: " + result);
+    }
+    return granted.grant().token();
+  }
+
+  /** The bytes of the report of a business key: {@code <report>BK</report>} in UTF-8. */
+  static byte[] reportOf(String businessKey) {
+    return ("<report>" + businessKey + "</report>").getBytes(UTF_8);
+  }
+
   /** One queued delivery under a held lease, and the request that seals it. */
   record Case(
       EndpointKey endpoint,
@@ -173,11 +195,13 @@ public interface SealScenarioContract {
     }
   }
 
-  /** The ports of one run as the sealer sees them, and the trace of their calls. */
+  /**
+   * One run: the trace of the port calls, the destination, the transport and the sealer over the
+   * wrapped ports. (The stores themselves are {@code ledger()} and {@code evidence()} of the
+   * suite.)
+   */
   record Wiring(
       FaultInjector faults,
-      LedgerStore ledger,
-      EvidenceStore evidence,
       DestinationSimulator destination,
       Transport transport,
       Sealing sealing) {}
@@ -211,30 +235,14 @@ public interface SealScenarioContract {
         faults.wrap(EvidenceStore.class, evidenceShape.apply(evidence()));
     Transport transport = faults.wrap(Transport.class, destination);
     return new Wiring(
-        faults,
-        wrappedLedger,
-        wrappedEvidence,
-        destination,
-        transport,
-        sealing(wrappedLedger, wrappedEvidence, productionGate));
-  }
-
-  private LeaseToken lease(EndpointKey endpoint, String holder) {
-    LeaseResult result = ledger().acquire(endpoint, holder, TTL);
-    if (!(result instanceof LeaseResult.Granted granted)) {
-      throw new AssertionError("the lease was not granted: " + result);
-    }
-    return granted.grant().token();
-  }
-
-  private static byte[] reportOf(String businessKey) {
-    return ("<report>" + businessKey + "</report>").getBytes(UTF_8);
+        faults, destination, transport, sealing(wrappedLedger, wrappedEvidence, productionGate));
   }
 
   /** A new endpoint named {@code name}, a lease for it and one queued delivery. */
   private Case newCase(String name, String businessKey) {
     EndpointKey endpoint = LedgerFixtures.endpoint(name);
-    return newDelivery(endpoint, lease(endpoint, "A"), businessKey, reportOf(businessKey));
+    return newDelivery(
+        endpoint, lease(ledger(), endpoint, "A"), businessKey, reportOf(businessKey));
   }
 
   private Case newDelivery(
@@ -822,8 +830,11 @@ public interface SealScenarioContract {
     assertThat(attemptsOf(c.delivery())).extracting(Attempt::id).containsExactly(winner);
     assertThat(manifest()).as("the winner's two rows").hasSize(2);
     assertTheRowsOfOneSeal();
-    // what the losers wrote is orphan intent objects and nothing else
-    for (String orphan : unrecorded()) {
+    // what the losers wrote is one orphan intent object each and nothing else: the barrier makes
+    // every racer take an attempt id and put both objects before any of them commits
+    List<String> orphans = unrecorded();
+    assertThat(orphans).as("one orphan intent object per loser").hasSize(RACERS - 1);
+    for (String orphan : orphans) {
       assertThat(journalKeyOf(orphan))
           .isInstanceOfSatisfying(
               JournalKey.ClassA.class,
@@ -854,7 +865,7 @@ public interface SealScenarioContract {
                     hit -> {
                       if (hit == 2) {
                         clock().advance(TTL);
-                        newHolder.set(lease(c.endpoint(), "B"));
+                        newHolder.set(lease(ledger(), c.endpoint(), "B"));
                       }
                     }));
 
@@ -991,19 +1002,38 @@ public interface SealScenarioContract {
   @Test
   default void anUnreachableEvidenceTierAtTheGateFailsClosed() {
     Case c = newCase("EPOCH4", "BK-EPOCH4");
-    // the first two listings fail; the seal lists nothing, so they are the two gates below
-    FaultPlan outage =
-        FaultPlan.failAt("EvidenceStore.list:BEFORE", 1, new EvidenceUnavailableException("down"))
-            .then(
-                FaultPlan.failAt(
-                    "EvidenceStore.list:BEFORE", 2, new EvidenceUnavailableException("down")));
-    Wiring w = wire(outage, destination(), false);
+    DestinationSimulator destination = destination();
+    // every listing fails while the switch is on; the switch is set after the seal, so the
+    // scenario does not depend on how many listings a seal or a gate makes
+    AtomicBoolean outage = new AtomicBoolean();
+    Wiring w =
+        wire(
+            FaultPlan.none(),
+            destination,
+            false,
+            UnaryOperator.identity(),
+            e ->
+                CallHook.before(
+                    EvidenceStore.class,
+                    e,
+                    "list",
+                    hit -> {
+                      if (outage.get()) {
+                        throw new EvidenceUnavailableException("down");
+                      }
+                    }));
     AttemptId attempt = sealed(w, c);
+    outage.set(true);
 
     // an outage is not "no marker": with the token at epoch 0 that mistake would be CLEAR
     assertThat(w.sealing().beforeFirstByte(c.endpoint(), attempt, c.token()))
         .isEqualTo(PreSendStatus.EPOCH_MARKER_UNREADABLE);
     assertRefusedAtTheGate(w, c, attempt);
+
+    // the refusal was the outage's: the tier is back, nothing was marked, the same send goes out
+    outage.set(false);
+    assertThat(send(w, c, attempt).status()).isEqualTo(SendStatus.DELIVERED);
+    assertI1(c, destination);
   }
 
   @Test
@@ -1030,7 +1060,7 @@ public interface SealScenarioContract {
     Wiring w = wire(FaultPlan.none(), destination, false);
     AttemptId attempt = sealed(w, c);
     clock().advance(TTL);
-    LeaseToken other = lease(c.endpoint(), "B");
+    LeaseToken other = lease(ledger(), c.endpoint(), "B");
     assertThat(other).isNotEqualTo(c.token());
 
     assertThat(w.sealing().beforeFirstByte(c.endpoint(), attempt, c.token()))
@@ -1050,7 +1080,7 @@ public interface SealScenarioContract {
   @Test
   default void theSameBytesSealedForTwoAttemptsShareOneSealedObject() {
     EndpointKey endpoint = LedgerFixtures.endpoint("SHARED");
-    LeaseToken token = lease(endpoint, "A");
+    LeaseToken token = lease(ledger(), endpoint, "A");
     byte[] bytes = reportOf("one report for two deliveries");
     Case a = newDelivery(endpoint, token, "BK-SHARED-A", bytes);
     Case b = newDelivery(endpoint, token, "BK-SHARED-B", bytes);

@@ -23,6 +23,7 @@ import dev.regpack.ports.evidence.seal.Sealing.PreSendStatus;
 import dev.regpack.ports.evidence.seal.Sealing.SealOutcome;
 import dev.regpack.ports.evidence.seal.Sealing.SealRequest;
 import dev.regpack.ports.evidence.seal.Sealing.SealStatus;
+import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.DeliveryLedger.Attempt;
 import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
@@ -43,6 +44,8 @@ import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.fault.FaultInjector;
 import dev.regpack.testkit.fault.FaultPlan;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -195,6 +198,61 @@ class DurableSealTest {
     assertThat(intentRow.entry().sizeBytes()).isEqualTo(journal.bytes().length);
     assertThat(intentRow.provenance()).isEqualTo(Provenance.WRITTEN);
     assertThat(intentRow.attempt()).contains(attempt);
+  }
+
+  /** A ledger that delegates everything and records the intent that beginSending receives. */
+  private LedgerStore ledgerRecordingTheIntents(List<DeliveryLedger.AttemptIntent> intents) {
+    return (LedgerStore)
+        Proxy.newProxyInstance(
+            LedgerStore.class.getClassLoader(),
+            new Class<?>[] {LedgerStore.class},
+            (proxy, method, args) -> {
+              if (method.getName().equals("beginSending")) {
+                intents.add((DeliveryLedger.AttemptIntent) args[3]);
+              }
+              try {
+                return method.invoke(ledger, args);
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
+  }
+
+  @Test
+  void theAttemptIntentNamesTheSealedFileThenTheIntentObjectWithTheHashesOfThePlannedBytes() {
+    List<DeliveryLedger.AttemptIntent> intents = new ArrayList<>();
+    DurableSeal observed =
+        new DurableSeal(
+            ledgerRecordingTheIntents(intents),
+            evidence,
+            clock,
+            FIVE_YEARS,
+            new SendGate(SendGate.Requirement.none()));
+    LeaseToken token = lease(EP, "A");
+    DeliveryId delivery = queued(EP, "BK-1");
+
+    SealOutcome outcome = observed.seal(request(EP, token, delivery, "BK-1", BYTES));
+
+    assertThat(outcome.status()).isEqualTo(SealStatus.SEALED);
+    assertThat(intents).hasSize(1);
+    DeliveryLedger.AttemptIntent intent = intents.get(0);
+    assertThat(intent.artifactSha256()).isEqualTo(Sha256.of(BYTES));
+    assertThat(intent.fileName()).isEqualTo("file-BK-1.xml");
+    // the order of the manifest entries is part of the contract with the ledger: the sealed file
+    // first, then the intent object
+    assertThat(intent.objects())
+        .extracting(ObjectEntry::objectClass)
+        .containsExactly(ObjectClass.SEALED_FILE, ObjectClass.JOURNAL_A);
+    ObjectEntry sealedEntry = intent.objects().get(0);
+    assertThat(sealedEntry.key()).isEqualTo(SealedKeys.of(Sha256.of(BYTES)));
+    assertThat(sealedEntry.sha256()).isEqualTo(Sha256.of(BYTES));
+    assertThat(sealedEntry.sizeBytes()).isEqualTo(BYTES.length);
+    ObjectEntry intentEntry = intent.objects().get(1);
+    EvidenceStore.StoredObject storedIntent =
+        evidence.get(intentKey(EP, 0, 1).evidenceKey()).orElseThrow();
+    assertThat(intentEntry.key()).isEqualTo(intentKey(EP, 0, 1).evidenceKey());
+    assertThat(intentEntry.sha256()).isEqualTo(Sha256.of(storedIntent.bytes()));
+    assertThat(intentEntry.sizeBytes()).isEqualTo(storedIntent.bytes().length);
   }
 
   @Test
@@ -389,6 +447,84 @@ class DurableSealTest {
     assertNoEffect(delivery, DeliveryState.QUEUED);
   }
 
+  private static SealRequest requestWithMediaType(
+      EndpointKey endpoint, LeaseToken token, DeliveryId delivery, String mediaType) {
+    return new SealRequest(
+        endpoint,
+        token,
+        delivery,
+        "file-BK-1.xml",
+        BYTES,
+        mediaType,
+        intent(delivery, "BK-1", BYTES, "file-BK-1.xml"));
+  }
+
+  @Test
+  void aMediaTypeThatTheEvidenceStoreCannotHoldIsRefusedBeforeAnyEffect() {
+    LeaseToken token = lease(EP, "A");
+    DeliveryId delivery = queued(EP, "BK-1");
+    String lead = "application/secret-";
+    List<String> refused =
+        List.of(
+            "",
+            "   ",
+            "a".repeat(256),
+            lead + "x\ty",
+            lead + "x\ny",
+            lead + "x" + (char) 0 + "y",
+            lead + "x" + (char) 0x7f + "y",
+            lead + "x" + (char) 0x85 + "y",
+            lead + "x" + (char) 0xD800,
+            lead + "x" + (char) 0xDC00 + "y",
+            lead + (char) 0xDE00 + (char) 0xD800 + "y");
+
+    for (String mediaType : refused) {
+      Throwable thrown =
+          catchThrowable(() -> sealing.seal(requestWithMediaType(EP, token, delivery, mediaType)));
+
+      assertThat(thrown)
+          .as("media type of %d characters, first 12: %s", mediaType.length(), preview(mediaType))
+          .isInstanceOf(IllegalArgumentException.class);
+      assertThat(thrown.getMessage()).contains("media type").doesNotContain("secret");
+    }
+    // no put, no manifest row, and no attempt id consumed by any of the refused requests
+    assertNoEffect(delivery, DeliveryState.QUEUED);
+  }
+
+  /** A readable form of a text with control characters and lone surrogates, for messages. */
+  private static String preview(String text) {
+    StringBuilder out = new StringBuilder();
+    text.chars()
+        .limit(12)
+        .forEach(
+            c -> out.append(c < 0x20 || c > 0x7e ? String.format("<%04x>", c) : "" + (char) c));
+    return out.toString();
+  }
+
+  @Test
+  void aMediaTypeAtTheLimitOrWithAPairedSurrogateIsAccepted() {
+    LeaseToken token = lease(EP, "A");
+    DeliveryId at255 = queued(EP, "BK-1");
+    DeliveryId paired = queued(EP, "BK-2");
+    String pair = new String(Character.toChars(0x1F600));
+    byte[] other = "<report>trade two</report>".getBytes(UTF_8);
+
+    SealOutcome atTheLimit = sealing.seal(requestWithMediaType(EP, token, at255, "a".repeat(255)));
+    SealOutcome withPair =
+        sealing.seal(
+            new SealRequest(
+                EP,
+                token,
+                paired,
+                "file-BK-2.xml",
+                other,
+                "application/x-" + pair,
+                intent(paired, "BK-2", other, "file-BK-2.xml")));
+
+    assertThat(atTheLimit.status()).isEqualTo(SealStatus.SEALED);
+    assertThat(withPair.status()).isEqualTo(SealStatus.SEALED);
+  }
+
   @Test
   void aDeliveryThatIsNotQueuedIsRefusedWithoutOrphans() {
     LeaseToken token = lease(EP, "A");
@@ -452,11 +588,15 @@ class DurableSealTest {
 
     assertThat(outcome.status()).isEqualTo(SealStatus.GATE_CLOSED);
     assertThat(outcome.attempt()).isEmpty();
+    // the pinned detail: the reasons joined by "; " in the order ledger, acknowledgement, domains
     assertThat(outcome.detail())
-        .contains(SendGate.LEDGER_NOT_SYNCHRONOUS)
-        .contains(SendGate.EVIDENCE_NOT_SYNCHRONOUS)
-        .contains(SendGate.tooFewDomains(2))
-        .doesNotContain("BK-1");
+        .isEqualTo(
+            String.join(
+                "; ",
+                List.of(
+                    SendGate.LEDGER_NOT_SYNCHRONOUS,
+                    SendGate.EVIDENCE_NOT_SYNCHRONOUS,
+                    SendGate.tooFewDomains(2))));
     assertNoEffect(delivery, DeliveryState.QUEUED);
   }
 
