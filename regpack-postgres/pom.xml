@@ -12,7 +12,8 @@
   <name>regpack-postgres</name>
   <description>PostgreSQL adapter of the ledger ports (the only module that names the JDBC driver)</description>
   <properties>
-    <excludedGroups>mutant,capacity</excludedGroups>
+    <!-- durability: the integration tests of the job ledger-durability (primary with a quorum standby); selected there with -Dgroups=durability -DexcludedGroups=none -->
+    <excludedGroups>mutant,capacity,durability</excludedGroups>
     <!-- AP-5: the only third-party runtime dependencies of the release build; versions identical to spikes/pom.xml -->
     <postgresql.version>42.7.14</postgresql.version>
     <checker-qual.version>3.55.1</checker-qual.version>

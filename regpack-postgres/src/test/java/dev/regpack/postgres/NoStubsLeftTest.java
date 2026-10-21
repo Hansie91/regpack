@@ -15,6 +15,12 @@ import org.junit.jupiter.api.Test;
  * T15 made every sub-port of the adapter a stub that throws {@code UnsupportedOperationException}
  * until its task; T16 to T18 replaced them one by one. This is the end mark: no source of the
  * module's main code names that exception any more, so no method is left unbuilt.
+ *
+ * <p>P3b1 added two sub-ports whose placeholders threw {@code IllegalStateException("not built
+ * until T12")} and {@code IllegalStateException("not built until T17")} (the module has to compile
+ * between the tasks, and the exception text must not be the one that this scan forbids). T12
+ * replaced the first; T17 replaced the second, and from then on the scan reports any main source
+ * that holds the text "not built until T" as well.
  */
 class NoStubsLeftTest {
   private static Path mainSources() {
@@ -36,13 +42,15 @@ class NoStubsLeftTest {
     assertThat(files).hasSizeGreaterThan(10);
     List<String> offenders = new ArrayList<>();
     for (Path file : files) {
-      if (Files.readString(file, StandardCharsets.UTF_8)
-          .contains("UnsupportedOperationException")) {
+      String text = Files.readString(file, StandardCharsets.UTF_8);
+      if (text.contains("UnsupportedOperationException") || text.contains("not built until T")) {
         offenders.add(sources.relativize(file).toString().replace('\\', '/'));
       }
     }
     assertThat(offenders)
-        .as("main sources that still throw UnsupportedOperationException")
+        .as(
+            "main sources that still throw UnsupportedOperationException or hold a placeholder"
+                + " ('not built until T')")
         .isEmpty();
   }
 }

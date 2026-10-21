@@ -4,6 +4,7 @@ import dev.regpack.postgres.PgLedgerStore.Config;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.Objects;
@@ -24,6 +25,24 @@ import javax.sql.DataSource;
  * exception of the work passes through unchanged after the rollback. Auto-commit is restored only
  * after a successful commit: after a failure the transaction state is unknown, and switching
  * auto-commit on over an open transaction would commit it.
+ *
+ * <p><b>A commit that is not confirmed (I1, assumption A11, review focus EF15).</b> On a primary
+ * with a synchronous standby, a commit whose wait for the standby is cancelled (a query cancel; a
+ * terminated session ends the connection instead) returns normally: the server sends a {@code
+ * WARNING}, the transaction has already committed locally and may not be on the standby. The driver
+ * hands that warning to {@link Connection#getWarnings}. So the warnings are cleared when the unit
+ * begins and once more immediately before {@code commit()}, and after the commit the chain is
+ * walked: any warning whose SQLState is missing or not of class {@code 00} (the driver reports a
+ * {@code NOTICE} as {@code 00000}) fails the unit with a {@link
+ * dev.regpack.ports.ledger.LedgerException} that says so ({@link PgErrors#commitNotConfirmed}). No
+ * list of SQLStates and no message text is matched (the text depends on {@code lc_messages}): any
+ * warning after COMMIT counts, because the only thing a commit can warn about is the durability of
+ * what it just did.
+ *
+ * <p>The caller must read that exception as <em>unknown</em>: the unit is committed here, so the
+ * connection is released as committed and nothing is rolled back, but the standby may not have it.
+ * It must not send anything on the strength of it; a SENDING row without a marker is requeued by
+ * recovery (spec 11.5 A.3 a). The same holds when the warnings cannot be read after the commit.
  */
 final class Unit {
   private static final String SET_ISOLATION = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
@@ -54,8 +73,13 @@ final class Unit {
       connection = dataSource.getConnection();
       begin(connection, config);
       T result = work.run(connection);
+      // a warning of a statement of the work is not a warning of the commit
+      connection.clearWarnings();
       connection.commit();
+      // the transaction has committed locally: from here on the connection is released as
+      // committed, whatever the check below finds
       committed = true;
+      requireConfirmed(connection);
       return result;
     } catch (SQLException e) {
       throw PgErrors.wrap(e);
@@ -64,9 +88,32 @@ final class Unit {
     }
   }
 
-  /** The prologue: after it the transaction is open and the session settings are in force. */
+  /**
+   * After a commit: every warning of the chain must be a notice (SQLState of class {@code 00}). A
+   * warning without a SQLState is not a notice.
+   *
+   * @throws dev.regpack.ports.ledger.LedgerException for the first warning that is not
+   * @throws SQLException when the warnings cannot be read: the outcome is unknown then as well
+   */
+  private static void requireConfirmed(Connection connection) throws SQLException {
+    for (SQLWarning warning = connection.getWarnings();
+        warning != null;
+        warning = warning.getNextWarning()) {
+      String state = warning.getSQLState();
+      if (state == null || !state.startsWith("00")) {
+        throw PgErrors.commitNotConfirmed(warning);
+      }
+    }
+  }
+
+  /**
+   * The prologue: after it the transaction is open and the session settings are in force. The
+   * warnings of the connection are cleared first, so that what an earlier use of a pooled
+   * connection left behind is not read as the commit's.
+   */
   static void begin(Connection connection, Config config) throws SQLException {
     connection.setAutoCommit(false);
+    connection.clearWarnings();
     try (Statement isolation = connection.createStatement()) {
       isolation.execute(SET_ISOLATION);
     }

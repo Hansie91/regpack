@@ -69,12 +69,15 @@ import org.junit.jupiter.api.io.TempDir;
  * that need the production gate to be closed do not depend on that (see the next paragraph).
  *
  * <p>The closed-gate scenario of the shared suite asks for a binding whose production gate is
- * closed. In the job {@code ledger-pg} there is no standby, and the durability query of the adapter
- * is still the placeholder of T17 of this plan, which throws an {@code IllegalStateException}: the
- * send gate closes on any exception while it reads the ledger, with a fixed reason, so the scenario
- * holds. From T17 on the query answers, and the gate is closed for the real reason: the ledger
- * commit is not acknowledged by a synchronous standby. No crash point of the suite is placed on a
- * durability or list read ({@code CrashPoints}).
+ * closed. In the job {@code ledger-pg} there is no standby, and since T17 of this plan the
+ * durability query of the adapter ({@link PgLedgerDurability}) answers: the ledger is not
+ * synchronous, so the gate is closed for the real reason, that the ledger commit is not
+ * acknowledged by a synchronous standby (and, with both directories on one file system, that the
+ * evidence store has one failure domain). Before T17 the query was a placeholder that threw, and
+ * the gate closed on the exception, which is the same verdict for a worse reason. {@code
+ * PgLedgerDurabilityTest} shows without a server that a server without a standby is read as "not
+ * synchronous" and not as an error, and {@code PgLedgerStoreContractIT} reads the status on the
+ * server. No crash point of the suite is placed on a durability or list read ({@code CrashPoints}).
  */
 class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContract {
   /** The threads of the concurrency test, and the deliveries each of them seals. */

@@ -22,6 +22,8 @@ import org.postgresql.ds.PGSimpleDataSource;
 public final class PgTestDatabase {
   private static final String URL_VARIABLE = "REGPACK_PG_URL";
   private static final String REQUIRED_VARIABLE = "REGPACK_PG_REQUIRED";
+  private static final String STANDBY_URL =
+      "jdbc:postgresql://127.0.0.1:5433/postgres?user=postgres";
   private static final AtomicInteger COUNTER = new AtomicInteger();
   private static final Object LOCK = new Object();
   private static final Pattern FRESH_SCHEMA = Pattern.compile("t[0-9]+_[0-9]+");
@@ -117,6 +119,52 @@ public final class PgTestDatabase {
     return Assumptions.abort("real-store test skipped: " + reason);
   }
 
+  /**
+   * A data source on the same server as {@link #dataSource()} whose connections start with these
+   * server options (the {@code options} connection parameter of the driver, for example {@code -c
+   * synchronous_commit=local}). Skips or fails like {@link #dataSource()} when there is no server.
+   * The job {@code ledger-durability} uses it to give fixtures a session that commits locally and
+   * the store under test a session with another default than the server's.
+   */
+  public static DataSource dataSourceWithOptions(String options) {
+    return withOptions(dataSource(), options);
+  }
+
+  /**
+   * The copy of a {@link PGSimpleDataSource} with these server options: same server, database,
+   * user, password and other URL parameters. No connection is made.
+   */
+  static DataSource withOptions(DataSource base, String options) {
+    if (!(base instanceof PGSimpleDataSource simple)) {
+      throw new IllegalStateException(
+          "the data source of the real store is not a PGSimpleDataSource");
+    }
+    PGSimpleDataSource copy = new PGSimpleDataSource();
+    try {
+      copy.setUrl(simple.getUrl());
+    } catch (IllegalArgumentException e) {
+      // the message of the driver repeats the URL, which may carry a password
+      throw new IllegalStateException(URL_VARIABLE + " could not be copied");
+    }
+    // the URL that a data source generates leaves out the user and the password
+    copy.setUser(simple.getUser());
+    copy.setPassword(simple.getPassword());
+    copy.setOptions(options);
+    return copy;
+  }
+
+  /**
+   * The hot standby of the job {@code ledger-durability}: {@code 127.0.0.1:5433}, database {@code
+   * postgres}, user {@code postgres}, {@code trust} (the container of the standby runs on the host
+   * network of the runner, see {@code scripts/ci/pg-quorum-up.sh}). Skips like {@link
+   * #dataSource()} when there is no primary or the standby does not answer and the real store is
+   * not required; fails when it is.
+   */
+  public static DataSource standbyDataSource() {
+    dataSource(); // no primary, no standby: skip, or fail when the real store is required
+    return requireOrAbort(STANDBY_URL, required());
+  }
+
   /** A schema name unique per JVM: the process id and a counter, matching {@link SqlIdentifier}. */
   public static String freshSchema() {
     return SqlIdentifier.require(
@@ -136,6 +184,10 @@ public final class PgTestDatabase {
     try (Connection connection = dataSource().getConnection();
         Statement statement = connection.createStatement()) {
       statement.execute("SET lock_timeout = '30s'");
+      // On a primary with a synchronous standby that is down (the job ledger-durability), a plain
+      // DROP would wait for the standby for ever. A test schema needs no standby, and this session
+      // commits locally. Harmless on a server without one.
+      statement.execute("SET synchronous_commit = local");
       statement.execute("DROP SCHEMA IF EXISTS " + identifier + " CASCADE");
     } catch (SQLException e) {
       throw new IllegalStateException(

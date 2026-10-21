@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -28,8 +29,17 @@ final class SqlSpy {
   private final AtomicInteger closed = new AtomicInteger();
   private volatile SQLException failOpen;
   private volatile SQLException failCommit;
+  private volatile SQLWarning commitWarning;
+  private volatile SQLException failWarnings;
   private volatile Fault fault;
   private volatile Answers answers;
+
+  /**
+   * The warning chain of the connection, as {@code getWarnings} sees it. One chain for all the
+   * connections of this spy: a test works with one connection at a time, and a chain that is there
+   * before a unit starts is the leftover of an earlier use of a pooled connection.
+   */
+  private final AtomicReference<SQLWarning> warnings = new AtomicReference<>();
 
   /** A statement whose text contains {@code fragment} fails with {@code exception}. */
   private record Fault(String fragment, SQLException exception, AtomicInteger remaining) {}
@@ -76,6 +86,39 @@ final class SqlSpy {
   /** Every {@code commit} fails with this exception (after it is recorded). */
   SqlSpy failCommitWith(SQLException exception) {
     this.failCommit = exception;
+    return this;
+  }
+
+  /**
+   * Every {@code commit} raises this warning on the connection, as the driver does with the {@code
+   * WARNING} that the server sends when a wait for a synchronous standby is cancelled: after the
+   * commit has returned, {@code getWarnings} holds it, and {@code clearWarnings} drops it.
+   */
+  SqlSpy warnOnCommit(SQLWarning warning) {
+    this.commitWarning = warning;
+    return this;
+  }
+
+  /**
+   * A warning arrives on the connection now, for example the notice of a statement. It is added to
+   * the end of the chain that {@code getWarnings} returns until {@code clearWarnings} drops it.
+   */
+  void raise(SQLWarning warning) {
+    warnings.updateAndGet(
+        chain -> {
+          if (chain == null) {
+            return warning;
+          }
+          if (chain != warning) {
+            chain.setNextWarning(warning);
+          }
+          return chain;
+        });
+  }
+
+  /** {@code getWarnings} fails with this exception (a connection that broke after its commit). */
+  SqlSpy failGetWarningsWith(SQLException exception) {
+    this.failWarnings = exception;
     return this;
   }
 
@@ -160,6 +203,21 @@ final class SqlSpy {
             events.add("commit");
             if (failCommit != null) {
               throw failCommit;
+            }
+            if (commitWarning != null) {
+              raise(commitWarning);
+            }
+          } else if (name.equals("clearWarnings")) {
+            events.add("clearWarnings");
+            warnings.set(null);
+          } else if (name.equals("getWarnings")) {
+            events.add("getWarnings");
+            if (failWarnings != null) {
+              throw failWarnings;
+            }
+            SQLWarning chain = warnings.get();
+            if (chain != null || real == null) {
+              return chain;
             }
           } else if (name.equals("rollback")) {
             events.add("rollback");
