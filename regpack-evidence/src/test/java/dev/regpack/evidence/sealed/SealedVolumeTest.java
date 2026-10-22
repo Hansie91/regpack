@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.evidence.sealed.RecordingFileOps.Op;
+import dev.regpack.model.Sha256;
 import dev.regpack.ports.evidence.EvidenceKey;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
@@ -29,6 +30,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Assumptions;
@@ -904,6 +907,100 @@ class SealedVolumeTest {
             "o/d-a/stray.txt");
     assertThat(volume.sweepTemporaries()).as("idempotent").isZero();
     assertThat(volume.read(new EvidenceKey("a/k"))).isPresent();
+  }
+
+  @Test
+  void theTemporaryNameOfARealPublishCarriesThePidOfThisProcessAndIsLeftAloneByAnotherSweep()
+      throws IOException {
+    AtomicReference<Path> temporary = new AtomicReference<>();
+    AtomicInteger sweptByTheOther = new AtomicInteger(-1);
+    AtomicBoolean stillThere = new AtomicBoolean();
+    // between writeAndForce and link, another volume object over the same directory (another
+    // store's open) sweeps the volume
+    FailingFileOps ops =
+        new FailingFileOps(FileOps.real())
+            .after(Op.WRITE_AND_FORCE, path -> true, temporary::set)
+            .before(
+                Op.LINK,
+                path -> true,
+                path -> {
+                  sweptByTheOther.set(
+                      new SealedVolume(root, "vol-a", FileOps.real()).sweepTemporaries());
+                  stillThere.set(Files.exists(temporary.get()));
+                });
+    SealedVolume volume = new SealedVolume(root, "vol-a", ops);
+
+    assertThat(volume.publish(KEY, FILE)).isTrue();
+
+    assertThat(temporary.get().getFileName().toString())
+        .matches("o-k1~tmp~" + ProcessHandle.current().pid() + "~[0-9]+");
+    assertThat(sweptByTheOther).hasValue(0);
+    assertThat(stillThere).isTrue();
+    assertThat(volume.read(KEY)).hasValueSatisfying(b -> assertThat(b).isEqualTo(FILE));
+    assertThat(temporaries(root)).isEmpty();
+  }
+
+  @Test
+  void aCompleteDeadTemporaryIsKeptAndListedAndOneThatDecodesNotIsDeleted() throws IOException {
+    SealedVolume volume = new SealedVolume(root, "vol-a", FileOps.real());
+    EvidenceKey key = new EvidenceKey("a/k");
+    byte[] whole = completeObjectFile(key);
+    Path dir = Files.createDirectories(root.resolve("o/d-a"));
+    Path complete = dir.resolve(SealedNames.temporary("o-k", DEAD_PID, 1));
+    Files.write(complete, whole);
+    Path half = dir.resolve(SealedNames.temporary("o-j", DEAD_PID, 2));
+    Files.write(half, FILE);
+
+    assertThat(volume.completeTemporaries())
+        .containsExactly("o/d-a/" + complete.getFileName().toString());
+    assertThat(volume.sweepTemporaries()).isEqualTo(1);
+
+    assertThat(complete).exists();
+    assertThat(half).doesNotExist();
+    assertThat(volume.keys("")).isEmpty();
+    assertThat(volume.read(key)).isEmpty();
+    assertThat(volume.sweepTemporaries()).as("idempotent").isZero();
+    // once the name exists with the same bytes the temporary is debris
+    assertThat(volume.publish(key, whole)).isTrue();
+    assertThat(volume.completeTemporaries()).isEmpty();
+    assertThat(volume.sweepTemporaries()).isEqualTo(1);
+    assertThat(complete).doesNotExist();
+  }
+
+  @Test
+  void aCompleteTemporaryOfAnEarlierIncarnationOfThisPidIsKeptToo() throws IOException {
+    long self = ProcessHandle.current().pid();
+    EvidenceKey key = new EvidenceKey("a/k");
+    Path stale = plantTemporary("o-k", self, 1, START.minusSeconds(3600));
+    Files.write(stale, completeObjectFile(key));
+    Files.setLastModifiedTime(stale, FileTime.from(START.minusSeconds(3600)));
+    SealedVolume volume = volumeStartedAt(Optional.of(START));
+
+    assertThat(volume.sweepTemporaries()).isZero();
+    assertThat(stale).exists();
+    assertThat(volume.completeTemporaries()).hasSize(1);
+    // a complete one that a running writer owns (written since the start) is neither
+    Path live = plantTemporary("o-k", self, 2, START.plusSeconds(60));
+    Files.write(live, completeObjectFile(key));
+    Files.setLastModifiedTime(live, FileTime.from(START.plusSeconds(60)));
+    assertThat(volume.completeTemporaries()).hasSize(1);
+    assertThat(volume.sweepTemporaries()).isZero();
+    assertThat(live).exists();
+  }
+
+  /** A whole object file for the key, as the store would build it. */
+  private static byte[] completeObjectFile(EvidenceKey key) {
+    byte[] payload = bytes("payload of " + key.path());
+    return SealedFormat.encodeObject(
+        new SealedFormat.Header(
+            key.path(),
+            "text/plain",
+            Sha256.of(payload),
+            payload.length,
+            Instant.parse("2026-03-01T00:00:00Z"),
+            "landing",
+            UNTIL),
+        payload);
   }
 
   /** The start of the JVM as the sweep sees it in the tests below. */

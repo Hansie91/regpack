@@ -1195,6 +1195,66 @@ class SealedEvidenceStoreTest {
     assertThatIllegalArgumentException().isThrownBy(() -> SealedEvidenceStore.open(config));
   }
 
+  /** The names (relative, '/') of everything below {@code dir}, directories included. */
+  private static List<String> everythingBelow(Path dir) throws IOException {
+    try (Stream<Path> walk = Files.walk(dir)) {
+      return walk.map(p -> dir.relativize(p).toString().replace('\\', '/')).sorted().toList();
+    }
+  }
+
+  @Test
+  void aRefusedOverlapLeavesTheFileSystemAsItWasAndTheCorrectedOpenSucceeds() throws IOException {
+    Path parent = root.toRealPath().resolve("fresh-parent");
+    Path outer = parent.resolve("va");
+    Path inner = outer.resolve("inner");
+    Path elsewhere = parent.resolve("vb");
+    List<SealedEvidenceStore.Config> overlapping =
+        List.of(
+            new SealedEvidenceStore.Config(outer, inner, "vol-a", "vol-b", clock),
+            new SealedEvidenceStore.Config(inner, outer, "vol-a", "vol-b", clock),
+            new SealedEvidenceStore.Config(outer, outer, "vol-a", "vol-b", clock),
+            new SealedEvidenceStore.Config(
+                outer, outer.resolve("x").resolve(".."), "vol-a", "vol-b", clock));
+
+    // neither root exists: a refusal creates nothing, not even the parent
+    for (SealedEvidenceStore.Config config : overlapping) {
+      assertThatIllegalArgumentException().isThrownBy(() -> SealedEvidenceStore.open(config));
+      assertThat(parent).as("nothing was created for %s", config.volumeB()).doesNotExist();
+    }
+    // one root exists: the refusal leaves it exactly as it was
+    Files.createDirectories(outer);
+    List<String> before = everythingBelow(parent);
+    for (SealedEvidenceStore.Config config : overlapping) {
+      assertThatIllegalArgumentException().isThrownBy(() -> SealedEvidenceStore.open(config));
+      assertThat(everythingBelow(parent)).isEqualTo(before);
+    }
+
+    // the corrected configuration opens: no stray directory is in the way
+    SealedEvidenceStore store =
+        SealedEvidenceStore.open(
+            new SealedEvidenceStore.Config(outer, elsewhere, "vol-a", "vol-b", clock),
+            FileOps.real());
+    assertThat(store.degraded()).isFalse();
+    assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
+  }
+
+  @Test
+  void aRefusedOverlapThroughALinkAboveTheRootsCreatesNothing() throws IOException {
+    Path base = root.toRealPath();
+    Path real = Files.createDirectory(base.resolve("real-parent"));
+    Path link = base.resolve("link-to-parent");
+    Assumptions.assumeTrue(
+        createLink(link, real), "this account can create neither a symbolic link nor a junction");
+
+    // neither root exists; the nearest existing ancestors are one directory under two names
+    SealedEvidenceStore.Config config =
+        new SealedEvidenceStore.Config(
+            real.resolve("vol"), link.resolve("vol"), "vol-a", "vol-b", clock);
+
+    assertThatIllegalArgumentException().isThrownBy(() -> SealedEvidenceStore.open(config));
+    assertThat(everythingBelow(real)).containsExactly("");
+  }
+
   @Test
   void aVolumeThatCannotHardLinkRefusesToOpen() {
     FailingFileOps failing = new FailingFileOps(FileOps.real());
@@ -1223,8 +1283,9 @@ class SealedEvidenceStoreTest {
     assertThatThrownBy(this::open)
         .isInstanceOf(EvidenceUnavailableException.class)
         .hasMessage(
-            "both volumes are unmarked and their roots are not empty (the root of a new store"
-                + " must be a new empty directory below the mount point)");
+            "both volumes are unmarked and their roots are not empty (volume vol-a holds 1 entry,"
+                + " volume vol-b holds 1 entry; the root of a new store must be a new empty"
+                + " directory below the mount point)");
     // a refusal writes nothing
     assertThat(volumeA.resolve(".sealed-volume")).doesNotExist();
     assertThat(volumeB.resolve(".sealed-volume")).doesNotExist();
@@ -1237,6 +1298,21 @@ class SealedEvidenceStoreTest {
             FileOps.real());
     assertThat(store.degraded()).isFalse();
     assertThat(store.put(request(KEY, "hello"))).isEqualTo(PutOutcome.CREATED);
+  }
+
+  @Test
+  void theNotEmptyRefusalNamesTheVolumeAndTheNumberOfEntriesButNoName() throws IOException {
+    Files.createDirectories(volumeA.resolve("secret-name-one"));
+    Files.write(volumeA.resolve("secret-name-two.txt"), utf8("x"));
+    Files.write(volumeA.resolve("x~tmp~1~1"), utf8("a temporary name does not count"));
+    Files.createDirectories(volumeB); // empty: not named
+
+    assertThatThrownBy(this::open)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage(
+            "both volumes are unmarked and their roots are not empty (volume vol-a holds 2"
+                + " entries; the root of a new store must be a new empty directory below the"
+                + " mount point)");
   }
 
   @Test
@@ -1435,6 +1511,26 @@ class SealedEvidenceStoreTest {
         .contains("the hold of the higher revision")
         // (17) Windows
         .contains("reports synchronousAcknowledgement true although no directory is forced")
-        .contains("attestation of G8 and on SP-W");
+        .contains("attestation of G8 and on SP-W")
+        // (1) a complete temporary file survives a power loss and is kept for the operator
+        .contains("the final name of an acknowledged object may be missing")
+        .contains("a complete temporary file of it survives and is kept for the operator")
+        .contains("scrub() reports it as COMPLETE_TEMPORARY")
+        // (3) verify and every caller that pages list() cost N/500 + 1 full walks
+        .contains("verify and any caller that pages list() cost N/500 + 1 full walks")
+        .contains("quadratic")
+        .contains("not usable beyond test sizes")
+        .contains("SP-W/P3b2 scale work")
+        // (10) the sweep keeps a complete temporary of an object or a meta
+        .contains("except a complete temporary file of an object or of a meta")
+        // (15) any difference between the two copies
+        .contains("differ in any byte, also in the header only")
+        .contains("the longest retain-until over both headers and the metas")
+        // (18) a foreign handle on a meta file
+        .contains("foreign handle on a meta file makes the atomic replace fail on Windows")
+        .contains("the caller of setLegalHold or extendRetention retries")
+        // (19) the memory of a put
+        .contains("A put holds the whole object in memory")
+        .contains("about 8 times the object size");
   }
 }

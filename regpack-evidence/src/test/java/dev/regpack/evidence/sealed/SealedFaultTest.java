@@ -43,6 +43,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
@@ -571,26 +573,159 @@ class SealedFaultTest {
                 SealedNames.temporary("o-k1", ProcessHandle.current().pid(), 10_000_000));
     Files.write(liveTemp, utf8("a writer that is still running"));
 
-    // none of it is listed or served by the store that is open, and scrub sees only the real gap
+    // none of it is listed or served by the store that is open; scrub sees the real gap and names
+    // the two complete temporaries (not the half meta, not the self-test, not the live writer's)
+    String deadTempLine = "b " + relative(volumeB, deadTemp) + " COMPLETE_TEMPORARY";
+    String deadGhostLine = "a " + relative(volumeA, deadGhost) + " COMPLETE_TEMPORARY";
     assertThat(store.list("", Optional.empty(), 10)).containsExactly(KEY);
     assertThat(store.get(KEY).orElseThrow().bytes()).isEqualTo(utf8("hello"));
     assertThat(store.get(ghost)).isEmpty();
-    assertThat(store.scrub()).containsExactly("b landing/k1 MISSING_COPY");
+    assertThat(store.scrub())
+        .containsExactly("b landing/k1 MISSING_COPY", deadGhostLine, deadTempLine);
 
-    // opening sweeps what belongs to dead processes and only that
+    // opening sweeps what belongs to dead processes and cannot be an object or a meta: a complete
+    // object that never got its name is kept for an operator (PSEALED-1), the rest is deleted
     SealedEvidenceStore reopened = open();
-    assertThat(deadTemp).doesNotExist();
     assertThat(deadMeta).doesNotExist();
     assertThat(deadSelfTest).doesNotExist();
-    assertThat(deadGhost).doesNotExist();
+    assertThat(deadTemp).exists();
+    assertThat(deadGhost).exists();
+    assertThat(Files.readAllBytes(deadGhost)).isEqualTo(ghostFile);
     assertThat(liveTemp).exists();
     assertThat(reopened.list("", Optional.empty(), 10)).containsExactly(KEY);
     assertThat(reopened.get(ghost)).isEmpty();
+    assertThat(reopened.scrub())
+        .containsExactly("b landing/k1 MISSING_COPY", deadGhostLine, deadTempLine);
     // the retry completes the second volume
     assertThat(reopened.put(request(KEY, "hello"))).isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
     assertThat(Files.readAllBytes(SealedTamper.objectPath(volumeB, KEY)))
         .isEqualTo(Files.readAllBytes(SealedTamper.objectPath(volumeA, KEY)));
+    // the temporary whose name now exists with the same bytes is debris and no longer reported
+    assertThat(reopened.scrub()).containsExactly(deadGhostLine);
+
+    // and the next open deletes it, but never the complete object without a name
+    open();
+    assertThat(deadTemp).doesNotExist();
+    assertThat(deadGhost).exists();
+    assertThat(liveTemp).exists();
+  }
+
+  /** The path of {@code file} below {@code volumeRoot}, as scrub names a temporary file. */
+  private static String relative(Path volumeRoot, Path file) {
+    return volumeRoot.relativize(file).toString().replace('\\', '/');
+  }
+
+  /** Renames the object file of the key on the volume to a temporary name of a dead process. */
+  private static Path turnIntoDeadTemporary(Path volumeRoot, EvidenceKey key, long counter)
+      throws IOException {
+    Path object = SealedTamper.objectPath(volumeRoot, key);
+    String last = object.getFileName().toString();
+    Path dead = object.resolveSibling(SealedNames.temporary(last, DEAD_PID, counter));
+    Files.move(object, dead);
+    return dead;
+  }
+
+  @Test
+  void aCompleteObjectWhoseNameWasLostWithAPowerFailureSurvivesOpenAndIsReportedNotServed()
+      throws IOException {
+    assertThat(ProcessHandle.of(DEAD_PID)).as("the constant must name no process").isEmpty();
+    open().put(request(KEY, "acknowledged"));
+    // what NTFS can replay after a power loss: the forced temporary files, not the links
+    Path tempOnA = turnIntoDeadTemporary(volumeA, KEY, 1);
+    Path tempOnB = turnIntoDeadTemporary(volumeB, KEY, 2);
+    byte[] fileOnA = Files.readAllBytes(tempOnA);
+
+    SealedEvidenceStore store = open();
+
+    assertThat(tempOnA).exists();
+    assertThat(tempOnB).exists();
+    assertThat(Files.readAllBytes(tempOnA)).isEqualTo(fileOnA);
+    assertThat(store.get(KEY)).isEmpty();
+    assertThat(store.list("", Optional.empty(), 10)).isEmpty();
+    assertThat(store.repair()).isZero();
+    assertThat(store.scrub())
+        .containsExactly(
+            "a " + relative(volumeA, tempOnA) + " COMPLETE_TEMPORARY",
+            "b " + relative(volumeB, tempOnB) + " COMPLETE_TEMPORARY");
+    // the operator adopts it: the name comes back and the temporary is no longer reported
+    Files.move(tempOnA, SealedTamper.objectPath(volumeA, KEY));
+    Files.move(tempOnB, SealedTamper.objectPath(volumeB, KEY));
+    assertThat(store.get(KEY).orElseThrow().bytes()).isEqualTo(utf8("acknowledged"));
+    assertThat(store.scrub()).isEmpty();
+  }
+
+  @Test
+  void aCompleteMetaWhoseReplaceWasLostIsKeptAndASupersededOrHalfWrittenOneIsDeleted()
+      throws IOException {
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "hello"));
+    store.setLegalHold(KEY, true); // revision 1 on both volumes
+    Path metaOnA = SealedTamper.metaPath(volumeA, KEY);
+    Path metaOnB = SealedTamper.metaPath(volumeB, KEY);
+    byte[] storedOnB = Files.readAllBytes(metaOnB);
+    SealedFormat.Meta stored = SealedFormat.decodeMeta(storedOnB);
+    assertThat(stored.rev()).isEqualTo(1);
+    // volume a: the replace of the stored meta was lost, only the forced temporary survived
+    Path onlyTrace = metaOnA.resolveSibling(SealedNames.temporary("m-k1", DEAD_PID, 1));
+    Files.move(metaOnA, onlyTrace);
+    // volume b: temporaries beside the stored revision 1
+    Path same = metaOnB.resolveSibling(SealedNames.temporary("m-k1", DEAD_PID, 2));
+    Files.write(same, storedOnB);
+    Path lower = metaOnB.resolveSibling(SealedNames.temporary("m-k1", DEAD_PID, 3));
+    Files.write(
+        lower,
+        SealedFormat.encodeMeta(
+            new SealedFormat.Meta(0, stored.retentionClass(), stored.retainUntil(), false)));
+    Path higher = metaOnB.resolveSibling(SealedNames.temporary("m-k1", DEAD_PID, 4));
+    Files.write(
+        higher,
+        SealedFormat.encodeMeta(
+            new SealedFormat.Meta(2, stored.retentionClass(), stored.retainUntil(), false)));
+    Path half = metaOnB.resolveSibling(SealedNames.temporary("m-k1", DEAD_PID, 5));
+    Files.write(half, Arrays.copyOf(storedOnB, storedOnB.length - 3));
+
+    SealedEvidenceStore reopened = open();
+
+    assertThat(onlyTrace).as("a complete meta with no stored meta").exists();
+    assertThat(higher).as("a complete meta above the stored revision").exists();
+    assertThat(same).as("the stored meta again").doesNotExist();
+    assertThat(lower).as("below the stored revision").doesNotExist();
+    assertThat(half).as("half written").doesNotExist();
+    assertThat(Files.readAllBytes(metaOnB)).isEqualTo(storedOnB);
+    assertThat(reopened.scrub())
+        .contains(
+            "a " + relative(volumeA, onlyTrace) + " COMPLETE_TEMPORARY",
+            "b " + relative(volumeB, higher) + " COMPLETE_TEMPORARY")
+        .hasSize(2);
+  }
+
+  @Test
+  void aHalfWrittenOrMisplacedOrAlreadyNamedTemporaryIsDeletedAtOpen() throws IOException {
+    SealedEvidenceStore store = open();
+    EvidenceKey other = new EvidenceKey("landing/k2");
+    store.put(request(KEY, "hello"));
+    store.put(request(other, "other"));
+    byte[] whole = Files.readAllBytes(SealedTamper.objectPath(volumeA, KEY));
+    Path dir = SealedTamper.objectPath(volumeA, KEY).getParent();
+    // half written: a cut of a whole file, and the whole file without its trailer
+    Path half = dir.resolve(SealedNames.temporary("o-k3", DEAD_PID, 1));
+    Files.write(half, Arrays.copyOf(whole, whole.length / 2));
+    Path noTrailer = dir.resolve(SealedNames.temporary("o-k4", DEAD_PID, 2));
+    Files.write(noTrailer, Arrays.copyOf(whole, whole.length - 1));
+    // a whole file of another key under the name of a key it does not hold
+    Path misplaced = dir.resolve(SealedNames.temporary("o-k5", DEAD_PID, 3));
+    Files.write(misplaced, whole);
+    // a whole file whose final name exists with the same bytes
+    Path named = dir.resolve(SealedNames.temporary("o-k1", DEAD_PID, 4));
+    Files.write(named, whole);
+
+    SealedEvidenceStore reopened = open();
+
+    for (Path gone : List.of(half, noTrailer, misplaced, named)) {
+      assertThat(gone).as(gone.getFileName().toString()).doesNotExist();
+    }
     assertThat(reopened.scrub()).isEmpty();
+    assertThat(reopened.get(KEY).orElseThrow().bytes()).isEqualTo(utf8("hello"));
   }
 
   // ---------------------------------------------------------------- outages
@@ -1021,6 +1156,83 @@ class SealedFaultTest {
         .isInstanceOf(EvidenceCorruptionException.class)
         .hasMessageContaining(KEY.path());
     assertThat(bothVolumes()).as("nothing is written").isEqualTo(before);
+  }
+
+  /**
+   * One copy has its header edited (media type, class, retain-until) and its trailer recomputed:
+   * both copies pass their own seal, hold the same payload and differ in their bytes.
+   */
+  private void aHeaderOnlyDivergence(Path edited, Instant editedRetainUntil) throws IOException {
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "the bytes"));
+    Instant original = retention().retainUntil();
+    byte[] editedFile =
+        SealedTamper.fileWithOtherHeader(
+            edited, KEY, "application/x-edited", "edited", editedRetainUntil);
+    SealedFormat.decodeObject(editedFile, KEY.path()); // whole and self-consistent
+    SealedTamper.replaceObject(edited, KEY, editedFile);
+    Map<String, String> before = bothVolumes();
+    boolean editedIsLonger = editedRetainUntil.isAfter(original);
+    Instant between = editedIsLonger ? original.plusSeconds(1) : editedRetainUntil.plusSeconds(1);
+    Instant longest = editedIsLonger ? editedRetainUntil : original;
+
+    // scrub sees any byte difference, and so do the writes: no side is taken for the truth
+    assertThat(store.scrub()).containsExactly(KEY.path() + " DIVERGENT");
+    assertThatThrownBy(() -> store.put(request(KEY, "the bytes")))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(KEY.path());
+    assertThatThrownBy(() -> store.extendRetention(KEY, between))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(KEY.path());
+    assertThatThrownBy(() -> store.setLegalHold(KEY, true))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .hasMessageContaining(KEY.path());
+    assertThat(bothVolumes()).as("nothing is written").isEqualTo(before);
+    assertThat(store.repair()).isZero();
+    // a read serves the longest retention over both headers, whichever volume was edited
+    StoredObject served = store.get(KEY).orElseThrow();
+    assertThat(served.retention().retainUntil()).isEqualTo(longest);
+    assertThat(served.bytes()).isEqualTo(utf8("the bytes"));
+    assertThat(served.retention().retentionClass().name())
+        .isEqualTo(editedIsLonger ? "edited" : "landing");
+  }
+
+  @Test
+  void aHeaderOnlyDivergenceWithAShorterRetentionOnVolumeAServesTheLongerOneFromB()
+      throws IOException {
+    aHeaderOnlyDivergence(volumeA, clock.now().plus(Duration.ofDays(1)));
+  }
+
+  @Test
+  void aHeaderOnlyDivergenceWithAShorterRetentionOnVolumeBServesTheLongerOneFromA()
+      throws IOException {
+    aHeaderOnlyDivergence(volumeB, clock.now().plus(Duration.ofDays(1)));
+  }
+
+  @Test
+  void aHeaderOnlyDivergenceWithALongerRetentionOnVolumeAIsServedToo() throws IOException {
+    aHeaderOnlyDivergence(volumeA, clock.now().plus(Duration.ofDays(4000)));
+  }
+
+  @Test
+  void aHeaderOnlyDivergenceWithALongerRetentionOnVolumeBIsServedToo() throws IOException {
+    aHeaderOnlyDivergence(volumeB, clock.now().plus(Duration.ofDays(4000)));
+  }
+
+  @Test
+  void aMetaLongerThanBothDivergentHeadersStillWinsTheServedRetention() throws IOException {
+    SealedEvidenceStore store = open();
+    store.put(request(KEY, "the bytes"));
+    Instant meta = retention().retainUntil().plus(Duration.ofDays(9000));
+    store.extendRetention(KEY, meta);
+    SealedTamper.replaceObject(
+        volumeA,
+        KEY,
+        SealedTamper.fileWithOtherHeader(
+            volumeA, KEY, "text/plain", "landing", clock.now().plus(Duration.ofDays(1))));
+
+    assertThat(store.get(KEY).orElseThrow().retention().retainUntil()).isEqualTo(meta);
+    assertThat(store.scrub()).containsExactly(KEY.path() + " DIVERGENT");
   }
 
   // ---------------------------------------------------------------- restart states of repair
@@ -1577,11 +1789,24 @@ class SealedFaultTest {
       assertThat(objectOnA).exists();
       assertThat(objectOnB).doesNotExist();
 
-      scrubbing.set(true);
-      Future<List<String>> scrub = pool.submit(store::scrub);
-      // a bounded wait on a latch (no sleep as synchronisation): a scrub that does not take the
-      // key lock reads the copy on volume a at once; one that does is still waiting for the lock
-      boolean readTheKeyWhilePutHeldIt = scrubReadsA.await(500, TimeUnit.MILLISECONDS);
+      AtomicReference<Thread> scrubThread = new AtomicReference<>();
+      Future<List<String>> scrub =
+          pool.submit(
+              () -> {
+                scrubThread.set(Thread.currentThread());
+                scrubbing.set(true); // set before the call, so that every read of it is counted
+                return store.scrub();
+              });
+      // a positive wait (bounded): the scrub thread is inside scrub() and parked, which is where a
+      // scrub that takes the key lock waits for the put; one that does not take it reads the copy
+      // on volume a and finishes, and this wait ends at once with the read recorded
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+      while (!scrub.isDone() && !isParkedInScrub(scrubThread.get())) {
+        assertThat(System.nanoTime()).as("the scrub thread never parked").isLessThan(deadline);
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+      }
+      boolean readTheKeyWhilePutHeldIt = scrubReadsA.getCount() == 0;
+      boolean finishedWhilePutHeldIt = scrub.isDone();
       releasePut.countDown();
 
       assertThat(put.get(60, TimeUnit.SECONDS)).isEqualTo(PutOutcome.CREATED);
@@ -1589,12 +1814,31 @@ class SealedFaultTest {
       assertThat(readTheKeyWhilePutHeldIt)
           .as("scrub read the key while a put held its lock")
           .isFalse();
+      assertThat(finishedWhilePutHeldIt).as("scrub finished while a put held the key").isFalse();
       assertThat(findings).as("a key between two puts is whole").isEmpty();
     } finally {
       releasePut.countDown();
       pool.shutdownNow();
     }
     assertThat(store.scrub()).isEmpty();
+  }
+
+  /** True when the thread is parked (or blocked) in a call of {@code scrub()} of the store. */
+  private static boolean isParkedInScrub(Thread thread) {
+    if (thread == null) {
+      return false;
+    }
+    Thread.State state = thread.getState();
+    if (state != Thread.State.WAITING
+        && state != Thread.State.TIMED_WAITING
+        && state != Thread.State.BLOCKED) {
+      return false;
+    }
+    return Arrays.stream(thread.getStackTrace())
+        .anyMatch(
+            frame ->
+                frame.getClassName().equals(SealedEvidenceStore.class.getName())
+                    && frame.getMethodName().equals("scrub"));
   }
 
   private static void awaitOrFail(CountDownLatch latch) throws IOException {

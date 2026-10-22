@@ -384,6 +384,22 @@ public interface EvidenceStoreContract {
   }
 
   @Test
+  default void aPrefixMatchesTheStartOfAKeyOnly() {
+    // "b" occurs inside ab and xab and at the start of b only; "q/b" has it as a later segment
+    EvidenceKey ab = EvidenceKey.of("ab");
+    EvidenceKey b = EvidenceKey.of("b");
+    EvidenceKey xab = EvidenceKey.of("xab");
+    EvidenceKey qb = EvidenceKey.of("q", "b");
+    for (EvidenceKey key : List.of(ab, b, xab, qb)) {
+      store().put(request(key, "v", "text/plain", fiveYears()));
+    }
+    assertThat(store().list("b", Optional.empty(), 10)).containsExactly(b);
+    assertThat(store().list("a", Optional.empty(), 10)).containsExactly(ab);
+    assertThat(store().list("q/", Optional.empty(), 10)).containsExactly(qb);
+    assertThat(store().list("ab", Optional.empty(), 10)).containsExactly(ab);
+  }
+
+  @Test
   default void listPagesWalkAllKeysOnce() {
     List<EvidenceKey> expected = new ArrayList<>();
     for (int i = 0; i < 250; i++) {

@@ -5,6 +5,7 @@ import dev.regpack.ports.evidence.EvidenceKey;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 
 /**
  * Test helper (T8; T15 uses it too): damages one volume of a P-SEALED store on disk the way a
@@ -61,6 +62,34 @@ public final class SealedTamper {
     Path file = objectPath(volumeRoot, key);
     Files.createDirectories(file.getParent());
     Files.write(file, objectFile);
+  }
+
+  /**
+   * An object file that is whole and passes its own seal, carries the stored payload and differs
+   * from the stored file in the header only (media type, retention class, retain-until): the edit
+   * of someone with storage access who recomputes the trailer. Put in place of one copy of a key it
+   * gives two copies of one payload that differ in their bytes.
+   */
+  public static byte[] fileWithOtherHeader(
+      Path volumeRoot,
+      EvidenceKey key,
+      String mediaType,
+      String retentionClass,
+      Instant retainUntil)
+      throws IOException {
+    SealedFormat.Decoded stored =
+        SealedFormat.decodeObject(Files.readAllBytes(objectPath(volumeRoot, key)), key.path());
+    SealedFormat.Header header = stored.header();
+    return SealedFormat.encodeObject(
+        new SealedFormat.Header(
+            header.key(),
+            mediaType,
+            header.sha256(),
+            header.length(),
+            header.writtenAt(),
+            retentionClass,
+            retainUntil),
+        stored.payload());
   }
 
   /**

@@ -13,12 +13,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -346,6 +348,19 @@ final class SealedVolume {
   }
 
   private boolean holdsNothing(boolean markerDoesNotCount) throws IOException {
+    return countEntries(markerDoesNotCount) == 0;
+  }
+
+  /**
+   * The number of entries of the root that make {@link #isEmpty} false (the marker counts), without
+   * their names: for the message that refuses a root which is not empty.
+   */
+  int entriesInTheWay() throws IOException {
+    return countEntries(false);
+  }
+
+  private int countEntries(boolean markerDoesNotCount) throws IOException {
+    int count = 0;
     for (Path entry : ops.list(root)) {
       String name = nameOf(entry);
       if (SealedNames.isTemporary(name)
@@ -353,9 +368,9 @@ final class SealedVolume {
           || (name.equals(OBJECTS) && !holdsFiles(entry))) {
         continue;
       }
-      return false;
+      count++;
     }
-    return true;
+    return count;
   }
 
   private boolean holdsFiles(Path directory) throws IOException {
@@ -535,14 +550,36 @@ final class SealedVolume {
 
   // ---------------------------------------------------------------- temporaries
 
+  /** What the sweep does with one temporary file. */
+  private enum Fate {
+    /** Not ours, or owned by a running writer: not touched, not reported. */
+    LEAVE,
+    /** Debris that is no trace of an acknowledged write: deleted. */
+    DELETE,
+    /** A complete object or meta that may be the only surviving name of a write: kept, reported. */
+    KEEP
+  }
+
   /**
-   * Deletes the temporary files ({@code ~tmp~<pid>~<counter>}) that no running writer can own,
-   * anywhere in the volume: those of a pid that is not running, and those of a pid that is running
-   * but that were last written more than two seconds before this JVM started (a container whose JVM
-   * is always pid 1, or a pid that was handed on to another process, would otherwise keep the
-   * debris of its predecessors for ever; where the platform does not report the start of this JVM
-   * only the first rule applies). The files that this JVM or another running process wrote since
-   * and names that do not have the temporary form are left alone.
+   * Deletes the temporary files ({@code ~tmp~<pid>~<counter>}) that no running writer can own and
+   * that are not the only trace of a write, anywhere in the volume. A file is no running writer's
+   * when its pid is not running, or when its pid is running but it was last written more than two
+   * seconds before this JVM started (a container whose JVM is always pid 1, or a pid that was
+   * handed on to another process, would otherwise keep the debris of its predecessors for ever;
+   * where the platform does not report the start of this JVM only the first rule applies). The
+   * files that this JVM or another running process wrote since and names that do not have the
+   * temporary form are left alone.
+   *
+   * <p><b>A complete temporary file of an object or a meta is kept.</b> Where no directory is
+   * forced (Windows) a power loss can leave the forced temporary file of an acknowledged write
+   * without the link that gave it its final name. Such a file is decoded first: when it is a whole,
+   * valid file whose header key is the key that its directory and name give (an object) or a valid
+   * meta, and the final name does not hold the same bytes (for a meta: and does not hold a higher
+   * revision), it is not deleted but left in place, where it is never listed or served, and {@link
+   * #completeTemporaries} names it so that an operator can adopt or remove it. Only files that do
+   * not decode (half written), that belong to another key than their place says, and those whose
+   * final name already holds the same bytes are deleted. A file that cannot be read is an {@link
+   * IOException}: nothing that was not inspected is deleted.
    *
    * <p>The owner of a file is told by the pid of this PID namespace and the age of the file alone:
    * a second process on the same directory in another container or on another host is not
@@ -553,56 +590,177 @@ final class SealedVolume {
    */
   int sweepTemporaries() throws IOException {
     int swept = 0;
+    for (Path file : temporaryFiles()) {
+      if (fateOf(file) != Fate.DELETE) {
+        continue;
+      }
+      try {
+        ops.delete(file);
+      } catch (DirectoryNotEmptyException e) {
+        continue; // a directory with a temporary name is not ours to remove
+      }
+      swept++;
+    }
+    return swept;
+  }
+
+  /**
+   * The temporary files that {@link #sweepTemporaries} keeps because each is a complete object or
+   * meta that may be the only surviving name of a write, as paths below the root of the volume with
+   * '/' (for example {@code o/d-landing/o-k1~tmp~4711~3}), sorted. Writes nothing.
+   */
+  List<String> completeTemporaries() throws IOException {
+    List<String> kept = new ArrayList<>();
+    for (Path file : temporaryFiles()) {
+      if (fateOf(file) == Fate.KEEP) {
+        StringJoiner joined = new StringJoiner("/");
+        for (Path part : root.relativize(file)) {
+          joined.add(part.toString());
+        }
+        kept.add(joined.toString());
+      }
+    }
+    kept.sort(Comparator.naturalOrder());
+    return kept;
+  }
+
+  /** Every file or directory with a temporary name in the root, in {@code o} and below. */
+  private List<Path> temporaryFiles() throws IOException {
+    List<Path> found = new ArrayList<>();
     for (Path entry : ops.list(root)) {
       String name = nameOf(entry);
       if (SealedNames.isTemporary(name)) {
-        swept += sweepFile(entry, name);
+        found.add(entry);
       } else if (name.equals(OBJECTS)) {
-        swept += sweepDirectory(entry);
+        collectTemporaries(entry, found);
       }
     }
-    return swept;
+    return found;
   }
 
-  private int sweepDirectory(Path directory) throws IOException {
-    int swept = 0;
+  private void collectTemporaries(Path directory, List<Path> found) throws IOException {
     for (Path entry : ops.list(directory)) {
       String name = nameOf(entry);
       if (SealedNames.isTemporary(name)) {
-        swept += sweepFile(entry, name);
+        found.add(entry);
       } else if (name.startsWith("d-")) {
-        swept += sweepDirectory(entry);
+        collectTemporaries(entry, found);
       }
     }
-    return swept;
   }
 
-  private int sweepFile(Path file, String name) throws IOException {
+  private Fate fateOf(Path file) throws IOException {
+    String name = nameOf(file);
     OptionalLong pid = temporaryPid(name);
     if (pid.isEmpty()) {
-      return 0;
+      return Fate.LEAVE;
     }
     if (ProcessHandle.of(pid.getAsLong()).isPresent()) {
       Optional<Instant> start = processStart.get();
       if (start.isEmpty()) {
-        return 0; // no start instant: a running pid owns its files
+        return Fate.LEAVE; // no start instant: a running pid owns its files
       }
       Instant modified;
       try {
         modified = Files.getLastModifiedTime(file).toInstant();
       } catch (NoSuchFileException e) {
-        return 0; // gone already: not ours to count
+        return Fate.LEAVE; // gone already: not ours to count
       }
       if (!modified.isBefore(start.get().minus(START_SKEW))) {
-        return 0; // written by this incarnation or by a process that has run since
+        return Fate.LEAVE; // written by this incarnation or by a process that has run since
       }
     }
     try {
-      ops.delete(file);
-    } catch (DirectoryNotEmptyException e) {
-      return 0; // a directory with a temporary name is not ours to remove
+      return mayBeTheOnlyTrace(file, name.substring(0, name.indexOf("~tmp~")))
+          ? Fate.KEEP
+          : Fate.DELETE;
+    } catch (NoSuchFileException e) {
+      return Fate.LEAVE; // gone already
     }
-    return 1;
+  }
+
+  /**
+   * True when the temporary file is a complete object or meta whose final name {@code base} does
+   * not yet hold it (see {@link #sweepTemporaries}).
+   */
+  private boolean mayBeTheOnlyTrace(Path file, String base) throws IOException {
+    if (base.length() < 3
+        || (base.charAt(0) != 'o' && base.charAt(0) != 'm')
+        || !Files.isRegularFile(file)) {
+      return false; // the self-test, a directory, a name that is not an object's or a meta's
+    }
+    String segment;
+    try {
+      segment = SealedNames.decode(base);
+    } catch (IllegalArgumentException e) {
+      return false;
+    }
+    Optional<String> keyPath = keyPathOf(file.getParent(), segment);
+    if (keyPath.isEmpty()) {
+      return false;
+    }
+    byte[] bytes = ops.read(file);
+    Optional<byte[]> named;
+    try {
+      named = Optional.of(ops.read(file.resolveSibling(base)));
+    } catch (NoSuchFileException e) {
+      named = Optional.empty();
+    }
+    if (base.charAt(0) == 'o') {
+      return decodesAsObject(bytes, keyPath.get())
+          && (named.isEmpty() || !Arrays.equals(named.get(), bytes));
+    }
+    SealedFormat.Meta meta;
+    try {
+      meta = SealedFormat.decodeMeta(bytes);
+    } catch (SealedFormat.CorruptException | IllegalArgumentException e) {
+      return false;
+    }
+    if (named.isEmpty()) {
+      return true;
+    }
+    if (Arrays.equals(named.get(), bytes)) {
+      return false;
+    }
+    try {
+      return SealedFormat.decodeMeta(named.get()).rev() <= meta.rev();
+    } catch (SealedFormat.CorruptException | IllegalArgumentException e) {
+      return true; // a damaged stored meta: the temporary may be the only good one
+    }
+  }
+
+  private static boolean decodesAsObject(byte[] bytes, String keyPath) {
+    try {
+      SealedFormat.decodeObject(bytes, keyPath);
+      return true;
+    } catch (SealedFormat.CorruptException | IllegalArgumentException e) {
+      return false;
+    }
+  }
+
+  /** The key path of a file in {@code directory} with the last segment, if the place is ours. */
+  private Optional<String> keyPathOf(Path directory, String lastSegment) {
+    Path objects = root.resolve(OBJECTS);
+    if (!directory.startsWith(objects)) {
+      return Optional.empty();
+    }
+    StringJoiner path = new StringJoiner("/");
+    for (Path part : objects.relativize(directory)) {
+      String name = nameOf(part);
+      if (name.isEmpty()) {
+        continue; // the relative path of the directory itself
+      }
+      if (!name.startsWith("d-")) {
+        return Optional.empty();
+      }
+      try {
+        path.add(SealedNames.decode(name));
+      } catch (IllegalArgumentException e) {
+        return Optional.empty();
+      }
+    }
+    path.add(lastSegment);
+    return Optional.of(path.toString());
   }
 
   /** The pid of {@code <name>~tmp~<pid>~<counter>} (both numbers digits only), else empty. */

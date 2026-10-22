@@ -11,6 +11,7 @@ import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.channels.ClosedByInterruptException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -32,24 +33,30 @@ import java.util.regex.Pattern;
  * says how many failure domains the two volumes span only as far as {@link VolumeProbe} can show.
  *
  * <p><b>Put.</b> Under a 64-way striped lock of the key, both volumes are read first. A damaged
- * copy on either volume, and two whole copies whose payloads differ (what {@link #scrub()} calls
- * DIVERGENT), are an {@link EvidenceCorruptionException}; a copy with other bytes than the request
- * is an {@link EvidenceIntegrityException}; nothing is written in any of these cases. If exactly
- * one volume holds the key, its verified file is published to the other, so the volumes stay
- * byte-identical and the first header (media type, write time, retention class) is kept. If neither
- * holds it, the object file is built and published to volume a, then to volume b; the call returns
- * after both. The result is {@code CREATED} only when neither volume held the key. A failure on the
- * second volume is an {@link EvidenceUnavailableException}; the object stays on the first volume,
- * is served from it, and a retry with the same bytes completes the second. A retry with other bytes
- * (a journal rewrite with another {@code clock_instant}) is refused as other bytes before it
- * touches the second volume; {@code JournalWriter} then puts the stored object itself again, which
- * completes the second volume or throws, so that it never acknowledges a write that only one volume
- * holds.
+ * copy on either volume, and two whole copies that differ in any byte (the payload, or the header
+ * alone: media type, retention class, retain-until; what {@link #scrub()} calls DIVERGENT), are an
+ * {@link EvidenceCorruptionException}; the retention methods refuse such a pair in the same way.
+ * The volumes are byte-identical by construction, so this refuses nothing legitimate. A copy with
+ * other bytes than the request is an {@link EvidenceIntegrityException}; nothing is written in any
+ * of these cases. If exactly one volume holds the key, its verified file is published to the other,
+ * so the volumes stay byte-identical and the first header (media type, write time, retention class)
+ * is kept. If neither holds it, the object file is built and published to volume a, then to volume
+ * b; the call returns after both. The result is {@code CREATED} only when neither volume held the
+ * key. A failure on the second volume is an {@link EvidenceUnavailableException}; the object stays
+ * on the first volume, is served from it, and a retry with the same bytes completes the second. A
+ * retry with other bytes (a journal rewrite with another {@code clock_instant}) is refused as other
+ * bytes before it touches the second volume; {@code JournalWriter} then puts the stored object
+ * itself again, which completes the second volume or throws, so that it never acknowledges a write
+ * that only one volume holds.
  *
- * <p><b>Reads.</b> {@code get} serves the first copy that passes its own seal (volume a, then b).
- * Retention and legal hold are kept in the object header and in meta files with a revision; the
- * retain-until instant is the maximum over the header and both metas and the hold comes from the
- * meta of the higher revision (two metas of one revision merge: later retention, hold of either).
+ * <p><b>Reads.</b> {@code get} serves the payload and the header fields of the first copy that
+ * passes its own seal (volume a, then b). Retention and legal hold are kept in the object headers
+ * and in meta files with a revision; the retain-until instant is the maximum over the headers of
+ * both copies (when both are readable) and both metas, so a header that was cut short on one volume
+ * shortens nothing (the retention class is that of the header with the longest retain-until), and
+ * the hold comes from the meta of the higher revision (two metas of one revision merge: later
+ * retention, hold of either). A pair of copies that differ is an alarm for {@link #scrub()} and for
+ * every write; a read still serves it.
  *
  * <p><b>Health.</b> Each volume has a marker file with its id. A volume without its marker is a
  * replaced disk: the store is {@link #degraded()}, declares no synchronous acknowledgement, refuses
@@ -238,27 +245,32 @@ public final class SealedEvidenceStore implements EvidenceStore {
   }
 
   /**
-   * Both roots are created first (with their parents synced, see {@link SealedVolume#ensureRoot})
-   * and their real paths must differ with neither containing the other. Two missing markers on two
-   * empty roots are a new store (both markers are written); one missing marker is a replaced volume
-   * (the store is degraded and nothing is written), unless neither volume holds an object or a
-   * meta: that is a first open that was interrupted between its two markers, and the open writes
-   * the missing one. A marker with another id, or two missing markers on volumes that hold objects,
-   * refuse the open. Stale temporary files are swept: those of dead processes, and those of this
-   * pid that an earlier incarnation of the process left (see {@link
-   * SealedVolume#sweepTemporaries}). Each volume also proves that it can make a hard link as the
-   * publish protocol needs it, and sync its root where the platform can ({@link
+   * The two roots must differ with neither containing the other (decided on the absolute normalised
+   * paths and on the real path of the nearest existing ancestor, before anything is created: a
+   * refused open leaves the file system as it was, and the real paths are checked again once the
+   * roots exist). Both roots are then created (with their parents synced, see {@link
+   * SealedVolume#ensureRoot}). Two missing markers on two empty roots are a new store (both markers
+   * are written); one missing marker is a replaced volume (the store is degraded and nothing is
+   * written), unless neither volume holds an object or a meta: that is a first open that was
+   * interrupted between its two markers, and the open writes the missing one. A marker with another
+   * id, or two missing markers on volumes that hold objects, refuse the open. Stale temporary files
+   * are swept: those of dead processes, and those of this pid that an earlier incarnation of the
+   * process left, except a complete temporary file of an object or a meta that may be the only
+   * surviving name of an acknowledged write: that one is kept and reported by {@link #scrub()} (see
+   * {@link SealedVolume#sweepTemporaries}). Each volume also proves that it can make a hard link as
+   * the publish protocol needs it, and sync its root where the platform can ({@link
    * SealedVolume#checkHardLinks}).
    *
    * <p><b>Operator notes.</b> The root of a new store must be a new empty directory below the mount
    * point: lost+found, System Volume Information and $RECYCLE.BIN count as content, so two unmarked
-   * roots of which either holds an entry are refused with a text that names no file. A marker is
-   * read with its trailing white space removed. Two volumes that are not mounted (empty mount-point
-   * directories on the system disk) look like two new volumes and open as a new store on the system
-   * disk. The marker is a dot file: a restore by a shell glob over the volume leaves it out, and
-   * the next open refuses (two unmarked roots that hold objects); restore the directory itself or
-   * the marker. Opening takes no lock and sweeps every directory of both volumes (see {@link
-   * #limits()}, items 1 to 3 and 11 to 15); only one process may use a volume pair.
+   * roots of which either holds an entry are refused with a text that names the volume and the
+   * number of its entries and no file. A marker is read with its trailing white space removed. Two
+   * volumes that are not mounted (empty mount-point directories on the system disk) look like two
+   * new volumes and open as a new store on the system disk. The marker is a dot file: a restore by
+   * a shell glob over the volume leaves it out, and the next open refuses (two unmarked roots that
+   * hold objects); restore the directory itself or the marker. Opening takes no lock and sweeps
+   * every directory of both volumes (see {@link #limits()}, items 1 to 3 and 11 to 15); only one
+   * process may use a volume pair.
    */
   static SealedEvidenceStore open(Config config, FileOps ops) {
     Objects.requireNonNull(config, "config");
@@ -266,6 +278,8 @@ public final class SealedEvidenceStore implements EvidenceStore {
     Path realA;
     Path realB;
     try {
+      // decided before any directory is created: a refused open leaves the file system as it was
+      requireDisjointRoots(config.volumeA(), config.volumeB());
       new SealedVolume(config.volumeA(), config.volumeIdA(), ops).ensureRoot();
       new SealedVolume(config.volumeB(), config.volumeIdB(), ops).ensureRoot();
       realA = config.volumeA().toRealPath();
@@ -273,10 +287,8 @@ public final class SealedEvidenceStore implements EvidenceStore {
     } catch (IOException e) {
       throw new EvidenceUnavailableException("the evidence volumes cannot be opened: I/O error", e);
     }
-    if (realA.equals(realB) || realA.startsWith(realB) || realB.startsWith(realA)) {
-      throw new IllegalArgumentException(
-          "the two volume roots must be different directories, neither inside the other");
-    }
+    // the same test on the real paths of the roots that now exist (a link made since the check)
+    requireNeitherInsideTheOther(realA, realB);
     Vol first =
         new Vol(config.volumeIdA(), realA, new SealedVolume(realA, config.volumeIdA(), ops));
     Vol second =
@@ -284,6 +296,34 @@ public final class SealedEvidenceStore implements EvidenceStore {
     SealedEvidenceStore store = new SealedEvidenceStore(config, first, second);
     store.initialise();
     return store;
+  }
+
+  /**
+   * The two roots must not be one directory or lie one in the other, decided on the absolute
+   * normalised paths and on their location with the nearest existing ancestor resolved to its real
+   * path (a link above a root that does not exist yet), before anything is created.
+   */
+  private static void requireDisjointRoots(Path rootA, Path rootB) throws IOException {
+    Path normalA = rootA.normalize();
+    Path normalB = rootB.normalize();
+    requireNeitherInsideTheOther(normalA, normalB);
+    requireNeitherInsideTheOther(locationOf(normalA), locationOf(normalB));
+  }
+
+  /** The root with its nearest existing ancestor replaced by that ancestor's real path. */
+  private static Path locationOf(Path path) throws IOException {
+    Path existing = path;
+    while (existing != null && !Files.exists(existing)) {
+      existing = existing.getParent();
+    }
+    return existing == null ? path : existing.toRealPath().resolve(existing.relativize(path));
+  }
+
+  private static void requireNeitherInsideTheOther(Path one, Path other) {
+    if (one.equals(other) || one.startsWith(other) || other.startsWith(one)) {
+      throw new IllegalArgumentException(
+          "the two volume roots must be different directories, neither inside the other");
+    }
   }
 
   private void initialise() {
@@ -306,8 +346,10 @@ public final class SealedEvidenceStore implements EvidenceStore {
         requireOwnMarker(second, markerOfSecond);
         if (markerOfFirst.isEmpty() && markerOfSecond.isEmpty()) {
           throw new EvidenceUnavailableException(
-              "both volumes are unmarked and their roots are not empty (the root of a new store"
-                  + " must be a new empty directory below the mount point)");
+              "both volumes are unmarked and their roots are not empty ("
+                  + entriesInTheWay()
+                  + "; the root of a new store must be a new empty directory below the mount"
+                  + " point)");
         }
       } else {
         run(first, () -> first.volume().writeMarker());
@@ -322,6 +364,21 @@ public final class SealedEvidenceStore implements EvidenceStore {
     for (Vol vol : volumes) {
       run(vol, () -> vol.volume().sweepTemporaries());
     }
+  }
+
+  /**
+   * "volume a holds 2 entries, volume b holds 1 entry" for the volumes whose root is not empty: the
+   * volume id and a number, never a name (Convention 8).
+   */
+  private String entriesInTheWay() {
+    List<String> parts = new ArrayList<>();
+    for (Vol vol : volumes) {
+      int count = on(vol, () -> vol.volume().entriesInTheWay());
+      if (count > 0) {
+        parts.add("volume " + vol.id() + " holds " + count + (count == 1 ? " entry" : " entries"));
+      }
+    }
+    return parts.isEmpty() ? "no entry found when counted" : String.join(", ", parts);
   }
 
   /**
@@ -512,19 +569,17 @@ public final class SealedEvidenceStore implements EvidenceStore {
   }
 
   /**
-   * Two whole copies of one key whose payloads differ are an alarm of their own kind (found by
-   * {@link #scrub()} as DIVERGENT): neither volume can be taken for the truth, so nothing is
-   * written and nothing is acknowledged, whatever bytes the caller offers.
+   * Two whole copies of one key that differ in any byte (the payload, or the header alone: media
+   * type, retention class, retain-until) are an alarm of their own kind (found by {@link #scrub()}
+   * as DIVERGENT): neither volume can be taken for the truth, so nothing is written and nothing is
+   * acknowledged, whatever bytes the caller offers. The volumes are byte-identical by construction
+   * (a put publishes the first file's bytes to the second), so this refuses nothing that is
+   * legitimate.
    */
   private static void refuseDivergent(Copy onFirst, Copy onSecond, EvidenceKey key) {
     if (onFirst.kind() == Kind.PRESENT
         && onSecond.kind() == Kind.PRESENT
-        && !onFirst
-            .decoded()
-            .orElseThrow()
-            .header()
-            .sha256()
-            .equals(onSecond.decoded().orElseThrow().header().sha256())) {
+        && !Arrays.equals(onFirst.file(), onSecond.file())) {
       throw new EvidenceCorruptionException("the two copies of " + key.path() + " differ");
     }
   }
@@ -561,12 +616,14 @@ public final class SealedEvidenceStore implements EvidenceStore {
   public Optional<StoredObject> get(EvidenceKey key) {
     Objects.requireNonNull(key, "key");
     Copy onFirst = tryCopy(first, key);
-    if (onFirst.kind() == Kind.PRESENT) {
-      return Optional.of(assemble(key, onFirst.decoded().orElseThrow()));
-    }
     Copy onSecond = tryCopy(second, key);
-    if (onSecond.kind() == Kind.PRESENT) {
-      return Optional.of(assemble(key, onSecond.decoded().orElseThrow()));
+    if (onFirst.kind() == Kind.PRESENT || onSecond.kind() == Kind.PRESENT) {
+      // the payload and the header fields come from the first valid copy (volume a, then b); the
+      // retention comes from the copy whose header holds the longest retain-until, so that a copy
+      // whose header was cut short (scrub reports the pair as DIVERGENT) shortens nothing
+      Copy served = onFirst.kind() == Kind.PRESENT ? onFirst : onSecond;
+      return Optional.of(
+          assemble(key, served.decoded().orElseThrow(), longestRetention(onFirst, onSecond)));
     }
     if (onFirst.kind() == Kind.UNREACHABLE || onSecond.kind() == Kind.UNREACHABLE) {
       throw new EvidenceUnavailableException(
@@ -578,7 +635,25 @@ public final class SealedEvidenceStore implements EvidenceStore {
     return Optional.empty();
   }
 
-  private StoredObject assemble(EvidenceKey key, SealedFormat.Decoded decoded) {
+  /** The header of a valid copy that holds the longest retain-until (the first on a tie). */
+  private static SealedFormat.Header longestRetention(Copy onFirst, Copy onSecond) {
+    SealedFormat.Header best =
+        (onFirst.kind() == Kind.PRESENT ? onFirst : onSecond).decoded().orElseThrow().header();
+    if (onFirst.kind() == Kind.PRESENT && onSecond.kind() == Kind.PRESENT) {
+      SealedFormat.Header other = onSecond.decoded().orElseThrow().header();
+      if (other.retainUntil().isAfter(best.retainUntil())) {
+        best = other;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * @param decoded the copy that is served: payload, media type, hash and write time
+   * @param retentionHeader the header whose retention class and retain-until count (with the metas)
+   */
+  private StoredObject assemble(
+      EvidenceKey key, SealedFormat.Decoded decoded, SealedFormat.Header retentionHeader) {
     SealedFormat.Header header = decoded.header();
     MetaRead onFirst = tryMeta(first, key);
     MetaRead onSecond = tryMeta(second, key);
@@ -592,14 +667,15 @@ public final class SealedEvidenceStore implements EvidenceStore {
     if (anyDamaged && !anyValid) {
       throw new EvidenceCorruptionException("damaged retention record of " + key.path());
     }
-    Effective effective = effective(header, onFirst, onSecond);
+    Effective effective = effective(retentionHeader, onFirst, onSecond);
     return new StoredObject(
         key,
         decoded.payload(),
         header.mediaType(),
         header.sha256(),
         header.writtenAt(),
-        new Retention(new RetentionClass(header.retentionClass()), effective.retainUntil()),
+        new Retention(
+            new RetentionClass(retentionHeader.retentionClass()), effective.retainUntil()),
         effective.legalHold());
   }
 
@@ -752,6 +828,7 @@ public final class SealedEvidenceStore implements EvidenceStore {
   private Snapshot snapshot(EvidenceKey key) {
     Copy onFirst = readCopy(first, key);
     Copy onSecond = readCopy(second, key);
+    refuseDivergent(onFirst, onSecond, key); // a header edit on one volume is no extension basis
     Copy valid = onFirst.kind() == Kind.PRESENT ? onFirst : onSecond;
     if (valid.kind() != Kind.PRESENT) {
       if (onFirst.kind() == Kind.CORRUPT || onSecond.kind() == Kind.CORRUPT) {
@@ -918,8 +995,13 @@ public final class SealedEvidenceStore implements EvidenceStore {
    * Reads every copy of every object and writes nothing. One line per defect, sorted by key and
    * then by volume id: {@code "<volumeId> <key> CORRUPT"} (the copy fails its own seal), {@code
    * "<volumeId> <key> MISSING_COPY"} (the other volume holds one), {@code "<volumeId> <key>
-   * CORRUPT_META"} (the retention record is damaged) and {@code "<key> DIVERGENT"} (both copies are
-   * whole but differ). Empty on a clean store.
+   * CORRUPT_META"} (the retention record is damaged), {@code "<key> DIVERGENT"} (both copies are
+   * whole but differ in any byte, also in the header alone) and {@code "<volumeId> <path>
+   * COMPLETE_TEMPORARY"} (a temporary file of a dead writer that is a complete object or meta whose
+   * final name does not hold it: after a power loss on Windows it can be the only surviving name of
+   * an acknowledged write; {@code <path>} is the path of the file below the volume root with '/',
+   * for example {@code o/d-landing/o-k1~tmp~4711~3}, sorted among the others by that path; an
+   * operator adopts it by renaming it to its final name, or removes it). Empty on a clean store.
    *
    * <p>Each key is read under the key's lock, the one a put takes, so a put of this store is seen
    * as done or not begun and never as a missing copy. The findings are a snapshot per key: the keys
@@ -959,6 +1041,11 @@ public final class SealedEvidenceStore implements EvidenceStore {
         lock.unlock();
       }
     }
+    for (Vol vol : volumes) {
+      for (String name : on(vol, () -> vol.volume().completeTemporaries())) {
+        findings.add(new Finding(name, vol.id(), vol.id() + " " + name + " COMPLETE_TEMPORARY"));
+      }
+    }
     findings.sort(
         Comparator.comparing(Finding::key)
             .thenComparing(Finding::volumeId)
@@ -976,7 +1063,11 @@ public final class SealedEvidenceStore implements EvidenceStore {
     return "P-SEALED limits. SP-W has not been run, so none of the following is shown by a test. "
         + "(1) Directory durability: directory entries are forced on POSIX systems only; on "
         + "Windows the JDK cannot force a directory, so a new file name may not survive a power "
-        + "failure although its data was forced; on POSIX systems the gap after a restart in "
+        + "failure although its data was forced: after a power loss the final name of an "
+        + "acknowledged object may be missing while a complete temporary file of it survives and "
+        + "is kept for the operator (the sweep at open leaves it in place, it is never served, and "
+        + "scrub() reports it as COMPLETE_TEMPORARY so that an operator can adopt or remove it); "
+        + "on POSIX systems the gap after a restart in "
         + "item (12) applies. "
         + "(2) Not exercised: power loss, drives that acknowledge a flush early, SMB and other "
         + "network file systems, ReFS and Windows Server volume pairs. "
@@ -984,7 +1075,9 @@ public final class SealedEvidenceStore implements EvidenceStore {
         + "directory of both volumes to sweep temporary files; repair() and scrub() hold the key "
         + "set of both volumes in memory. The cost and the heap grow with the number of objects "
         + "and are unmeasured (SP-W); a replaced volume blocks every write until repair() has "
-        + "finished. "
+        + "finished; verify and any caller that pages list() cost N/500 + 1 full walks of both "
+        + "volumes (quadratic in the number of objects) and are not usable beyond test sizes, a "
+        + "streaming or pruning list is SP-W/P3b2 scale work. "
         + "(4) The number of failure domains is inferred from file-store identity (device number "
         + "and type, or the drive description); two file systems on one physical disk count as "
         + "two, and that the two volumes are independent is attested in the G8 record, not shown "
@@ -1003,7 +1096,9 @@ public final class SealedEvidenceStore implements EvidenceStore {
         + "writes and forces a temporary file of the full object size on each volume, has its "
         + "link refused and deletes the file, only to trigger the directory-sync chain; its cost "
         + "grows with the object size and has not been measured. "
-        + "(10) Temporary files that a crashed writer leaves are swept when the store is opened. "
+        + "(10) Temporary files that a crashed writer leaves are swept when the store is opened, "
+        + "except a complete temporary file of an object or of a meta whose final name does not "
+        + "hold it (see item (1)). "
         + "Their owner is told by the process id in this process-id namespace and by the age of "
         + "the file (older than the start of this JVM); two stores in different containers or "
         + "hosts over one directory are not told apart, and one can sweep the file that the other "
@@ -1034,13 +1129,27 @@ public final class SealedEvidenceStore implements EvidenceStore {
         + "the system disk) are indistinguishable from two new volumes and open as a new store on "
         + "the system disk; the production send gate refuses fewer than two failure domains. The "
         + "marker is a dot file, and a restore by copying vol/* drops it, after which open "
-        + "refuses. "
+        + "refuses. Two copies of a key that differ in any byte, also in the header only "
+        + "(retention, class, media type), are DIVERGENT: scrub() reports them, put, "
+        + "extendRetention and setLegalHold refuse them with an EvidenceCorruptionException, "
+        + "repair() picks no side, and get() serves the payload of the first valid copy with "
+        + "the longest retain-until over both headers and the metas; the cure is manual. "
         + "(16) A hold release that reached one volume only is effective before it is "
         + "acknowledged: the hold of two metas of different revisions is the hold of the higher "
         + "revision. "
         + "(17) On Windows durability() reports synchronousAcknowledgement true although no "
         + "directory is forced there; a send-gate decision on Windows therefore rests on the "
-        + "attestation of G8 and on SP-W.";
+        + "attestation of G8 and on SP-W. "
+        + "(18) A foreign handle on a meta file makes the atomic replace fail on Windows with an "
+        + "access error (a virus scanner, a backup tool or another process holds such handles): "
+        + "the store reports an I/O error and does not retry, and the caller of setLegalHold or "
+        + "extendRetention retries. "
+        + "(19) A put holds the whole object in memory: about 8 times the object size at its "
+        + "peak when both volumes already hold the key (the clone of the request, the clone "
+        + "taken by put, the candidate file, and per volume the file as read and the decoded "
+        + "payload), 3 times for a new key, plus transient copies while a file is decoded; the "
+        + "key locks admit up to 64 puts of different keys at once, so the heap needed is up to "
+        + "64 times that for the largest object.";
   }
 
   // ---------------------------------------------------------------- reading one volume
