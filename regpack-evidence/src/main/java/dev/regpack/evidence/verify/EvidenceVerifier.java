@@ -1,21 +1,25 @@
 package dev.regpack.evidence.verify;
 
+import dev.regpack.evidence.seal.SealedKeys;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.evidence.EvidenceIntegrityException;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.journal.JournalKey;
 import dev.regpack.ports.evidence.journal.JournalObject;
+import dev.regpack.ports.evidence.journal.JournalScope;
 import dev.regpack.ports.evidence.journal.JournalType;
 import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.ports.ledger.ManifestLedger;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -31,7 +35,11 @@ import java.util.function.Function;
  *       stored bytes, {@code sha256 unknown} when the object cannot be read, and for a {@code
  *       DeliveryIntent} object that has neither a manifest row nor an attempt row {@value
  *       #IN_DOUBT}: the input of the in-doubt procedure of spec 11.5 B.5.
- *   <li>{@link Kind#MISSING}: a manifest row whose object is not in the listing.
+ *   <li>{@link Kind#MISSING}: a manifest row whose object is not in the listing, and a sealed file
+ *       that a {@code DeliveryIntent} object names ({@code artifact_sha256}) and the tier does not
+ *       hold, with the detail {@value #NAMED_ABSENT}, also when the ledger has no row for it (a
+ *       database restored from a backup older than the seal). A sealed file that is missing for
+ *       both reasons is one finding, the one of the manifest row.
  *   <li>{@link Kind#HASH_MISMATCH}: with the detail {@value #STORE_INTEGRITY} the store itself
  *       reports that the object is damaged ({@link EvidenceIntegrityException}, which includes
  *       {@link dev.regpack.ports.evidence.EvidenceCorruptionException}) or answers with a hash that
@@ -46,9 +54,12 @@ import java.util.function.Function;
  *   <li>{@link Kind#INTENT_MISMATCH}: a {@code DeliveryIntent} object that is not what its key and
  *       the ledger say: bytes that are no journal object, an envelope that names another key, a
  *       payload {@code attempt_id} that is not the key subject, and, where the attempt has a row in
- *       the ledger, another {@code artifact_sha256}, {@code file_name} or {@code delivery_id}. A
- *       missing attempt row or manifest row is an ORPHAN or MISSING and never an INTENT_MISMATCH
- *       (after a restore the evidence tier is ahead of the database).
+ *       the ledger, another {@code artifact_sha256}, {@code file_name} or {@code delivery_id}, a
+ *       key scope or restore epoch that is not the endpoint of its delivery and the epoch of its
+ *       token, and, where the delivery has a row, another {@code business_key} or {@code
+ *       version_seq}. ({@code trn}, {@code action} and {@code logical_hash} are not in the ledger
+ *       and are not compared.) A missing attempt row or manifest row is an ORPHAN or MISSING and
+ *       never an INTENT_MISMATCH (after a restore the evidence tier is ahead of the database).
  * </ul>
  *
  * <p>An outage ({@link dev.regpack.ports.evidence.EvidenceUnavailableException}, or a {@link
@@ -79,6 +90,9 @@ public final class EvidenceVerifier {
   /** The detail of an orphan intent object (spec 11.5 B.5). */
   public static final String IN_DOUBT = "in-doubt input (11.5 B.5)";
 
+  /** The detail of a sealed file that an intent object names and the tier does not hold. */
+  public static final String NAMED_ABSENT = "named by an intent, absent";
+
   private static final String ABSENT = "the object is absent from the evidence tier";
   private static final String HASH_UNKNOWN = "sha256 unknown";
   private static final String NOT_A_JOURNAL_OBJECT = "the object is not a journal object";
@@ -87,6 +101,11 @@ public final class EvidenceVerifier {
   private static final String OTHER_ARTIFACT = "artifact_sha256 differs from the attempt row";
   private static final String OTHER_FILE = "file_name differs from the attempt row";
   private static final String OTHER_DELIVERY = "delivery_id differs from the attempt row";
+  private static final String OTHER_BUSINESS_KEY = "business_key differs from the delivery row";
+  private static final String OTHER_VERSION = "version_seq differs from the delivery row";
+  private static final String OTHER_SCOPE = "the key scope is not the endpoint of the attempt";
+  private static final String OTHER_EPOCH =
+      "the key restore epoch is not the token epoch of the attempt";
   private static final String MARKER_PREFIX = "control/epoch/";
   private static final String JOURNAL_PREFIX = "journal/";
   private static final int PAGE = 500;
@@ -170,6 +189,7 @@ public final class EvidenceVerifier {
     private String group = "";
     private boolean groupJudged;
     private long expectedSeq;
+    private final Set<String> namedSealedFiles = new HashSet<>();
 
     Walk(String prefix) {
       this.prefix = prefix;
@@ -214,6 +234,7 @@ public final class EvidenceVerifier {
           rows.advance();
         }
       }
+      dropNamedAbsentWhereTheManifestSaysIt();
       findings.sort(
           Comparator.comparing(Finding::key)
               .thenComparing(Finding::kind)
@@ -223,6 +244,21 @@ public final class EvidenceVerifier {
 
     private void add(Kind kind, String key, String detail) {
       findings.add(new Finding(kind, key, detail));
+    }
+
+    /** A sealed file that is missing for both reasons is one finding: the manifest row's. */
+    private void dropNamedAbsentWhereTheManifestSaysIt() {
+      Set<String> byTheManifest = new HashSet<>();
+      for (Finding f : findings) {
+        if (f.kind() == Kind.MISSING && f.detail().equals(ABSENT)) {
+          byTheManifest.add(f.key());
+        }
+      }
+      findings.removeIf(
+          f ->
+              f.kind() == Kind.MISSING
+                  && f.detail().equals(NAMED_ABSENT)
+                  && byTheManifest.contains(f.key()));
     }
 
     /** A key in the listing and no row of the manifest. */
@@ -341,6 +377,7 @@ public final class EvidenceVerifier {
       if (!Objects.equals(String.valueOf(payload.get("attempt_id")), keyOfIntent.subjectId())) {
         add(Kind.INTENT_MISMATCH, key.path(), OTHER_ATTEMPT);
       }
+      namedSealedFile(payload.get("artifact_sha256"));
       if (attempt.isEmpty()) {
         return;
       }
@@ -353,6 +390,51 @@ public final class EvidenceVerifier {
       }
       if (!Objects.equals(payload.get("delivery_id"), row.delivery().value())) {
         add(Kind.INTENT_MISMATCH, key.path(), OTHER_DELIVERY);
+      }
+      if (keyOfIntent.restoreEpoch() != row.token().restoreEpoch()) {
+        add(Kind.INTENT_MISMATCH, key.path(), OTHER_EPOCH);
+      }
+      Optional<DeliveryLedger.Delivery> delivery = ledger.delivery(row.delivery());
+      if (delivery.isEmpty()) {
+        return;
+      }
+      DeliveryLedger.NewDelivery identity = delivery.get().key();
+      if (!Objects.equals(payload.get("business_key"), identity.businessKey())) {
+        add(Kind.INTENT_MISMATCH, key.path(), OTHER_BUSINESS_KEY);
+      }
+      if (!Objects.equals(payload.get("version_seq"), identity.versionSeq())) {
+        add(Kind.INTENT_MISMATCH, key.path(), OTHER_VERSION);
+      }
+      if (!Optional.of(keyOfIntent.scope()).equals(scopeOf(identity))) {
+        add(Kind.INTENT_MISMATCH, key.path(), OTHER_SCOPE);
+      }
+    }
+
+    /** The journal scope of the endpoint of a delivery; none when the endpoint has no scope. */
+    private Optional<JournalScope> scopeOf(DeliveryLedger.NewDelivery identity) {
+      try {
+        return Optional.of(JournalScope.of(identity.endpoint()));
+      } catch (IllegalArgumentException e) {
+        return Optional.empty();
+      }
+    }
+
+    /**
+     * The sealed file that an intent object names must be in the tier, or its loss would be
+     * invisible when the ledger has no row for it. Existence only, through the listing, so that
+     * nothing large is read; once per file and run.
+     */
+    private void namedSealedFile(Object artifactSha256) {
+      if (!(artifactSha256 instanceof String hex)) {
+        return;
+      }
+      EvidenceKey sealed = SealedKeys.of(new Sha256(hex));
+      if (!namedSealedFiles.add(sealed.path())) {
+        return;
+      }
+      List<EvidenceKey> found = store.list(sealed.path(), Optional.empty(), 1);
+      if (found.isEmpty() || !found.get(0).equals(sealed)) {
+        add(Kind.MISSING, sealed.path(), NAMED_ABSENT);
       }
     }
 

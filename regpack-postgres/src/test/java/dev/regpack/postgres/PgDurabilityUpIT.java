@@ -423,7 +423,7 @@ class PgDurabilityUpIT extends AbstractPgStoreTest {
             new SendGate(SendGate.Requirement.production()));
     EndpointKey endpoint = LedgerFixtures.endpoint("FULLSEAL");
     LeaseToken token = SealScenarioContract.lease(store(), endpoint, "A");
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(store(), endpoint, "BK-FULL", 1);
+    DeliveryId delivery = SealScenarioContract.queued(store(), endpoint, "BK-FULL");
 
     SealOutcome outcome =
         sealing.seal(

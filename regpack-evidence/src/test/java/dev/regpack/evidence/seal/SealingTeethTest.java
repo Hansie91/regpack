@@ -55,6 +55,15 @@ class SealingTeethTest {
   private static final String EPOCH_SAME = "aMarkerOfTheTokensEpochLetsTheSendThrough";
   private static final String TAKEOVER = "aTakeoverBetweenSealAndMarkerRefusesTheMarker";
   private static final String SHARED = "theSameBytesSealedForTwoAttemptsShareOneSealedObject";
+  private static final String BARE_ATTEMPT =
+      "aBareAttemptBegunThroughTheLedgerWithoutSealingIsRefusedAtTheGate";
+  private static final String OTHER_ENDPOINT = "aTokenOfAnotherEndpointIsRefusedAtTheGate";
+  private static final String OTHER_STATE =
+      "anAttemptWhoseDeliveryLeftSendingIsRefusedBeforeTheMarkerStatement";
+  private static final String UNCONFIRMED_MARKER =
+      "aMarkerCommitThatNoStandbyConfirmedIsNeverClearAndNoByteLeaves";
+  private static final String UNCONFIRMED_SENDING =
+      "aSendingCommitThatNoStandbyConfirmedIsNeverSealed";
   // the scenarios that only the P-SEALED binding has (they need real directories)
   private static final String SURVIVES_LOSS_OF_A =
       "whatTheSealAcknowledgedSurvivesTheLossOfVolumeA";
@@ -93,7 +102,11 @@ class SealingTeethTest {
             EPOCH_DOWN,
             TAKEOVER,
             STALE,
-            GATE));
+            GATE,
+            BARE_ATTEMPT,
+            OTHER_ENDPOINT,
+            OTHER_STATE,
+            UNCONFIRMED_MARKER));
     expected.put(
         MarkerAlwaysAbsentScenarioTest.class,
         Set.of(EPOCH_DIFFERS, EPOCH_DAMAGED, EPOCH_DOWN, EPOCH_SAME));
@@ -102,6 +115,16 @@ class SealingTeethTest {
     // at all"; these two keep the rest of the gate and drop one check each
     expected.put(IgnoreMarkerAlreadySetScenarioTest.class, Set.of(CRASH_MARKER, CRASH_BYTE));
     expected.put(LeaseCheckWithoutTokenScenarioTest.class, Set.of(TAKEOVER));
+    // the gate checks the attempt it is given: one mutant for each check that it makes
+    expected.put(IgnoreAttemptManifestScenarioTest.class, Set.of(BARE_ATTEMPT));
+    expected.put(IgnoreDeliveryEndpointScenarioTest.class, Set.of(OTHER_ENDPOINT));
+    expected.put(IgnoreDeliveryStateScenarioTest.class, Set.of(OTHER_STATE));
+    // a commit that no standby confirmed is never reported as durable (DS-V and DS-W of the review)
+    expected.put(
+        SwallowLedgerWarningScenarioTest.class, Set.of(UNCONFIRMED_MARKER, UNCONFIRMED_SENDING));
+    // the intent object states the identity of the delivery (I10): a constant for either field
+    expected.put(HardCodedVersionScenarioTest.class, Set.of(ORDER, CRASH_BYTE, RACE));
+    expected.put(HardCodedActionScenarioTest.class, Set.of(ORDER, CRASH_BYTE, RACE));
     // P-SEALED on real directories: a store that acknowledges and loses the intent object, and a
     // volume that acknowledges and keeps nothing (each of the two, one scenario of the loss of a
     // volume), and the two wrong sealers in front of a store that has lost a volume

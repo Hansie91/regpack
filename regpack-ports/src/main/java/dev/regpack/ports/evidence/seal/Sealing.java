@@ -23,9 +23,13 @@ import java.util.Optional;
 public interface Sealing {
   /**
    * The identity of a delivery as the {@code DeliveryIntent} journal object states it (schema
-   * version 1): what {@code verify} reconstructs from the evidence tier alone (I10). The delivery
-   * must be the one of the request and {@code artifactSha256} the hash of the bytes; the schema
-   * checks the rest (bounded text, non-negative counts).
+   * version 1): what the object carries so that a restore can rebuild the identity of every attempt
+   * from the evidence tier alone (I10). No production code reconstructs anything before P4; the
+   * only implementation is the loop in {@code EvidenceVerifierTest}. The delivery must be the one
+   * of the request, {@code artifactSha256} the hash of the bytes, and {@code businessKey} and
+   * {@code versionSeq} those of the ledger row of the delivery; the schema checks the rest (bounded
+   * text, non-negative counts). {@code trn}, {@code action} and {@code logicalHash} are not in the
+   * ledger row and stay the sender's duty.
    */
   record DeliveryIntentPayload(
       DeliveryLedger.DeliveryId delivery,
@@ -53,11 +57,11 @@ public interface Sealing {
    * A sealed file to send. The bytes are copied. {@code fileName} is the name of the attempt row
    * and of the intent object ({@code intent.fileName()} must be the same text). The request is
    * validated before any effect: the hash of the bytes must be {@code intent.artifactSha256()}, the
-   * intent must name {@code delivery}, the endpoint must have a journal scope (each part 1 to 24
-   * characters of {@code [A-Za-z0-9._-]}) and be the endpoint of the delivery, and the media type
-   * must be 1 to 255 characters (not blank) without a control character or an unpaired surrogate,
-   * else {@link IllegalArgumentException}; a delivery that is not {@code QUEUED} is {@link
-   * SealStatus#STATE_MISMATCH}.
+   * intent must name {@code delivery} and the business key and the version of its ledger row, the
+   * endpoint must have a journal scope (each part 1 to 24 characters of {@code [A-Za-z0-9._-]}) and
+   * be the endpoint of the delivery, and the media type must be 1 to 255 characters (not blank)
+   * without a control character or an unpaired surrogate, else {@link IllegalArgumentException}; a
+   * delivery that is not {@code QUEUED} is {@link SealStatus#STATE_MISMATCH}.
    */
   record SealRequest(
       LeaseLedger.EndpointKey endpoint,
@@ -155,7 +159,14 @@ public interface Sealing {
    * {@link dev.regpack.ports.ledger.ManifestConflictException} are not caught: the seal fails
    * closed.
    *
-   * @throws IllegalArgumentException the request breaks a rule of {@link SealRequest}; nothing was
+   * <p>A {@link dev.regpack.ports.ledger.LedgerException} of the SENDING unit, among them the
+   * unconfirmed commit "commit not confirmed by the synchronous standby", is not caught either: the
+   * unit is committed locally and not known to be durable, so the seal never answers {@code SEALED}
+   * for it. The delivery is {@code SENDING} (a second seal is {@code STATE_MISMATCH}) and both
+   * manifest rows exist.
+   *
+   * @throws IllegalArgumentException the request breaks a rule of {@link SealRequest}, or the
+   *     intent object of the request would be over the size bound of a journal object; nothing was
    *     written and no attempt id was taken
    */
   SealOutcome seal(SealRequest request);
@@ -163,9 +174,22 @@ public interface Sealing {
   /**
    * The commit gate for {@code Transport.send}, asked immediately before the first
    * destination-visible byte: the send gate, the lease (the current lease of the endpoint holds
-   * {@code token}), the restore-epoch marker of the evidence tier (it must equal the restore epoch
-   * of the token), and the fenced {@code commit_issued} marker of the attempt. The result is {@code
-   * CLEAR} only after all of them; the marker is set last and only once per attempt.
+   * {@code token}), the attempt (its row names {@code token}, its delivery is a delivery of {@code
+   * endpoint} and {@code SENDING}, and the manifest holds the two rows that the SENDING unit of
+   * {@link #seal} recorded: an attempt that was begun through the ledger alone is refused), the
+   * restore-epoch marker of the evidence tier (it must equal the restore epoch of the token), and
+   * the fenced {@code commit_issued} marker of the attempt. The result is {@code CLEAR} only after
+   * all of them; the marker is set last.
+   *
+   * <p>"Once per attempt" is the work of the sender's in-flight guard (one attempt, one thread)
+   * together with the idempotent marker statement of the ledger, not of the database: the check
+   * that the marker is not yet set is a read, and two concurrent callers for one attempt can both
+   * see {@code CLEAR}. The destination's refusal of a duplicate file is the last backstop.
+   *
+   * <p>A {@link dev.regpack.ports.ledger.LedgerException} of the marker unit, among them the
+   * unconfirmed commit "commit not confirmed by the synchronous standby", is not caught: the marker
+   * is committed locally and not known to be durable, the call never answers {@code CLEAR} for it,
+   * the first byte does not leave, and a second call is {@code MARKER_REFUSED}.
    */
   PreSendStatus beforeFirstByte(
       LeaseLedger.EndpointKey endpoint,

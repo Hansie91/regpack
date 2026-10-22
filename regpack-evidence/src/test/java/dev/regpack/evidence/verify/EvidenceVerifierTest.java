@@ -132,9 +132,15 @@ class EvidenceVerifierTest {
       EndpointKey endpoint,
       LeaseToken token,
       DeliveryId delivery,
+      String businessKey,
       AttemptId attempt,
       Sha256 artifact,
-      String fileName) {}
+      String fileName) {
+    /** The bytes whose hash is {@link #artifact()}. */
+    byte[] artifactBytes() {
+      return ("artifact-" + fileName).getBytes(UTF_8);
+    }
+  }
 
   /** An in-memory ledger, a P-SEALED store below {@code base}, a sealer and a verifier. */
   private static final class Tier {
@@ -170,7 +176,7 @@ class EvidenceVerifierTest {
     }
 
     Sealed seal(EndpointKey endpoint, LeaseToken token, String businessKey) {
-      DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger, endpoint, businessKey, 1);
+      DeliveryId delivery = SealScenarioContract.queued(ledger, endpoint, businessKey);
       SealRequest request =
           SealScenarioContract.request(
               endpoint, token, delivery, businessKey, reportOf(businessKey));
@@ -191,13 +197,15 @@ class EvidenceVerifierTest {
       EndpointKey endpoint = LedgerFixtures.endpoint(name);
       LeaseToken token = lease(endpoint);
       DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger, endpoint, "BK-" + name, 1);
+      String fileName = "file-" + name + ".xml";
       return new Started(
           endpoint,
           token,
           delivery,
+          "BK-" + name,
           ledger.allocateAttemptId(),
-          Sha256.ofUtf8("artifact-" + name),
-          "file-" + name + ".xml");
+          Sha256.ofUtf8("artifact-" + fileName),
+          fileName);
     }
 
     EvidenceKey intentKeyOf(Started started) {
@@ -215,7 +223,7 @@ class EvidenceVerifierTest {
       Map<String, Object> payload = new LinkedHashMap<>();
       payload.put("attempt_id", started.attempt().value());
       payload.put("delivery_id", started.delivery().value());
-      payload.put("business_key", "BK-" + started.fileName());
+      payload.put("business_key", started.businessKey());
       payload.put("trn", "TRN-1");
       payload.put("version_seq", 1L);
       payload.put("action", "NEWT");
@@ -251,6 +259,68 @@ class EvidenceVerifierTest {
       return object.key().evidenceKey();
     }
 
+    /**
+     * Writes an intent object that agrees with its attempt row and the delivery, under the key that
+     * {@code keyOf} gives (the key may name another scope or epoch than the attempt's), and starts
+     * the attempt with a manifest row for it and for its sealed file.
+     */
+    EvidenceKey handWrittenIntentUnder(String name, Function<Started, JournalKey.ClassA> keyOf) {
+      Started started = start(name);
+      JournalObject object =
+          new JournalObject(
+              keyOf.apply(started),
+              JournalType.DELIVERY_INTENT,
+              1,
+              clock.now(),
+              intentPayload(started));
+      journal.write(object);
+      begin(started, object.key().evidenceKey(), object.toBytes());
+      return object.key().evidenceKey();
+    }
+
+    /**
+     * An intent object that agrees with everything, whose sealed file is not in the tier and has no
+     * manifest row (the database is older than the seal, and the file is lost). Returns the key of
+     * the sealed file that the intent names.
+     */
+    EvidenceKey intentWhoseSealedFileIsNowhere(String name) {
+      Started started = start(name);
+      JournalObject object =
+          new JournalObject(
+              intentKeyUnder(started),
+              JournalType.DELIVERY_INTENT,
+              1,
+              clock.now(),
+              intentPayload(started));
+      journal.write(object);
+      begin(started, object.key().evidenceKey(), object.toBytes(), false);
+      return SealedKeys.of(started.artifact());
+    }
+
+    JournalKey.ClassA intentKeyUnder(Started started) {
+      return new JournalKey.ClassA(
+          JournalScope.of(started.endpoint()),
+          started.token().restoreEpoch(),
+          JournalType.DELIVERY_INTENT,
+          Long.toString(started.attempt().value()),
+          1);
+    }
+
+    /** Puts {@code bytes} as a sealed file with its manifest row, as a seal would have. */
+    void addSealedFile(byte[] bytes) {
+      Sha256 sha = Sha256.of(bytes);
+      store.put(
+          new EvidenceStore.PutRequest(
+              SealedKeys.of(sha),
+              bytes,
+              "application/xml",
+              RETENTION.retentionFor(DurableSeal.SEALED_RETENTION_CLASS, clock.now())));
+      ledger.recordObjects(
+          List.of(new ObjectEntry(SealedKeys.of(sha), ObjectClass.SEALED_FILE, sha, bytes.length)),
+          Provenance.WRITTEN,
+          Optional.empty());
+    }
+
     /** Puts {@code bytes} under the intent key of a new attempt, whatever they are. */
     EvidenceKey rawIntent(String name, byte[] bytes) {
       return rawIntent(name, started -> bytes);
@@ -272,18 +342,29 @@ class EvidenceVerifierTest {
     }
 
     private void begin(Started started, EvidenceKey key, byte[] bytes) {
+      begin(started, key, bytes, true);
+    }
+
+    /** Starts the attempt; with a sealed file, it is in the tier and the same unit names it. */
+    private void begin(Started started, EvidenceKey key, byte[] bytes, boolean withSealedFile) {
+      List<ObjectEntry> objects = new ArrayList<>();
+      if (withSealedFile) {
+        addSealedFileIfNew(started.artifactBytes());
+      }
+      objects.add(new ObjectEntry(key, ObjectClass.JOURNAL_A, Sha256.of(bytes), bytes.length));
       SendingResult result =
           ledger.beginSending(
               started.delivery(),
               started.attempt(),
               started.token(),
-              new AttemptIntent(
-                  started.artifact(),
-                  started.fileName(),
-                  List.of(
-                      new ObjectEntry(
-                          key, ObjectClass.JOURNAL_A, Sha256.of(bytes), bytes.length))));
+              new AttemptIntent(started.artifact(), started.fileName(), objects));
       assertThat(result.status()).isEqualTo(SendingStatus.APPLIED);
+    }
+
+    private void addSealedFileIfNew(byte[] bytes) {
+      if (store.get(SealedKeys.of(Sha256.of(bytes))).isEmpty()) {
+        addSealedFile(bytes);
+      }
     }
 
     /** A class (b) object with a manifest row. */
@@ -606,6 +687,8 @@ class EvidenceVerifierTest {
     faults.put(
         "an intent object with another artifact hash than its attempt row",
         (tier, seals) -> {
+          // the other file is in the tier and the manifest, so that nothing else is wrong
+          tier.addSealedFile("another".getBytes(UTF_8));
           EvidenceKey key =
               tier.handWrittenIntent(
                   "HAND1",
@@ -654,6 +737,74 @@ class EvidenceVerifierTest {
                   });
           return List.of(
               finding(Kind.INTENT_MISMATCH, key, "attempt_id differs from the key subject"));
+        });
+    faults.put(
+        "an intent object with another business key than the delivery row of its attempt",
+        (tier, seals) -> {
+          EvidenceKey key =
+              tier.handWrittenIntent(
+                  "HAND7",
+                  payload -> {
+                    payload.put("business_key", "BK-SOMEONE-ELSE");
+                    return payload;
+                  });
+          return List.of(
+              finding(Kind.INTENT_MISMATCH, key, "business_key differs from the delivery row"));
+        });
+    faults.put(
+        "an intent object with another version than the delivery row of its attempt",
+        (tier, seals) -> {
+          EvidenceKey key =
+              tier.handWrittenIntent(
+                  "HAND8",
+                  payload -> {
+                    payload.put("version_seq", 9L);
+                    return payload;
+                  });
+          return List.of(
+              finding(Kind.INTENT_MISMATCH, key, "version_seq differs from the delivery row"));
+        });
+    faults.put(
+        "an intent object stored under the scope of another endpoint than its attempt",
+        (tier, seals) -> {
+          EvidenceKey key =
+              tier.handWrittenIntentUnder(
+                  "HAND9",
+                  started ->
+                      new JournalKey.ClassA(
+                          JournalScope.of(LedgerFixtures.endpoint("ELSEWHERE")),
+                          started.token().restoreEpoch(),
+                          JournalType.DELIVERY_INTENT,
+                          Long.toString(started.attempt().value()),
+                          1));
+          return List.of(
+              finding(
+                  Kind.INTENT_MISMATCH, key, "the key scope is not the endpoint of the attempt"));
+        });
+    faults.put(
+        "an intent object stored under another restore epoch than the token of its attempt",
+        (tier, seals) -> {
+          EvidenceKey key =
+              tier.handWrittenIntentUnder(
+                  "HAND10",
+                  started ->
+                      new JournalKey.ClassA(
+                          JournalScope.of(started.endpoint()),
+                          started.token().restoreEpoch() + 1,
+                          JournalType.DELIVERY_INTENT,
+                          Long.toString(started.attempt().value()),
+                          1));
+          return List.of(
+              finding(
+                  Kind.INTENT_MISMATCH,
+                  key,
+                  "the key restore epoch is not the token epoch of the attempt"));
+        });
+    faults.put(
+        "a sealed file that an intent names, absent from the tier and from the manifest",
+        (tier, seals) -> {
+          EvidenceKey sealedKey = tier.intentWhoseSealedFileIsNowhere("HAND11");
+          return List.of(finding(Kind.MISSING, sealedKey, "named by an intent, absent"));
         });
     faults.put(
         "bytes under an intent key that are no journal object",
@@ -1020,6 +1171,7 @@ class EvidenceVerifierTest {
             START,
             payload);
     tier.journal.write(restored);
+    tier.addSealedFile("a".getBytes(UTF_8)); // the file that the restored intent names
     byte[] bytes = restored.toBytes();
     tier.ledger.recordObjects(
         List.of(
@@ -1057,6 +1209,7 @@ class EvidenceVerifierTest {
             START,
             payload);
     tier.journal.write(object);
+    tier.addSealedFile(started.artifactBytes());
     // the attempt row exists, its unit named no object: no manifest row for the intent object
     SendingResult result =
         tier.ledger.beginSending(
@@ -1081,7 +1234,7 @@ class EvidenceVerifierTest {
     Tier tier = new Tier(root.resolve("crash"));
     EndpointKey endpoint = LedgerFixtures.endpoint("CRASH");
     LeaseToken token = tier.lease(endpoint);
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(tier.ledger, endpoint, "BK-CRASH", 1);
+    DeliveryId delivery = SealScenarioContract.queued(tier.ledger, endpoint, "BK-CRASH");
     SealRequest request =
         SealScenarioContract.request(endpoint, token, delivery, "BK-CRASH", reportOf("BK-CRASH"));
     FaultInjector faults =
@@ -1112,7 +1265,7 @@ class EvidenceVerifierTest {
     Tier tier = new Tier(root.resolve("crash-first"));
     EndpointKey endpoint = LedgerFixtures.endpoint("CRASH1");
     LeaseToken token = tier.lease(endpoint);
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(tier.ledger, endpoint, "BK-CRASH1", 1);
+    DeliveryId delivery = SealScenarioContract.queued(tier.ledger, endpoint, "BK-CRASH1");
     SealRequest request =
         SealScenarioContract.request(endpoint, token, delivery, "BK-CRASH1", reportOf("BK-CRASH1"));
     FaultInjector faults =
@@ -1134,6 +1287,59 @@ class EvidenceVerifierTest {
                 Kind.ORPHAN,
                 SealedKeys.of(request.intent().artifactSha256()),
                 "sha256=" + request.intent().artifactSha256().hex()));
+  }
+
+  @Test
+  void aSealedFileThatAnIntentNamesAndTheTierHasLostIsMissingEvenWhenTheLedgerIsBehind()
+      throws IOException {
+    Tier tier = new Tier(root.resolve("lost-file"));
+    List<Sealed> seals = tier.baseline();
+    EvidenceKey lost = seals.get(1).sealedKey();
+    tier.deleteOnBothVolumes(lost);
+    // the database is restored from a backup older than the seal: no attempt row, no manifest row
+    InMemoryLedgerStore behind = new InMemoryLedgerStore(tier.clock);
+
+    Report report = new EvidenceVerifier(tier.store, behind).verify("");
+
+    assertThat(report.findings())
+        .as("the lost artifact is named, not only the in-doubt input of its intent")
+        .contains(finding(Kind.MISSING, lost, "named by an intent, absent"))
+        .contains(finding(Kind.ORPHAN, seals.get(1).intentKey(), IN_DOUBT));
+    assertThat(report.findings().stream().filter(f -> f.kind() == Kind.MISSING)).hasSize(1);
+    // with the original ledger the manifest row says it: one finding, not two
+    assertThat(tier.verifier.verify("").findings())
+        .containsExactly(finding(Kind.MISSING, lost, ABSENT));
+  }
+
+  @Test
+  void aSealedFileNamedByTwoIntentsIsReportedOnceAndOnlyWhereTheTierLacksIt() throws IOException {
+    Tier tier = new Tier(root.resolve("lost-shared"));
+    EndpointKey endpoint = LedgerFixtures.endpoint("SHARE");
+    LeaseToken token = tier.lease(endpoint);
+    // two deliveries, one report: one sealed file, two intent objects that name it
+    DeliveryId first = SealScenarioContract.queued(tier.ledger, endpoint, "BK-S1");
+    DeliveryId second = SealScenarioContract.queued(tier.ledger, endpoint, "BK-S2");
+    byte[] bytes = reportOf("one report");
+    assertThat(
+            tier.sealing
+                .seal(SealScenarioContract.request(endpoint, token, first, "BK-S1", bytes))
+                .status())
+        .isEqualTo(SealStatus.SEALED);
+    assertThat(
+            tier.sealing
+                .seal(SealScenarioContract.request(endpoint, token, second, "BK-S2", bytes))
+                .status())
+        .isEqualTo(SealStatus.SEALED);
+    assertThat(tier.verifier.verify("").clean()).isTrue();
+    EvidenceKey shared = SealedKeys.of(Sha256.of(bytes));
+    tier.deleteOnBothVolumes(shared);
+    InMemoryLedgerStore behind = new InMemoryLedgerStore(tier.clock);
+
+    Report report = new EvidenceVerifier(tier.store, behind).verify("");
+
+    assertThat(report.findings())
+        .filteredOn(f -> f.kind() == Kind.MISSING)
+        .containsExactly(finding(Kind.MISSING, shared, "named by an intent, absent"));
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1183,6 +1389,14 @@ class EvidenceVerifierTest {
       after = Optional.of(page.get(page.size() - 1));
     }
     assertThat(intents).hasSize(3);
+    // the fixtures give the three deliveries three versions and three actions: a tier whose intent
+    // objects say version 1 and NEWT for all of them is not the identity that was sent
+    assertThat(intents.values())
+        .extracting(intent -> intent.payload().get("version_seq"))
+        .containsExactlyInAnyOrder(2L, 3L, 4L);
+    assertThat(intents.values())
+        .extracting(intent -> intent.payload().get("action"))
+        .containsExactlyInAnyOrder("CANC", "REPL", "NEWT");
 
     for (Sealed s : sent) {
       JournalObject intent = intents.get(s.attempt().value());

@@ -139,7 +139,7 @@ class PgDurabilityDownIT {
       SealedEvidenceStore evidence = DurabilityHarness.twoDomainEvidence(root, harness.clock());
       EndpointKey endpoint = LedgerFixtures.endpoint("DOWNGATE");
       LeaseToken token = SealScenarioContract.lease(harness.setup(), endpoint, "A");
-      DeliveryId delivery = LedgerFixtures.queuedDelivery(harness.setup(), endpoint, "BK-GATE", 1);
+      DeliveryId delivery = SealScenarioContract.queued(harness.setup(), endpoint, "BK-GATE");
       SealRequest request =
           SealScenarioContract.request(
               endpoint, token, delivery, "BK-GATE", SealScenarioContract.reportOf("BK-GATE"));

@@ -172,7 +172,7 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
       List<SealRequest> mine = new ArrayList<>();
       for (int i = 0; i < DELIVERIES_PER_THREAD; i++) {
         String businessKey = "BK-CONC-" + thread + "-" + i;
-        DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger(), endpoint, businessKey, 1);
+        DeliveryId delivery = SealScenarioContract.queued(ledger(), endpoint, businessKey);
         mine.add(request(endpoint, token, delivery, businessKey, reportOf(businessKey)));
       }
       perThread.add(mine);
@@ -242,7 +242,7 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
   void aManifestConflictFailsTheSealClosed() {
     EndpointKey endpoint = LedgerFixtures.endpoint("CONFLICT");
     LeaseToken token = SealScenarioContract.lease(ledger(), endpoint, "A");
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger(), endpoint, "BK-CONFLICT", 1);
+    DeliveryId delivery = SealScenarioContract.queued(ledger(), endpoint, "BK-CONFLICT");
     byte[] bytes = reportOf("BK-CONFLICT");
     EvidenceKey sealedKey = SealedKeys.of(Sha256.of(bytes));
     Sha256 wrongHash = Sha256.ofUtf8("another object under the same key");
@@ -277,7 +277,7 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
     // the same request fails the same way, and a delivery of other bytes is not affected
     assertThat(catchThrowable(() -> sealing.seal(request)))
         .isInstanceOf(ManifestConflictException.class);
-    DeliveryId other = LedgerFixtures.queuedDelivery(ledger(), endpoint, "BK-OTHER", 1);
+    DeliveryId other = SealScenarioContract.queued(ledger(), endpoint, "BK-OTHER");
     SealOutcome sealed =
         sealing.seal(request(endpoint, token, other, "BK-OTHER", reportOf("BK-OTHER")));
     assertThat(sealed.status()).as(sealed.detail()).isEqualTo(SealStatus.SEALED);
@@ -299,7 +299,7 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
     List<AttemptId> attempts = new ArrayList<>();
     String[] businessKeys = {"BK-V1", "BK-V2", "BK-V3", "BK-V4"};
     for (String businessKey : businessKeys) {
-      DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger(), endpoint, businessKey, 1);
+      DeliveryId delivery = SealScenarioContract.queued(ledger(), endpoint, businessKey);
       // the fourth delivery has the bytes of the first
       byte[] bytes = reportOf(businessKey.equals("BK-V4") ? "BK-V1" : businessKey);
       SealOutcome outcome = sealing.seal(request(endpoint, token, delivery, businessKey, bytes));

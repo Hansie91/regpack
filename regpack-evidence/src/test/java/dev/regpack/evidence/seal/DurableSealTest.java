@@ -42,6 +42,7 @@ import dev.regpack.ports.ledger.ManifestLedger.ObjectEntry;
 import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
+import dev.regpack.testkit.contract.SealScenarioContract;
 import dev.regpack.testkit.fault.FaultInjector;
 import dev.regpack.testkit.fault.FaultPlan;
 import java.lang.reflect.InvocationTargetException;
@@ -49,10 +50,12 @@ import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -92,18 +95,28 @@ class DurableSealTest {
     return granted.grant().token();
   }
 
+  /**
+   * A queued delivery with the version and the action that the fixtures give the business key (BK-1
+   * is version 2, action CANC), so that the intent object can be told from a constant.
+   */
   private DeliveryId queued(EndpointKey endpoint, String businessKey) {
-    return LedgerFixtures.queuedDelivery(ledger, endpoint, businessKey, 1);
+    return SealScenarioContract.queued(ledger, endpoint, businessKey);
   }
 
   private static DeliveryIntentPayload intent(
       DeliveryId delivery, String businessKey, byte[] bytes, String fileName) {
+    return intent(
+        delivery, businessKey, SealScenarioContract.versionOf(businessKey), bytes, fileName);
+  }
+
+  private static DeliveryIntentPayload intent(
+      DeliveryId delivery, String businessKey, long version, byte[] bytes, String fileName) {
     return new DeliveryIntentPayload(
         delivery,
         businessKey,
         "TRN-" + businessKey,
-        1,
-        "NEWT",
+        version,
+        SealScenarioContract.actionOf(businessKey),
         Sha256.ofUtf8("logical-" + businessKey),
         Sha256.of(bytes),
         fileName,
@@ -116,6 +129,17 @@ class DurableSealTest {
       DeliveryId delivery,
       String businessKey,
       byte[] bytes) {
+    return request(
+        endpoint, token, delivery, businessKey, SealScenarioContract.versionOf(businessKey), bytes);
+  }
+
+  private static SealRequest request(
+      EndpointKey endpoint,
+      LeaseToken token,
+      DeliveryId delivery,
+      String businessKey,
+      long version,
+      byte[] bytes) {
     String fileName = "file-" + businessKey + ".xml";
     return new SealRequest(
         endpoint,
@@ -124,7 +148,7 @@ class DurableSealTest {
         fileName,
         bytes,
         "application/xml",
-        intent(delivery, businessKey, bytes, fileName));
+        intent(delivery, businessKey, version, bytes, fileName));
   }
 
   private static JournalKey intentKey(EndpointKey endpoint, long epoch, long attempt) {
@@ -273,8 +297,10 @@ class DurableSealTest {
     expected.put("delivery_id", delivery.value());
     expected.put("business_key", "BK-1");
     expected.put("trn", "TRN-BK-1");
-    expected.put("version_seq", 1L);
-    expected.put("action", "NEWT");
+    // literals, not the fixture functions: BK-1 is version 2 and CANC, neither is the constant 1 or
+    // NEWT that a sealer with a hard-coded field would write
+    expected.put("version_seq", 2L);
+    expected.put("action", "CANC");
     expected.put("logical_hash", Sha256.ofUtf8("logical-BK-1").hex());
     expected.put("artifact_sha256", Sha256.of(BYTES).hex());
     expected.put("file_name", "file-BK-1.xml");
@@ -420,7 +446,8 @@ class DurableSealTest {
   void aPayloadTheJournalCannotHoldIsRefusedBeforeAnyEffect() {
     LeaseToken token = lease(EP, "A");
     DeliveryId delivery = queued(EP, "BK-1");
-    // a business key longer than a journal text may be
+    // a TRN longer than a journal text may be (a business key that long cannot be a delivery's)
+    DeliveryIntentPayload named = intent(delivery, "BK-1", BYTES, "file.xml");
     SealRequest longKey =
         new SealRequest(
             EP,
@@ -429,7 +456,16 @@ class DurableSealTest {
             "file.xml",
             BYTES,
             "application/xml",
-            intent(delivery, "k".repeat(1_025), BYTES, "file.xml"));
+            new DeliveryIntentPayload(
+                delivery,
+                "BK-1",
+                "t".repeat(1_025),
+                named.versionSeq(),
+                named.action(),
+                named.logicalHash(),
+                named.artifactSha256(),
+                "file.xml",
+                named.contextIds()));
     // a file name that is a journal text but no key text of the ledger (a control character)
     SealRequest controlName =
         new SealRequest(
@@ -528,7 +564,9 @@ class DurableSealTest {
   @Test
   void aDeliveryThatIsNotQueuedIsRefusedWithoutOrphans() {
     LeaseToken token = lease(EP, "A");
-    DeliveryId prepared = ledger.createDelivery(new NewDelivery(EP, 1, "BK-PREPARED", 1));
+    DeliveryId prepared =
+        ledger.createDelivery(
+            new NewDelivery(EP, 1, "BK-PREPARED", SealScenarioContract.versionOf("BK-PREPARED")));
 
     SealOutcome outcome = sealing.seal(request(EP, token, prepared, "BK-PREPARED", BYTES));
 
@@ -561,13 +599,15 @@ class DurableSealTest {
   void anotherDeliveryOfTheSameBusinessKeyInFlightIsAnInFlightConflict() {
     LeaseToken token = lease(EP, "A");
     DeliveryId first = queued(EP, "BK-1");
-    // a second version of the same business key, queued as well
-    DeliveryId second = LedgerFixtures.queuedDelivery(ledger, EP, "BK-1", 2);
+    // a later version of the same business key, queued as well
+    long laterVersion = SealScenarioContract.versionOf("BK-1") + 1;
+    DeliveryId second = LedgerFixtures.queuedDelivery(ledger, EP, "BK-1", laterVersion);
     assertThat(sealing.seal(request(EP, token, first, "BK-1", BYTES)).status())
         .isEqualTo(SealStatus.SEALED);
 
     SealOutcome outcome =
-        sealing.seal(request(EP, token, second, "BK-1", "version two".getBytes(UTF_8)));
+        sealing.seal(
+            request(EP, token, second, "BK-1", laterVersion, "version two".getBytes(UTF_8)));
 
     assertThat(outcome.status()).isEqualTo(SealStatus.IN_FLIGHT_CONFLICT);
     assertThat(outcome.attempt()).isEmpty();
@@ -722,8 +762,8 @@ class DurableSealTest {
     payload.put("delivery_id", 1L);
     payload.put("business_key", bk);
     payload.put("trn", "TRN-" + bk);
-    payload.put("version_seq", 1L);
-    payload.put("action", "NEWT");
+    payload.put("version_seq", SealScenarioContract.versionOf(bk));
+    payload.put("action", SealScenarioContract.actionOf(bk));
     payload.put("logical_hash", Sha256.ofUtf8("logical-" + bk).hex());
     payload.put("artifact_sha256", Sha256.of(BYTES).hex());
     payload.put("file_name", "file-" + bk + ".xml");
@@ -976,6 +1016,261 @@ class DurableSealTest {
             ledger, evidence, clock, FIVE_YEARS, new SendGate(SendGate.Requirement.production()));
 
     assertThat(production.beforeFirstByte(EP, attempt, token)).isEqualTo(PreSendStatus.GATE_CLOSED);
+
+    assertThat(commitIssued(attempt)).isFalse();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // the gate checks the attempt it is given (SEAL-2)
+
+  @SuppressWarnings("unchecked")
+  private static <T> Optional<T> optional(Object answer) {
+    return (Optional<T>) answer;
+  }
+
+  /** A ledger that delegates everything and lets {@code change} rewrite the answer of one call. */
+  private LedgerStore ledgerThatRewrites(String methodName, UnaryOperator<Object> change) {
+    return (LedgerStore)
+        Proxy.newProxyInstance(
+            LedgerStore.class.getClassLoader(),
+            new Class<?>[] {LedgerStore.class},
+            (proxy, method, args) -> {
+              try {
+                Object answer = method.invoke(ledger, args);
+                return method.getName().equals(methodName) ? change.apply(answer) : answer;
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
+  }
+
+  private DurableSeal sealerOver(LedgerStore view) {
+    return new DurableSeal(
+        view, evidence, clock, FIVE_YEARS, new SendGate(SendGate.Requirement.none()));
+  }
+
+  @Test
+  void aTokenThatIsNotTheOneOfTheAttemptRowIsStaleAndSetsNoMarker() {
+    LeaseToken token = lease(EP, "A");
+    AttemptId attempt = sealed(token);
+    // the row names another token than the one that holds the lease of the endpoint now
+    DurableSeal view =
+        sealerOver(
+            ledgerThatRewrites(
+                "attempt",
+                answer -> {
+                  Attempt row = DurableSealTest.<Attempt>optional(answer).orElseThrow();
+                  return Optional.of(
+                      new Attempt(
+                          row.id(),
+                          row.delivery(),
+                          new LeaseToken(row.token().restoreEpoch(), row.token().counter() + 1),
+                          row.artifactSha256(),
+                          row.fileName(),
+                          row.commitIssued()));
+                }));
+
+    assertThat(view.beforeFirstByte(EP, attempt, token)).isEqualTo(PreSendStatus.STALE_LEASE);
+
+    assertThat(commitIssued(attempt)).isFalse();
+  }
+
+  @Test
+  void aManifestWhoseSealedRowHasAnotherHashRefusesTheMarker() {
+    LeaseToken token = lease(EP, "A");
+    AttemptId attempt = sealed(token);
+    EvidenceKey sealedKey = SealedKeys.of(Sha256.of(BYTES));
+    DurableSeal view =
+        sealerOver(
+            ledgerThatRewrites(
+                "manifestRow",
+                answer -> {
+                  ManifestRow row = DurableSealTest.<ManifestRow>optional(answer).orElseThrow();
+                  if (!row.entry().key().equals(sealedKey)) {
+                    return answer;
+                  }
+                  return Optional.of(
+                      new ManifestRow(
+                          new ObjectEntry(
+                              row.entry().key(),
+                              row.entry().objectClass(),
+                              Sha256.ofUtf8("another"),
+                              row.entry().sizeBytes()),
+                          row.provenance(),
+                          row.attempt(),
+                          row.writtenAt()));
+                }));
+
+    assertThat(view.beforeFirstByte(EP, attempt, token)).isEqualTo(PreSendStatus.MARKER_REFUSED);
+
+    assertThat(commitIssued(attempt)).isFalse();
+  }
+
+  @Test
+  void anIntentRowThatNamesAnotherAttemptOrIsGoneRefusesTheMarker() {
+    LeaseToken token = lease(EP, "A");
+    AttemptId attempt = sealed(token);
+    EvidenceKey intentKey = intentKey(EP, 0, attempt.value()).evidenceKey();
+    DurableSeal otherAttempt =
+        sealerOver(
+            ledgerThatRewrites(
+                "manifestRow",
+                answer -> {
+                  ManifestRow row = DurableSealTest.<ManifestRow>optional(answer).orElseThrow();
+                  if (!row.entry().key().equals(intentKey)) {
+                    return answer;
+                  }
+                  return Optional.of(
+                      new ManifestRow(
+                          row.entry(),
+                          row.provenance(),
+                          Optional.of(new AttemptId(attempt.value() + 1)),
+                          row.writtenAt()));
+                }));
+    DurableSeal gone =
+        sealerOver(
+            ledgerThatRewrites(
+                "manifestRow",
+                answer ->
+                    DurableSealTest.<ManifestRow>optional(answer)
+                            .filter(row -> row.entry().key().equals(intentKey))
+                            .isPresent()
+                        ? Optional.empty()
+                        : answer));
+
+    assertThat(otherAttempt.beforeFirstByte(EP, attempt, token))
+        .isEqualTo(PreSendStatus.MARKER_REFUSED);
+    assertThat(gone.beforeFirstByte(EP, attempt, token)).isEqualTo(PreSendStatus.MARKER_REFUSED);
+
+    assertThat(commitIssued(attempt)).isFalse();
+    // the attempt itself is whole: the real gate lets it through
+    assertThat(sealing.beforeFirstByte(EP, attempt, token)).isEqualTo(PreSendStatus.CLEAR);
+  }
+
+  @Test
+  void anEndpointWithoutAJournalScopeRefusesTheMarkerInsteadOfFailingWithAnException() {
+    EndpointKey odd = new EndpointKey("TEST ENV", "ARM", "LEI-ODD", "NCA-ODD");
+    LeaseToken token = lease(odd, "A");
+    DeliveryId delivery = queued(odd, "BK-ODD");
+    // an attempt of the ledger alone: it names the sealed row of its bytes, which a seal could
+    // never have written for this endpoint, and the key of its intent object does not exist
+    Sha256 sha = Sha256.of(BYTES);
+    AttemptId bare = ledger.allocateAttemptId();
+    ledger.beginSending(
+        delivery,
+        bare,
+        token,
+        new DeliveryLedger.AttemptIntent(
+            sha,
+            "bare.xml",
+            List.of(
+                new ObjectEntry(SealedKeys.of(sha), ObjectClass.SEALED_FILE, sha, BYTES.length))));
+
+    assertThat(sealing.beforeFirstByte(odd, bare, token)).isEqualTo(PreSendStatus.MARKER_REFUSED);
+
+    assertThat(commitIssued(bare)).isFalse();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // the identity of the intent object is the delivery's (SEAL-6, SPEC-5)
+
+  private SealRequest requestNaming(
+      DeliveryId delivery, LeaseToken token, UnaryOperator<DeliveryIntentPayload> edit) {
+    SealRequest good = request(EP, token, delivery, "BK-1", BYTES);
+    return new SealRequest(
+        EP, token, delivery, good.fileName(), BYTES, "application/xml", edit.apply(good.intent()));
+  }
+
+  private static DeliveryIntentPayload with(
+      DeliveryIntentPayload p, String businessKey, long versionSeq) {
+    return new DeliveryIntentPayload(
+        p.delivery(),
+        businessKey,
+        p.trn(),
+        versionSeq,
+        p.action(),
+        p.logicalHash(),
+        p.artifactSha256(),
+        p.fileName(),
+        p.contextIds());
+  }
+
+  @Test
+  void anIntentThatNamesAnotherBusinessKeyOrVersionThanTheDeliveryIsRefusedBeforeAnyEffect() {
+    LeaseToken token = lease(EP, "A");
+    DeliveryId delivery = queued(EP, "BK-1");
+    long version = SealScenarioContract.versionOf("BK-1");
+    SealRequest otherKey = requestNaming(delivery, token, p -> with(p, "BK-OTHER", version));
+    SealRequest otherVersion = requestNaming(delivery, token, p -> with(p, "BK-1", version + 1));
+    SealRequest both = requestNaming(delivery, token, p -> with(p, "BK-OTHER", 9));
+
+    Throwable key = catchThrowable(() -> sealing.seal(otherKey));
+    Throwable ver = catchThrowable(() -> sealing.seal(otherVersion));
+    Throwable bothWrong = catchThrowable(() -> sealing.seal(both));
+
+    assertThat(key)
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("business_key");
+    assertThat(ver)
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("version_seq");
+    assertThat(bothWrong).isInstanceOf(IllegalArgumentException.class);
+    // the message names the field and echoes no value
+    assertThat(key.getMessage()).doesNotContain("BK-OTHER").doesNotContain("BK-1");
+    assertThat(ver.getMessage()).doesNotContain(Long.toString(version + 1));
+    assertNoEffect(delivery, DeliveryState.QUEUED);
+    // the same delivery seals with the identity it has
+    assertThat(sealing.seal(request(EP, token, delivery, "BK-1", BYTES)).status())
+        .isEqualTo(SealStatus.SEALED);
+  }
+
+  @Test
+  void anIntentOverTheJournalBoundIsRefusedBeforeAnAttemptIdIsTaken() {
+    LeaseToken token = lease(EP, "A");
+    DeliveryId delivery = queued(EP, "BK-1");
+    // 1,002,000 context ids are 67 bytes each in the canonical text: over the 64 MiB of an object
+    List<Sha256> many = Collections.nCopies(1_002_000, Sha256.ofUtf8("context"));
+    SealRequest request =
+        requestNaming(
+            delivery,
+            token,
+            p ->
+                new DeliveryIntentPayload(
+                    p.delivery(),
+                    p.businessKey(),
+                    p.trn(),
+                    p.versionSeq(),
+                    p.action(),
+                    p.logicalHash(),
+                    p.artifactSha256(),
+                    p.fileName(),
+                    many));
+
+    Throwable thrown = catchThrowable(() -> sealing.seal(request));
+
+    assertThat(thrown)
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(Integer.toString(JournalObject.MAX_BYTES));
+    // nothing was written and no attempt id was taken: a caller that retries burns no id
+    assertNoEffect(delivery, DeliveryState.QUEUED);
+  }
+
+  @Test
+  void aListedMarkerThatIsGoneWhenItIsReadClosesTheGateAndSetsNoMarker() {
+    LeaseToken token = lease(EP, "A");
+    AttemptId attempt = sealed(token);
+    new EpochMarker(evidence, FIVE_YEARS, clock).declare(7);
+    DurableSeal lossy =
+        new DurableSeal(
+            ledger,
+            EpochMarkerTest.storeThatLosesTheMarkersWhenTheyAreRead(evidence),
+            clock,
+            FIVE_YEARS,
+            new SendGate(SendGate.Requirement.none()));
+
+    // with "no marker" the epoch would be 0, the epoch of the token, and the answer would be CLEAR
+    assertThat(lossy.beforeFirstByte(EP, attempt, token))
+        .isEqualTo(PreSendStatus.EPOCH_MARKER_UNREADABLE);
 
     assertThat(commitIssued(attempt)).isFalse();
   }

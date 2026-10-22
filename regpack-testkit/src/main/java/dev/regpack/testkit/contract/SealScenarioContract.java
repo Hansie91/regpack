@@ -26,14 +26,20 @@ import dev.regpack.ports.evidence.seal.Sealing.SealRequest;
 import dev.regpack.ports.evidence.seal.Sealing.SealStatus;
 import dev.regpack.ports.ledger.DeliveryLedger.Attempt;
 import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
+import dev.regpack.ports.ledger.DeliveryLedger.AttemptIntent;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
+import dev.regpack.ports.ledger.DeliveryLedger.SendingResult;
+import dev.regpack.ports.ledger.DeliveryLedger.SendingStatus;
+import dev.regpack.ports.ledger.DeliveryLedger.TransitionStatus;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseResult;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
+import dev.regpack.ports.ledger.LedgerException;
 import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.ports.ledger.ManifestLedger.ManifestRow;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
+import dev.regpack.ports.ledger.ManifestLedger.ObjectEntry;
 import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.fault.FaultInjector;
@@ -61,6 +67,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 
@@ -69,9 +76,11 @@ import org.junit.jupiter.api.Test;
  * as a suite that every pair of ledger and evidence store binds (T14a): the call order of a seal,
  * what a seal leaves behind when the evidence store is out, when the process dies at one of the
  * five crash points of {@link CrashPoints}, when the lease or the restore epoch is no longer the
- * sender's, and when the gate is closed. The ports are wrapped in {@link FaultInjector} proxies,
- * the destination is the P0 simulator and the sender is the pair {@code seal} and {@code
- * transport.send} with {@code beforeFirstByte} as its commit gate.
+ * sender's, when the gate is closed, when the gate is handed an attempt that is not the lease's (a
+ * bare attempt of the ledger, an attempt of another endpoint, a delivery that left SENDING), and
+ * when a commit that the standby did not confirm is reported by the ledger. The ports are wrapped
+ * in {@link FaultInjector} proxies, the destination is the P0 simulator and the sender is the pair
+ * {@code seal} and {@code transport.send} with {@code beforeFirstByte} as its commit gate.
  *
  * <p>No crash point of {@link CrashPoints} may be placed on {@code EvidenceStore.list}, {@code
  * EvidenceStore.get}, {@code EvidenceStore.durability} or {@code LedgerDurability.durability}: the
@@ -127,9 +136,55 @@ public interface SealScenarioContract {
   // ---------------------------------------------------------------------------------------------
   // fixtures, public so that a binding can add scenarios of its own
 
+  /** The actions that the fixtures rotate over (the report actions of the intent object). */
+  List<String> ACTIONS = List.of("NEWT", "CANC", "REPL");
+
+  /**
+   * The number that the fixtures take from a business key: the digits at its end ({@code BK-12} is
+   * 12), else its length. It is what makes the version and the action differ from delivery to
+   * delivery, so that a sealer that writes a constant for either field is seen.
+   */
+  static long numberIn(String businessKey) {
+    int start = businessKey.length();
+    while (start > 0
+        && start > businessKey.length() - 9
+        && Character.digit(businessKey.charAt(start - 1), 10) >= 0
+        && businessKey.charAt(start - 1) < 128) {
+      start--;
+    }
+    return start == businessKey.length()
+        ? businessKey.length()
+        : Long.parseLong(businessKey.substring(start));
+  }
+
+  /**
+   * The {@code version_seq} of the fixture delivery of a business key: 1 plus {@link #numberIn}.
+   * The ledger delivery and the intent object of {@link #request} both carry it.
+   */
+  static long versionOf(String businessKey) {
+    return 1 + numberIn(businessKey);
+  }
+
+  /**
+   * The action of the fixture delivery of a business key: {@link #ACTIONS} rotated by its number.
+   */
+  static String actionOf(String businessKey) {
+    return ACTIONS.get((int) (numberIn(businessKey) % ACTIONS.size()));
+  }
+
+  /**
+   * A queued delivery of the fixture business key, with the version of {@link #versionOf}, which is
+   * the version that {@link #request} puts into the intent object (a seal refuses an intent that
+   * names another one).
+   */
+  static DeliveryId queued(LedgerStore ledger, EndpointKey endpoint, String businessKey) {
+    return LedgerFixtures.queuedDelivery(ledger, endpoint, businessKey, versionOf(businessKey));
+  }
+
   /**
    * A request to seal the delivery: the file is {@code file-<businessKey>.xml}, the intent object
-   * names the business key, the TRN {@code TRN-<businessKey>} and one context id.
+   * names the business key, the TRN {@code TRN-<businessKey>}, the version {@link #versionOf}, the
+   * action {@link #actionOf} and one context id.
    */
   static SealRequest request(
       EndpointKey endpoint,
@@ -144,8 +199,8 @@ public interface SealScenarioContract {
             delivery,
             businessKey,
             "TRN-" + businessKey,
-            1,
-            "NEWT",
+            versionOf(businessKey),
+            actionOf(businessKey),
             Sha256.ofUtf8("logical-" + businessKey),
             sha,
             fileName,
@@ -247,7 +302,7 @@ public interface SealScenarioContract {
 
   private Case newDelivery(
       EndpointKey endpoint, LeaseToken token, String businessKey, byte[] bytes) {
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger(), endpoint, businessKey, 1);
+    DeliveryId delivery = queued(ledger(), endpoint, businessKey);
     return new Case(
         endpoint,
         token,
@@ -468,10 +523,22 @@ public interface SealScenarioContract {
     assertThat(intentRow.attempt()).contains(attempt.id());
     JournalObject intent = JournalObject.fromBytes(storedFor(intentRow).bytes());
     assertThat(intent.type()).isEqualTo(JournalType.DELIVERY_INTENT);
+    DeliveryIntentPayload expected = c.request().intent();
     assertThat(intent.payload())
         .containsEntry("attempt_id", attempt.id().value())
         .containsEntry("delivery_id", c.delivery().value())
-        .containsEntry("artifact_sha256", c.sha().hex());
+        .containsEntry("artifact_sha256", c.sha().hex())
+        // the identity that restore rebuilds (I10): the fixtures make the version and the action
+        // differ from delivery to delivery, so that a constant in the sealer is found
+        .containsEntry("business_key", expected.businessKey())
+        .containsEntry("trn", expected.trn())
+        .containsEntry("version_seq", expected.versionSeq())
+        .containsEntry("action", expected.action())
+        .containsEntry("logical_hash", expected.logicalHash().hex())
+        .containsEntry("file_name", expected.fileName());
+    assertThat(expected.versionSeq())
+        .as("the ledger delivery and the intent of the fixture agree on the version")
+        .isEqualTo(ledger().delivery(c.delivery()).orElseThrow().key().versionSeq());
   }
 
   /** I1 at this moment: if the file of {@code c} is at the destination, it is justified. */
@@ -918,6 +985,194 @@ public interface SealScenarioContract {
     assertThat(destination.receivedFiles()).isEmpty();
     assertThat(ledger().attempt(attempt).orElseThrow().commitIssued()).isFalse();
     assertI1(c, destination);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // the gate checks the attempt it is given, not only the lease (I1 is a never-cut control)
+
+  /** The key of a sealed file, spelled out here (D-E1): {@code sealed/<two hex>/<64 hex>}. */
+  private static EvidenceKey sealedKeyOf(Sha256 sha) {
+    return EvidenceKey.of("sealed", sha.hex().substring(0, 2), sha.hex());
+  }
+
+  /**
+   * An attempt that was begun through the ledger alone (the P3a path that stays legal): the objects
+   * of its unit are those that {@code objectsOf} names for the attempt id.
+   */
+  private AttemptId beganThroughTheLedger(
+      Case c, Function<AttemptId, List<ObjectEntry>> objectsOf) {
+    AttemptId attempt = ledger().allocateAttemptId();
+    SendingResult result =
+        ledger()
+            .beginSending(
+                c.delivery(),
+                attempt,
+                c.token(),
+                new AttemptIntent(c.sha(), c.request().fileName(), objectsOf.apply(attempt)));
+    assertThat(result.status()).as("the bare attempt").isEqualTo(SendingStatus.APPLIED);
+    return attempt;
+  }
+
+  @Test
+  default void aBareAttemptBegunThroughTheLedgerWithoutSealingIsRefusedAtTheGate() {
+    DestinationSimulator destination = destination();
+    Wiring w = wire(FaultPlan.none(), destination, false);
+    // three attempts of three deliveries: no object at all, the sealed file only, the intent
+    // object only; none has the two rows that the SENDING unit of a seal records
+    for (int variant = 0; variant < 3; variant++) {
+      Case c = newCase("BARE" + variant, "BK-BARE" + variant);
+      int which = variant;
+      AttemptId attempt =
+          beganThroughTheLedger(
+              c,
+              id ->
+                  switch (which) {
+                    case 0 -> List.of();
+                    case 1 ->
+                        List.of(
+                            new ObjectEntry(
+                                sealedKeyOf(c.sha()), ObjectClass.SEALED_FILE, c.sha(), 1));
+                    default ->
+                        List.of(
+                            new ObjectEntry(
+                                intentKey(c, id.value()),
+                                ObjectClass.JOURNAL_A,
+                                Sha256.ofUtf8("an intent object"),
+                                1));
+                  });
+
+      assertThat(w.sealing().beforeFirstByte(c.endpoint(), attempt, c.token()))
+          .as("the gate for a bare attempt, variant " + variant)
+          .isEqualTo(PreSendStatus.MARKER_REFUSED);
+      assertRefusedAtTheGate(w, c, attempt);
+      assertThat(stateOf(c.delivery())).isEqualTo(DeliveryState.SENDING);
+    }
+    assertThat(destination.receivedFiles()).isEmpty();
+  }
+
+  @Test
+  default void aTokenOfAnotherEndpointIsRefusedAtTheGate() {
+    EndpointKey first = LedgerFixtures.endpoint("TOKEN1");
+    EndpointKey second = LedgerFixtures.endpoint("TOKEN2");
+    LeaseToken firstToken = lease(ledger(), first, "A");
+    LeaseToken secondToken = lease(ledger(), second, "A");
+    // a token is (restore epoch, counter) and not bound to an endpoint: the first lease of every
+    // endpoint is the same pair, and the fence of the marker statement compares numbers only
+    assertThat(secondToken).as("the first token of every endpoint").isEqualTo(firstToken);
+    Case a = newDelivery(first, firstToken, "BK-TOKEN1", reportOf("BK-TOKEN1"));
+    Case b = newDelivery(second, secondToken, "BK-TOKEN2", reportOf("BK-TOKEN2"));
+    DestinationSimulator destination = destination();
+    Wiring w = wire(FaultPlan.none(), destination, false);
+    AttemptId ofFirst = sealed(w, a);
+    AttemptId ofSecond = sealed(w, b);
+
+    // the holder of the first endpoint names the attempt of the second one
+    assertThat(w.sealing().beforeFirstByte(first, ofSecond, firstToken))
+        .isEqualTo(PreSendStatus.MARKER_REFUSED);
+    assertThat(w.sealing().beforeFirstByte(second, ofFirst, secondToken))
+        .isEqualTo(PreSendStatus.MARKER_REFUSED);
+
+    assertThat(ledger().attempt(ofFirst).orElseThrow().commitIssued()).isFalse();
+    assertThat(ledger().attempt(ofSecond).orElseThrow().commitIssued()).isFalse();
+    assertThat(w.faults().trace())
+        .as("the marker statement is never reached")
+        .noneMatch(line -> line.startsWith("LedgerStore.markCommitIssued"));
+    assertThat(destination.receivedFiles()).isEmpty();
+    // each attempt goes out under its own endpoint
+    assertThat(send(w, a, ofFirst).status()).isEqualTo(SendStatus.DELIVERED);
+    assertThat(send(w, b, ofSecond).status()).isEqualTo(SendStatus.DELIVERED);
+    assertI1(a, destination);
+    assertI1(b, destination);
+  }
+
+  @Test
+  default void anAttemptWhoseDeliveryLeftSendingIsRefusedBeforeTheMarkerStatement() {
+    Case c = newCase("STATE", "BK-STATE");
+    DestinationSimulator destination = destination();
+    Wiring w = wire(FaultPlan.none(), destination, false);
+    AttemptId attempt = sealed(w, c);
+    // the delivery moved on (an acknowledgement state) with the lease, the epoch and the gate all
+    // in order: the ledger's own fence would refuse the marker too, but the gate does not ask
+    assertThat(ledger().transition(c.delivery(), DeliveryState.SENDING, DeliveryState.AWAITING_ACK))
+        .isEqualTo(TransitionStatus.APPLIED);
+
+    assertThat(w.sealing().beforeFirstByte(c.endpoint(), attempt, c.token()))
+        .isEqualTo(PreSendStatus.MARKER_REFUSED);
+
+    assertRefusedAtTheGate(w, c, attempt);
+    assertThat(stateOf(c.delivery())).isEqualTo(DeliveryState.AWAITING_ACK);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // a commit that no standby confirmed is never reported as durable (exit criterion, spec 11.2)
+
+  /** The text of the exception of a unit whose COMMIT returned with the standby-wait warning. */
+  String UNCONFIRMED = "commit not confirmed by the synchronous standby (sqlstate=01000)";
+
+  @Test
+  default void aMarkerCommitThatNoStandbyConfirmedIsNeverClearAndNoByteLeaves() {
+    Case c = newCase("UNCONF1", "BK-UNCONF1");
+    DestinationSimulator destination = destination();
+    // the call is made and the unit is committed locally; the caller is told it is not durable
+    Wiring w =
+        wire(
+            FaultPlan.failAt(CrashPoints.AFTER_MARKER, 1, new LedgerException(UNCONFIRMED)),
+            destination,
+            false);
+    AttemptId attempt = sealed(w, c);
+
+    Throwable thrown = catchThrowable(() -> send(w, c, attempt));
+
+    assertThat(thrown)
+        .as("the gate must throw: CLEAR here would let a byte leave on an unconfirmed marker")
+        .isInstanceOf(LedgerException.class)
+        .hasMessageContaining("commit not confirmed by the synchronous standby");
+    assertThat(destination.receivedFiles()).as("the transport gets no file").isEmpty();
+    // the marker is there (committed locally) and the delivery is in doubt for the next process
+    assertThat(ledger().attempt(attempt).orElseThrow().commitIssued()).isTrue();
+    assertThat(stateOf(c.delivery())).isEqualTo(DeliveryState.SENDING);
+    assertTheRowsOfOneSeal();
+    assertI1(c, destination);
+    // the retry is refused: the marker is set, whatever the standby says
+    assertThat(w.sealing().beforeFirstByte(c.endpoint(), attempt, c.token()))
+        .isEqualTo(PreSendStatus.MARKER_REFUSED);
+    assertThat(send(w, c, attempt).status()).isEqualTo(SendStatus.ABORTED_BY_GATE);
+    assertThat(destination.receivedFiles()).isEmpty();
+    assertI1(c, destination);
+  }
+
+  @Test
+  default void aSendingCommitThatNoStandbyConfirmedIsNeverSealed() {
+    Case c = newCase("UNCONF2", "BK-UNCONF2");
+    DestinationSimulator destination = destination();
+    Wiring w =
+        wire(
+            FaultPlan.failAt(CrashPoints.AFTER_SENDING_COMMIT, 1, new LedgerException(UNCONFIRMED)),
+            destination,
+            false);
+
+    Throwable thrown = catchThrowable(() -> w.sealing().seal(c.request()));
+
+    assertThat(thrown)
+        .as("the seal must throw: SEALED here would hand out an attempt that is not durable")
+        .isInstanceOf(LedgerException.class)
+        .hasMessageContaining("commit not confirmed by the synchronous standby");
+    // the unit is committed locally, as after a crash after the commit: SENDING, one attempt
+    // without a marker, both manifest rows, both objects, and not a byte at the destination
+    assertThat(stateOf(c.delivery())).isEqualTo(DeliveryState.SENDING);
+    List<Attempt> attempts = attemptsOf(c.delivery());
+    assertThat(attempts).hasSize(1);
+    assertThat(attempts.get(0).commitIssued()).isFalse();
+    assertTheRowsOfOneSeal();
+    List<ManifestRow> rows = manifest();
+    rows.forEach(row -> storedFor(row));
+    assertThat(destination.receivedFiles()).isEmpty();
+    assertI1(c, destination);
+    // a second seal is refused and adds nothing
+    assertThat(w.sealing().seal(c.request()).status()).isEqualTo(SealStatus.STATE_MISMATCH);
+    assertThat(manifest()).isEqualTo(rows);
+    assertThat(attemptsOf(c.delivery())).hasSize(1);
+    assertThat(destination.receivedFiles()).isEmpty();
   }
 
   // ---------------------------------------------------------------------------------------------

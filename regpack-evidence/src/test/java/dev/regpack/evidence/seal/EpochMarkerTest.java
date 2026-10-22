@@ -12,6 +12,8 @@ import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import dev.regpack.testkit.clock.ManualClock;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -230,6 +232,44 @@ class EpochMarkerTest {
     assertThatThrownBy(() -> marker.declare(5)).isInstanceOf(EvidenceUnavailableException.class);
     store.simulateOutage(false);
     assertThat(marker.current()).isEqualTo(4);
+  }
+
+  /**
+   * A store that lists what the delegate lists and answers every read of a marker with "no such
+   * object": the marker is listed on one volume and gone when it is read.
+   */
+  static EvidenceStore storeThatLosesTheMarkersWhenTheyAreRead(EvidenceStore delegate) {
+    return (EvidenceStore)
+        Proxy.newProxyInstance(
+            EvidenceStore.class.getClassLoader(),
+            new Class<?>[] {EvidenceStore.class},
+            (proxy, method, args) -> {
+              if (method.getName().equals("get")
+                  && ((EvidenceKey) args[0]).path().startsWith("control/epoch/")) {
+                return Optional.empty();
+              }
+              try {
+                return method.invoke(delegate, args);
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
+  }
+
+  @Test
+  void aMarkerThatIsListedButGoneWhenItIsReadIsUnreadable() {
+    marker.declare(5);
+    EpochMarker reader =
+        new EpochMarker(storeThatLosesTheMarkersWhenTheyAreRead(store), FIVE_YEARS, clock);
+
+    // not "no marker, epoch 0": a sender at epoch 0 would be let through by that mistake
+    assertThat(marker.current()).isEqualTo(5);
+    Throwable thrown = catchThrowable(reader::current);
+
+    assertThat(thrown)
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("a listed marker is missing")
+        .hasMessageContaining(EpochMarker.key(5).path());
   }
 
   @Test

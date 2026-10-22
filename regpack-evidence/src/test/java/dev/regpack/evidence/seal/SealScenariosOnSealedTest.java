@@ -90,7 +90,7 @@ class SealScenariosOnSealedTest extends AbstractSealScenarioTest {
   private void acknowledgedEvidenceSurvivesTheLossOf(Path lost, String name) throws IOException {
     EndpointKey endpoint = LedgerFixtures.endpoint(name);
     LeaseToken token = lease(endpoint);
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger(), endpoint, "BK-LOSS", 1);
+    DeliveryId delivery = SealScenarioContract.queued(ledger(), endpoint, "BK-LOSS");
     SealOutcome outcome =
         sealing(ledger(), evidence(), false)
             .seal(request(endpoint, token, delivery, "BK-LOSS", reportOf("BK-LOSS")));
@@ -147,7 +147,7 @@ class SealScenariosOnSealedTest extends AbstractSealScenarioTest {
   void aLostVolumeStopsTheSealBeforeTheLedgerChanges() throws IOException {
     EndpointKey endpoint = LedgerFixtures.endpoint("LOSS3");
     LeaseToken token = lease(endpoint);
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger(), endpoint, "BK-LOSS", 1);
+    DeliveryId delivery = SealScenarioContract.queued(ledger(), endpoint, "BK-LOSS");
     SealRequest request = request(endpoint, token, delivery, "BK-LOSS", reportOf("BK-LOSS"));
     SealedEvidenceStore degraded = storeThatLostVolumeB();
 
@@ -163,7 +163,7 @@ class SealScenariosOnSealedTest extends AbstractSealScenarioTest {
   void aLostVolumeClosesAGateThatAsksForADurableAcknowledgement() throws IOException {
     EndpointKey endpoint = LedgerFixtures.endpoint("LOSS4");
     LeaseToken token = lease(endpoint);
-    DeliveryId delivery = LedgerFixtures.queuedDelivery(ledger(), endpoint, "BK-LOSS", 1);
+    DeliveryId delivery = SealScenarioContract.queued(ledger(), endpoint, "BK-LOSS");
     SealRequest request = request(endpoint, token, delivery, "BK-LOSS", reportOf("BK-LOSS"));
     SealedEvidenceStore degraded = storeThatLostVolumeB();
     SendGate evidenceMustAcknowledgeDurably =

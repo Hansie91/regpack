@@ -33,9 +33,14 @@ import java.util.Set;
  * boolean, integer, decimal, instant, list and text-keyed map only; integers widen to {@link
  * Long}). The shape check also refuses what {@link #toBytes()} could never write: text (and map
  * keys) with an unpaired surrogate, and an instant of more than microsecond precision or outside
- * the years 0000 to 9999, so a constructed object is always serialisable. The payload schemas of
- * the types are checked in addition by {@link JournalSchemas}, so an object that breaks its schema
- * cannot be built. The payload is copied deeply and is immutable. Messages never echo a value.
+ * the years 0000 to 9999, so no text or instant of a constructed object makes {@link #toBytes()}
+ * fail. The size is the exception: the constructor does not bound it, and the lists of the schemas
+ * have no count bound, so a list of very many elements (about a million hashes) can build an object
+ * whose canonical bytes are over {@link #MAX_BYTES}; {@link #toBytes()} then throws {@link
+ * IllegalArgumentException}. A producer that must know before it takes an effect calls {@code
+ * toBytes()} first ({@code DurableSeal} does, in its validation). The payload schemas of the types
+ * are checked in addition by {@link JournalSchemas}, so an object that breaks its schema cannot be
+ * built. The payload is copied deeply and is immutable. Messages never echo a value.
  *
  * <p>The canonical bytes of an object are at most {@link #MAX_BYTES}: {@link #toBytes()} refuses
  * more and {@link #fromBytes} refuses longer input before it parses anything.
