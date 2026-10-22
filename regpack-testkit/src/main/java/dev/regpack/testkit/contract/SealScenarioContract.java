@@ -521,7 +521,9 @@ public interface SealScenarioContract {
     assertThat(intentRow.entry().objectClass()).isEqualTo(ObjectClass.JOURNAL_A);
     assertThat(intentRow.provenance()).isEqualTo(Provenance.WRITTEN);
     assertThat(intentRow.attempt()).contains(attempt.id());
-    JournalObject intent = JournalObject.fromBytes(storedFor(intentRow).bytes());
+    JournalObject intent =
+        JournalObject.fromBytes(
+            JournalKey.parse(intentRow.entry().key()), storedFor(intentRow).bytes());
     assertThat(intent.type()).isEqualTo(JournalType.DELIVERY_INTENT);
     DeliveryIntentPayload expected = c.request().intent();
     assertThat(intent.payload())
@@ -620,7 +622,9 @@ public interface SealScenarioContract {
         // the hash is that of the object as stored, not the payload hash of the envelope
         assertThat(row.entry().key()).isEqualTo(intentKey(c, attempt.value()));
         assertThat(row.entry().sha256())
-            .isNotEqualTo(JournalObject.fromBytes(stored.bytes()).payloadSha256());
+            .isNotEqualTo(
+                JournalObject.fromBytes(JournalKey.parse(row.entry().key()), stored.bytes())
+                    .payloadSha256());
       }
     }
     // the rows went with the SENDING unit: the sealer made no ledger call of its own for them

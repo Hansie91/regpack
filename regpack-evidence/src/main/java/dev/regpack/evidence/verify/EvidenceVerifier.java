@@ -365,7 +365,8 @@ public final class EvidenceVerifier {
         byte[] bytes) {
       JournalObject object;
       try {
-        object = JournalObject.fromBytes(bytes);
+        // an object over the bound of a DeliveryIntent (1 MiB) is refused here without being parsed
+        object = JournalObject.fromBytes(keyOfIntent, bytes);
       } catch (IllegalArgumentException e) {
         add(Kind.INTENT_MISMATCH, key.path(), NOT_A_JOURNAL_OBJECT);
         return;

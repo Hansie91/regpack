@@ -119,6 +119,41 @@ final class JournalFixtures {
     return feedback(ids);
   }
 
+  /**
+   * A VersionAssigned object (a type that may be 64 MiB) whose canonical bytes are exactly {@code
+   * target} long: assignments with a subject of 1,024 characters or a few less, as many as it
+   * takes. Equal subjects share one String instance.
+   */
+  static JournalObject versionAssignedOfLength(long target) {
+    long emptyLength = versionAssigned(List.of()).toBytes().length;
+    long perElement = versionAssigned(List.of(assignment(""))).toBytes().length - emptyLength;
+    // each element costs perElement plus its own subject text plus a comma, less the first comma
+    long total = target - emptyLength + 1;
+    long count = (total + perElement + 1024) / (perElement + 1 + 1024);
+    long subjects = total - count * (perElement + 1);
+    long base = subjects / count;
+    long extra = subjects % count;
+    Map<Long, String> texts = new HashMap<>();
+    List<Map<String, Object>> assignments = new ArrayList<>();
+    for (long i = 0; i < count; i++) {
+      long length = base + (i < extra ? 1 : 0);
+      assignments.add(assignment(texts.computeIfAbsent(length, n -> "a".repeat((int) (long) n))));
+    }
+    return versionAssigned(assignments);
+  }
+
+  private static Map<String, Object> assignment(String subject) {
+    return Map.of("subject", subject, "trn", "TRN0000000000000000001", "version_seq", 1L);
+  }
+
+  private static JournalObject versionAssigned(List<Map<String, Object>> assignments) {
+    Map<String, Object> payload =
+        new LinkedHashMap<>(payload(JournalType.VERSION_ASSIGNED, JournalClass.B));
+    payload.put("assignments", assignments);
+    return new JournalObject(
+        new JournalKey.ClassB(SCOPE, 3, 10_003), JournalType.VERSION_ASSIGNED, 1, AT, payload);
+  }
+
   private static JournalObject feedback(List<String> ids) {
     Map<String, Object> payload =
         new LinkedHashMap<>(payload(JournalType.FEEDBACK_RECEIVED, JournalClass.B));

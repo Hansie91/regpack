@@ -14,8 +14,8 @@ import java.util.regex.Pattern;
  * hashes are 64 lower-case hex characters, instants are {@link Instant} with at most microsecond
  * precision. Every text is bounded, in UTF-16 code units: {@code detail} and {@code reason} at
  * 4,096 and every other text (a list element too) at 1,024; the number of elements of a list is not
- * bounded here, only the size of the whole object is ({@link JournalObject#MAX_BYTES}). Two rules
- * go beyond the shape: a {@code RecoveryDecision} says it authorises an effect exactly when it is
+ * bounded here, only the size of the whole object is ({@link JournalType#maxBytes()}). Two rules go
+ * beyond the shape: a {@code RecoveryDecision} says it authorises an effect exactly when it is
  * class (a), and the kind of an {@code OperatorAction} fixes its class and scope. Messages name the
  * schema field and the rule and never echo a value or an unknown key.
  */

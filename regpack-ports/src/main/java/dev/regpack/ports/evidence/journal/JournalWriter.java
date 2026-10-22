@@ -99,7 +99,7 @@ public final class JournalWriter {
     }
     JournalObject object;
     try {
-      object = JournalObject.fromBytes(stored.get().bytes());
+      object = JournalObject.fromBytes(key, stored.get().bytes());
     } catch (IllegalArgumentException e) {
       // the cause is dropped on purpose: it describes stored content
       throw new EvidenceIntegrityException(
@@ -160,7 +160,7 @@ public final class JournalWriter {
     }
     try {
       boolean same =
-          JournalObject.fromBytes(stored.get().bytes())
+          JournalObject.fromBytes(object.key(), stored.get().bytes())
               .payloadSha256()
               .equals(object.payloadSha256());
       return same ? stored : Optional.empty();

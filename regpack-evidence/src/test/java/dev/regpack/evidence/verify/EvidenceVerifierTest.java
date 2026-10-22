@@ -17,6 +17,7 @@ import dev.regpack.evidence.verify.EvidenceVerifier.Report;
 import dev.regpack.inmemory.InMemoryEvidenceStore;
 import dev.regpack.inmemory.InMemoryLedgerStore;
 import dev.regpack.model.Sha256;
+import dev.regpack.model.json.Json;
 import dev.regpack.ports.connector.Transport.OutboundFile;
 import dev.regpack.ports.connector.Transport.SendResult;
 import dev.regpack.ports.connector.Transport.SendStatus;
@@ -813,6 +814,39 @@ class EvidenceVerifierTest {
           return List.of(finding(Kind.INTENT_MISMATCH, key, "the object is not a journal object"));
         });
     faults.put(
+        "a canonical and otherwise valid intent object of more than a mebibyte (JOURNAL-1)",
+        (tier, seals) -> {
+          // JournalObject.toBytes would refuse to write it: the bytes are rendered by hand, to be
+          // exactly what an older writer or a hostile writer of the volume could have sealed
+          EvidenceKey key =
+              tier.rawIntent(
+                  "HAND12",
+                  started -> {
+                    Map<String, Object> payload = tier.intentPayload(started);
+                    List<String> many = new ArrayList<>();
+                    for (int i = 0; i < 16_000; i++) {
+                      many.add(Sha256.ofUtf8("ctx-" + i).hex());
+                    }
+                    payload.put("context_ids", many);
+                    Map<String, Object> envelope = new LinkedHashMap<>();
+                    envelope.put("endpoint", JournalScope.of(started.endpoint()).value());
+                    envelope.put("restore_epoch", started.token().restoreEpoch());
+                    envelope.put("type", JournalType.DELIVERY_INTENT.wireName());
+                    envelope.put("schema_version", 1L);
+                    envelope.put("clock_instant", START);
+                    envelope.put("payload_sha256", Sha256.ofUtf8(Json.canonical(payload)).hex());
+                    envelope.put("subject_id", Long.toString(started.attempt().value()));
+                    envelope.put("ordinal", 1L);
+                    Map<String, Object> object = new LinkedHashMap<>();
+                    object.put("envelope", envelope);
+                    object.put("payload", payload);
+                    byte[] bytes = Json.canonical(object).getBytes(UTF_8);
+                    assertThat(bytes.length).isGreaterThan(JournalType.DELIVERY_INTENT.maxBytes());
+                    return bytes;
+                  });
+          return List.of(finding(Kind.INTENT_MISMATCH, key, "the object is not a journal object"));
+        });
+    faults.put(
         "an intent object whose envelope names another key than the one it is stored under",
         (tier, seals) -> {
           EvidenceKey key =
@@ -1015,6 +1049,39 @@ class EvidenceVerifierTest {
             finding(Kind.INTENT_MISMATCH, namedAbc, "the object is not a journal object"));
     assertThat(report.objectsChecked()).isEqualTo(8);
     assertThat(report.manifestRowsChecked()).isEqualTo(4);
+  }
+
+  @Test
+  void aDenseHostileObjectUnderAnIntentKeyIsRefusedWithoutBuildingATree() throws IOException {
+    // JOURNAL-1: a dense list of tiny nodes after a well-formed head. Parsed, 4 MiB of it is a tree
+    // of 1.4 million nodes (about 124 MB of heap more, measured); refused unread, verify allocates
+    // about 38 MB (the tier's own reads and hashes). The bound sits between the two. The finding is
+    // the one of any other object that is no journal object
+    byte[] head = "{\"envelope\":{},\"payload\":{},\"x\":[".getBytes(UTF_8);
+    byte[] tail = "0]}".getBytes(UTF_8);
+    int end = head.length + (4 * 1024 * 1024 - head.length - tail.length) / 3 * 3;
+    byte[] hostile = new byte[end + tail.length];
+    System.arraycopy(head, 0, hostile, 0, head.length);
+    for (int i = head.length; i < end; i += 3) {
+      hostile[i] = '{';
+      hostile[i + 1] = '}';
+      hostile[i + 2] = ',';
+    }
+    System.arraycopy(tail, 0, hostile, end, tail.length);
+    Tier tier = new Tier(root.resolve("dense"));
+    tier.baseline();
+    EvidenceKey key = tier.rawIntent("DENSE", hostile);
+    com.sun.management.ThreadMXBean threads =
+        (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+    assertThat(threads.isThreadAllocatedMemorySupported()).isTrue();
+
+    long before = threads.getCurrentThreadAllocatedBytes();
+    Report report = tier.verifier.verify("");
+    long allocated = threads.getCurrentThreadAllocatedBytes() - before;
+
+    assertThat(report.findings())
+        .contains(finding(Kind.INTENT_MISMATCH, key, "the object is not a journal object"));
+    assertThat(allocated).as("bytes allocated by verify").isLessThan(80L * 1024 * 1024);
   }
 
   @Test

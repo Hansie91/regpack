@@ -310,7 +310,7 @@ class PackagingFilesTest {
     assertThat(CiLedgerJob.problems(ci)).isEmpty();
   }
 
-  /** The checker has teeth: each single edit that neuters the job is reported. */
+  /** The checker has teeth: each edit of the kinds listed below is reported. */
   @Test
   void theLedgerJobCheckerReportsEachWayOfNeuteringTheJob() throws IOException {
     String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
@@ -673,21 +673,77 @@ class PackagingFilesTest {
         lines.add(cells[4].strip());
       }
     }
-    java.util.Set<String> methods = new java.util.TreeSet<>();
+    List<String> found = new java.util.ArrayList<>();
     for (String clazz : List.of("PgDurabilityUpIT", "PgDurabilityDownIT")) {
       String source =
           asciiLfText(
               repoRoot()
                   .resolve(
                       "regpack-postgres/src/test/java/dev/regpack/postgres/" + clazz + ".java"));
-      java.util.regex.Matcher method =
-          java.util.regex.Pattern.compile("(?m)^  @Test\\n  void (\\w+)\\(").matcher(source);
-      while (method.find()) {
-        methods.add("dev.regpack.postgres." + clazz + "#" + method.group(1));
+      for (String name : TestMethods.names(source)) {
+        found.add("dev.regpack.postgres." + clazz + "#" + name);
       }
     }
-    assertThat(methods).as("the test methods of the two classes").hasSize(9);
+    java.util.Set<String> methods = new java.util.TreeSet<>(found);
+    // CI-4: any annotation between the test annotation and the method counts, so the number of
+    // methods found, the number of distinct names and the number of lines are one number
+    assertThat(found).as("the test methods of the two classes").hasSize(9);
+    assertThat(methods).as("no name twice").hasSameSizeAs(found);
     assertThat(lines).as("the REALSTANDBY lines of row I1").isEqualTo(methods);
+    assertThat(lines).as("as many lines as methods").hasSameSizeAs(found);
+  }
+
+  /**
+   * CI-4: the finder of the test methods sees a method whatever stands between its annotation and
+   * its name, and reads nothing from comments and strings; a test annotation it cannot read is an
+   * error and never skipped.
+   */
+  @Test
+  void theFinderOfTestMethodsSeesEveryKindOfTestMethod() {
+    String source =
+        """
+        class X {
+          /** Mentions @Test in a comment: void notAMethod() {} */
+          // @Test void alsoNot() {}
+          String text = "@Test void inAString() {}";
+          @Test
+          void plain() {}
+          @Test
+          @Disabled
+          void disabled() {}
+          @Test @Timeout(value = 5, unit = TimeUnit.SECONDS) void timeout() {}
+          @Test
+          @DisplayName("a (name)")
+          public void withParentheses() {}
+          @ParameterizedTest
+          @ValueSource(strings = {"a", "b"})
+          void parameterized(String s) {}
+          @RepeatedTest(3)
+          void repeated() {}
+          @TestFactory
+          java.util.stream.Stream<DynamicTest> factory() { return null; }
+          @TestTemplate void template() {}
+          @org.junit.jupiter.api.Test
+          void qualified() {}
+          @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+          static class Nested {}
+        }
+        """;
+    assertThat(TestMethods.names(source))
+        .containsExactly(
+            "plain",
+            "disabled",
+            "timeout",
+            "withParentheses",
+            "parameterized",
+            "repeated",
+            "factory",
+            "template",
+            "qualified");
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> TestMethods.names("@Test\nint field = 3;\n"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("line 1");
   }
 
   /**
@@ -806,10 +862,77 @@ class PackagingFilesTest {
     }
   }
 
+  /** SHA-256 of the 62 lines of the job, as the owner approved them on 2026-10-21 (AP-3). */
+  private static final String APPROVED_JOB_SHA256 =
+      "2289ac93715a04efb05c1397a57444b6e0c23802ea0d6f44bbeb284dc0a4c3bb";
+
+  /** SHA-256 of {@code scripts/ci/pg-quorum-up.sh} as the owner approved it (AP-3). */
+  private static final String APPROVED_QUORUM_SCRIPT_SHA256 =
+      "c1e465f702b6fb6998a7e5b548893283352416496627cf5dd028b650fdf94ad2";
+
+  /** SHA-256 of {@code scripts/ci/pg-init-replication.sh} as the owner approved it (AP-3). */
+  private static final String APPROVED_INIT_SCRIPT_SHA256 =
+      "3fe282446f6940e0921b7001a1ff6b3e2a2987d9969aca730c171e9d59097692";
+
   /**
-   * The checker has teeth: each single edit that neuters the job or its script is reported, and
-   * under the name of the rule that the edit breaks (the expected fragment of the problem text),
-   * not merely as a generic difference from the approved text.
+   * CI-1: the exact text of the job {@code ledger-durability} (the lines from {@code "
+   * ledger-durability:"} to its {@code if-no-files-found: warn}, LF-normalised, each line ended by
+   * a newline) and of its two scripts is what the owner approved (AP-3). The checker below finds
+   * what it is taught to find; this test finds every edit. A change of any of the three needs the
+   * owner's approval of the exact new text; the new SHA-256 value goes into the constant together
+   * with the record of that approval.
+   */
+  @Test
+  void theApprovedTextsOfTheDurabilityJobAndItsScriptsAreHeldByHash() throws IOException {
+    List<String> ci =
+        List.of(asciiLfText(repoRoot().resolve(".github/workflows/ci.yml")).split("\n", -1));
+    int from = ci.indexOf("  " + CiDurabilityJob.JOB + ":");
+    assertThat(from).as("the line of the job " + CiDurabilityJob.JOB).isGreaterThanOrEqualTo(0);
+    int to = from;
+    while (to < ci.size() && !ci.get(to).strip().equals("if-no-files-found: warn")) {
+      to++;
+    }
+    assertThat(to).as("the upload step that ends the job").isLessThan(ci.size());
+    List<String> job = ci.subList(from, to + 1);
+
+    // the workflow-level environment reaches every job: it holds the one Maven argument line
+    // and no other variable (for example a MAVEN_OPTS that ignores test failures)
+    int env = ci.indexOf("env:");
+    assertThat(env).as("the workflow-level env block").isGreaterThanOrEqualTo(0);
+    assertThat(ci.subList(env, ci.indexOf("jobs:")))
+        .as("the workflow-level env block")
+        .containsExactly("env:", "  MAVEN_ARGS: -B -ntp --strict-checksums", "");
+    assertThat(job).as("the number of lines of the approved job text").hasSize(62);
+    assertApprovedHash(
+        "the job ledger-durability", String.join("\n", job) + "\n", APPROVED_JOB_SHA256);
+    assertApprovedHash(
+        CiDurabilityJob.SCRIPT,
+        asciiLfText(repoRoot().resolve(CiDurabilityJob.SCRIPT)),
+        APPROVED_QUORUM_SCRIPT_SHA256);
+    assertApprovedHash(
+        CiDurabilityJob.INIT_SCRIPT,
+        asciiLfText(repoRoot().resolve(CiDurabilityJob.INIT_SCRIPT)),
+        APPROVED_INIT_SCRIPT_SHA256);
+  }
+
+  private static void assertApprovedHash(String what, String text, String approved) {
+    String actual = dev.regpack.model.Sha256.ofUtf8(text).hex();
+    assertThat(actual)
+        .as(
+            "%s differs from the text the owner approved (SHA-256 %s). A change of the job"
+                + " ledger-durability or of its scripts needs the owner's approval of the exact"
+                + " text (AP-3). With that approval, set the constant to the new SHA-256 value %s"
+                + " and record the approval in docs/evidence/decisions.md.",
+            what, approved, actual)
+        .isEqualTo(approved);
+  }
+
+  /**
+   * The checker has teeth: each edit of the kinds listed below that neuters the job or its script
+   * is reported, and under the name of the rule that the edit breaks (the expected fragment of the
+   * problem text), not merely as a generic difference from the approved text. It does not find
+   * every edit; the approved text itself is held by {@code
+   * theApprovedTextsOfTheDurabilityJobAndItsScriptsAreHeldByHash}.
    */
   @Test
   void theDurabilityJobCheckerReportsEachWayOfNeuteringTheJob() throws IOException {

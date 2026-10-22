@@ -1228,8 +1228,8 @@ class DurableSealTest {
   void anIntentOverTheJournalBoundIsRefusedBeforeAnAttemptIdIsTaken() {
     LeaseToken token = lease(EP, "A");
     DeliveryId delivery = queued(EP, "BK-1");
-    // 1,002,000 context ids are 67 bytes each in the canonical text: over the 64 MiB of an object
-    List<Sha256> many = Collections.nCopies(1_002_000, Sha256.ofUtf8("context"));
+    // 16,000 context ids are 67 bytes each in the canonical text: over the 1 MiB of an intent
+    List<Sha256> many = Collections.nCopies(16_000, Sha256.ofUtf8("context"));
     SealRequest request =
         requestNaming(
             delivery,
@@ -1250,7 +1250,7 @@ class DurableSealTest {
 
     assertThat(thrown)
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(Integer.toString(JournalObject.MAX_BYTES));
+        .hasMessageContaining(Integer.toString(JournalType.DELIVERY_INTENT.maxBytes()));
     // nothing was written and no attempt id was taken: a caller that retries burns no id
     assertNoEffect(delivery, DeliveryState.QUEUED);
   }

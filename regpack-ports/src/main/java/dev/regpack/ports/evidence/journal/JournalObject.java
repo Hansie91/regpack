@@ -35,15 +35,26 @@ import java.util.Set;
  * keys) with an unpaired surrogate, and an instant of more than microsecond precision or outside
  * the years 0000 to 9999, so no text or instant of a constructed object makes {@link #toBytes()}
  * fail. The size is the exception: the constructor does not bound it, and the lists of the schemas
- * have no count bound, so a list of very many elements (about a million hashes) can build an object
- * whose canonical bytes are over {@link #MAX_BYTES}; {@link #toBytes()} then throws {@link
+ * have no count bound, so a list of very many elements can build an object whose canonical bytes
+ * are over {@link JournalType#maxBytes()} of its type; {@link #toBytes()} then throws {@link
  * IllegalArgumentException}. A producer that must know before it takes an effect calls {@code
  * toBytes()} first ({@code DurableSeal} does, in its validation). The payload schemas of the types
  * are checked in addition by {@link JournalSchemas}, so an object that breaks its schema cannot be
  * built. The payload is copied deeply and is immutable. Messages never echo a value.
  *
- * <p>The canonical bytes of an object are at most {@link #MAX_BYTES}: {@link #toBytes()} refuses
- * more and {@link #fromBytes} refuses longer input before it parses anything.
+ * <p>The canonical bytes of an object are at most {@link JournalType#maxBytes()} of its type:
+ * {@link #toBytes()} refuses more, and {@link #fromBytes} refuses input longer than the bound of
+ * the type that the key names before it parses anything. The bound is on the bytes, not on the
+ * work: the parser builds a tree of every JSON node before any schema check, and a dense text (for
+ * example {@code {},} repeated) needs many times its length in heap. That is why only the two types
+ * whose payload is a list that grows with a batch ({@code VersionAssigned}, {@code BatchAdmitted})
+ * may be 64 MiB ({@link #MAX_BYTES}) and every other type is at most 1 MiB ({@link
+ * #MAX_SMALL_BYTES}). A class (b) key does not name its type (only the envelope does), so it is
+ * read with the 64 MiB bound and a longer object of a small type is refused after it is read, by
+ * the canonical comparison. The cost of a dense hostile input of 64 MiB under a key of a large type
+ * (a class (b) key, or a {@code BatchAdmitted} key) is accepted until the parser has a node budget;
+ * that is a hand-off. A reader that must not parse such an input reads only the keys of the small
+ * types ({@code EvidenceVerifier} reads only {@code DeliveryIntent} keys).
  *
  * <p>The payload read back by {@link #fromBytes} is the JSON data model: text, boolean, {@link
  * Long}, {@link BigDecimal}, list and map. A payload that was built with an {@link Instant} reads
@@ -60,11 +71,18 @@ public record JournalObject(
     Instant clockInstant,
     Map<String, Object> payload) {
   /**
-   * The most bytes a journal object may have: 64 MiB. A {@code VersionAssigned} object of a
-   * 10,000-record batch is about 1 MB, so the bound is far above any real object and far below the
-   * size at which reading one would exhaust the memory of the reader.
+   * The most bytes an object of a large type ({@code VersionAssigned}, {@code BatchAdmitted}) may
+   * have: 64 MiB. A {@code VersionAssigned} object of a 10,000-record batch is about 1 MB, so the
+   * bound is far above any real object. It is a bound on the bytes only: a dense text of this
+   * length can still need more than a gigabyte of heap in the parser (see the class comment).
    */
   public static final int MAX_BYTES = 67_108_864;
+
+  /**
+   * The most bytes an object of any other type may have: 1 MiB. A {@code DeliveryIntent} is about 1
+   * KB plus 67 bytes for each context id, so 1 MiB holds about 15,000 context ids.
+   */
+  public static final int MAX_SMALL_BYTES = 1_048_576;
 
   private static final Instant FIRST_YEAR_0000 = Instant.parse("0000-01-01T00:00:00Z");
   private static final Instant LAST_YEAR_9999 = Instant.parse("9999-12-31T23:59:59.999999999Z");
@@ -127,24 +145,30 @@ public record JournalObject(
     object.put("envelope", envelope);
     object.put("payload", payload);
     byte[] bytes = Json.canonical(object).getBytes(UTF_8);
-    if (bytes.length > MAX_BYTES) {
+    if (bytes.length > type.maxBytes()) {
       throw new IllegalArgumentException(
-          "journal object: the canonical bytes are over " + MAX_BYTES + " bytes");
+          "journal object: the canonical bytes are over " + type.maxBytes() + " bytes");
     }
     return bytes;
   }
 
   /**
-   * Reads canonical bytes. Only canonical text is accepted (the object is re-rendered and compared
-   * byte for byte, so trailing bytes, whitespace, another key order and non-canonical numbers or
-   * instants are refused), the envelope must have exactly the keys of its class, and {@code
-   * payload_sha256} must be the hash of the canonical payload. A malformed text is an {@link
-   * IllegalArgumentException} whose message never echoes the input and which has no cause.
+   * Reads the canonical bytes stored under {@code storedUnder}. Input longer than the bound of the
+   * key (the {@link JournalType#maxBytes()} of the type of a class (a) key; {@link #MAX_BYTES} for
+   * a class (b) key, which does not name its type) is refused before anything is parsed. Only
+   * canonical text is accepted (the object is re-rendered and compared byte for byte, so trailing
+   * bytes, whitespace, another key order and non-canonical numbers or instants are refused), the
+   * envelope must have exactly the keys of its class, and {@code payload_sha256} must be the hash
+   * of the canonical payload. A malformed text is an {@link IllegalArgumentException} whose message
+   * never echoes the input and which has no cause. The result may name another key than {@code
+   * storedUnder}: the caller compares them.
    */
-  public static JournalObject fromBytes(byte[] bytes) {
+  public static JournalObject fromBytes(JournalKey storedUnder, byte[] bytes) {
+    Objects.requireNonNull(storedUnder, "storedUnder");
     Objects.requireNonNull(bytes, "bytes");
-    if (bytes.length > MAX_BYTES) {
-      throw malformed("the input is over " + MAX_BYTES + " bytes"); // before anything is parsed
+    int limit = maxBytesOf(storedUnder);
+    if (bytes.length > limit) {
+      throw malformed("the input is over " + limit + " bytes"); // before anything is parsed
     }
     try {
       String text =
@@ -191,6 +215,14 @@ public record JournalObject(
       // the cause is dropped on purpose: parser messages can repeat parts of the input
       throw malformed("the text cannot be read");
     }
+  }
+
+  /** A class (a) key names its type; a class (b) key could be a large VersionAssigned. */
+  private static int maxBytesOf(JournalKey key) {
+    return switch (key) {
+      case JournalKey.ClassA a -> a.type().maxBytes();
+      case JournalKey.ClassB _ -> MAX_BYTES;
+    };
   }
 
   /** Compared as instants: Instant.MIN and Instant.MAX have no calendar year to read. */

@@ -162,9 +162,18 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
    * waits for a lock. A unit that waited longer than its lock timeout (five seconds, the default of
    * the adapter) would fail with SQLSTATE 55P03, and the test collects every exception of a seal
    * instead of stopping at the first.
+   *
+   * <p>What this shows, and what it does not (TESTS-7): no seal deadlocks, none waits for a lock
+   * longer than the lock timeout, and every seal is sealed with an attempt id of its own. It does
+   * not show that no unit waits for another for a shorter time: a unit that takes a lock in common
+   * (a shared row, a dictionary row created inside the unit) and holds it only for milliseconds
+   * would pass. That claim (EF21) is held by the shape of the schema and of the unit (no dictionary
+   * row in V002, the manifest rows inserted last), which a reviewer reads; a check with {@code
+   * pg_blocking_pids} on a unit held open between the manifest insert and its commit is a hand-off
+   * and is not part of this test.
    */
   @Test
-  void concurrentSealsOfDifferentDeliveriesDoNotWaitForEachOther() throws Exception {
+  void concurrentSealsOfDifferentDeliveriesNeitherDeadlockNorHitTheLockTimeout() throws Exception {
     EndpointKey endpoint = LedgerFixtures.endpoint("CONC");
     LeaseToken token = SealScenarioContract.lease(ledger(), endpoint, "A");
     List<List<SealRequest>> perThread = new ArrayList<>();

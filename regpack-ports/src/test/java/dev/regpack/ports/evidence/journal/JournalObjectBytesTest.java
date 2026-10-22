@@ -84,15 +84,20 @@ class JournalObjectBytesTest {
   void bytesRoundTrip() {
     for (JournalType type : JournalType.values()) {
       JournalObject object = JournalFixtures.object(type);
-      JournalObject back = JournalObject.fromBytes(object.toBytes());
+      JournalObject back = JournalObject.fromBytes(object.key(), object.toBytes());
       assertThat(back).as(type.wireName()).isEqualTo(object);
       assertThat(back.toBytes()).as(type.wireName()).isEqualTo(object.toBytes());
     }
     // both instant-typed fields come back as Instant, not as text
-    assertThat(JournalObject.fromBytes(transportResult().toBytes()).payload().get("observed_at"))
+    assertThat(
+            JournalObject.fromBytes(transportResult().key(), transportResult().toBytes())
+                .payload()
+                .get("observed_at"))
         .isEqualTo(JournalFixtures.OBSERVED);
     assertThat(
-            JournalObject.fromBytes(JournalFixtures.object(JournalType.FEEDBACK_RECEIVED).toBytes())
+            JournalObject.fromBytes(
+                    JournalFixtures.object(JournalType.FEEDBACK_RECEIVED).key(),
+                    JournalFixtures.object(JournalType.FEEDBACK_RECEIVED).toBytes())
                 .payload()
                 .get("received_at"))
         .isEqualTo(JournalFixtures.OBSERVED);
@@ -110,7 +115,7 @@ class JournalObjectBytesTest {
             1,
             AT,
             payload);
-    JournalObject back = JournalObject.fromBytes(object.toBytes());
+    JournalObject back = JournalObject.fromBytes(object.key(), object.toBytes());
     assertThat(back).isEqualTo(object);
     assertThat(back.payload().get("detail")).isEqualTo("café 😀 \"quoted\" \\ \n tab\t");
   }
@@ -160,7 +165,10 @@ class JournalObjectBytesTest {
         good.replace("\"subject_id\":\"42\",", "\"seq\":1,\"subject_id\":\"42\",").getBytes(UTF_8));
     bad.add(good.replace(hash, otherHash).getBytes(UTF_8)); // wrong payload hash
     // the dedicated check names the field (a text that is only not canonical does not)
-    assertThatThrownBy(() -> JournalObject.fromBytes(good.replace(hash, otherHash).getBytes(UTF_8)))
+    assertThatThrownBy(
+            () ->
+                JournalObject.fromBytes(
+                    intent().key(), good.replace(hash, otherHash).getBytes(UTF_8)))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("payload_sha256");
     bad.add(good.replace("\"payload\":{", "\"extra\":{},\"payload\":{").getBytes(UTF_8));
@@ -188,7 +196,7 @@ class JournalObjectBytesTest {
     bad.add("null".getBytes(UTF_8));
     bad.add(good.replace("\"envelope\":{", "\"envelope\":[").getBytes(UTF_8));
     for (byte[] bytes : bad) {
-      assertThatThrownBy(() -> JournalObject.fromBytes(bytes))
+      assertThatThrownBy(() -> JournalObject.fromBytes(intent().key(), bytes))
           .as(new String(bytes, UTF_8))
           .isInstanceOf(IllegalArgumentException.class);
     }
@@ -202,12 +210,12 @@ class JournalObjectBytesTest {
             "\"nonsense\"",
             "5")) {
       byte[] bytes = result.replace("\"2026-10-19T12:00:01.500000Z\"", instant).getBytes(UTF_8);
-      assertThatThrownBy(() -> JournalObject.fromBytes(bytes))
+      assertThatThrownBy(() -> JournalObject.fromBytes(transportResult().key(), bytes))
           .as(instant)
           .isInstanceOf(IllegalArgumentException.class);
     }
     // the control: the untouched text is accepted
-    assertThat(JournalObject.fromBytes(good.getBytes(UTF_8))).isEqualTo(intent());
+    assertThat(JournalObject.fromBytes(intent().key(), good.getBytes(UTF_8))).isEqualTo(intent());
   }
 
   @Test
@@ -227,11 +235,11 @@ class JournalObjectBytesTest {
           new JournalObject(key, JournalType.DELIVERY_INTENT, 1, Instant.parse(c[0]), payload);
       String text = text(object);
       assertThat(text).contains("\"clock_instant\":\"" + c[1] + "\"");
-      assertThat(JournalObject.fromBytes(object.toBytes())).isEqualTo(object);
+      assertThat(JournalObject.fromBytes(object.key(), object.toBytes())).isEqualTo(object);
       // the shortened form (what Instant.toString gives) is not the canonical text
       String shortened = text.replace(c[1], c[0]);
       if (!shortened.equals(text)) {
-        assertThatThrownBy(() -> JournalObject.fromBytes(shortened.getBytes(UTF_8)))
+        assertThatThrownBy(() -> JournalObject.fromBytes(object.key(), shortened.getBytes(UTF_8)))
             .as(c[0])
             .isInstanceOf(IllegalArgumentException.class);
       }
@@ -300,7 +308,7 @@ class JournalObjectBytesTest {
   @Test
   void aReShipIsByteIdentical() {
     byte[] first = intent().toBytes();
-    JournalObject read = JournalObject.fromBytes(first);
+    JournalObject read = JournalObject.fromBytes(intent().key(), first);
     assertThat(read.toBytes()).isEqualTo(first);
     // the same ledger event rebuilt later gives the same bytes: the clock instant is the event time
     List<Map.Entry<String, Object>> entries = new ArrayList<>(intent().payload().entrySet());
@@ -353,7 +361,7 @@ class JournalObjectBytesTest {
             "{\"payload\":{\"a\":" + MARKER + "}}",
             good + MARKER);
     for (String text : bad) {
-      assertThatThrownBy(() -> JournalObject.fromBytes(text.getBytes(UTF_8)))
+      assertThatThrownBy(() -> JournalObject.fromBytes(intent().key(), text.getBytes(UTF_8)))
           .isInstanceOf(IllegalArgumentException.class)
           .satisfies(
               e -> {

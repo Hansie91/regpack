@@ -39,11 +39,14 @@ import dev.regpack.inmemory.mutants.VersionOnAnyOutcomeLedgerContractTest;
 import dev.regpack.inmemory.mutants.WithdrawalGuardFirstLegOnlyLedgerContractTest;
 import dev.regpack.inmemory.mutants.WithdrawalGuardIgnoresOutcomeLedgerContractTest;
 import dev.regpack.inmemory.mutants.WithdrawalGuardOnRedeliveryLedgerContractTest;
+import dev.regpack.ports.evidence.EvidenceIntegrityException;
+import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
 import org.junit.platform.engine.support.descriptor.MethodSource;
@@ -200,28 +203,73 @@ class ContractSuiteTeethTest {
         Set.of("aConflictingObjectRollsTheSendingTransitionBack"));
 
     List<String> misses = new ArrayList<>();
+    Set<String> usedExceptions = new TreeSet<>();
     expected.forEach(
         (mutant, names) -> {
-          Set<String> failed = failedMethodNames(mutant);
+          Map<String, Throwable> failures = failuresOf(mutant);
           for (String name : new TreeSet<>(names)) {
-            if (!failed.contains(name)) {
+            Throwable failure = failures.get(name);
+            String pair = mutant.getSimpleName() + "#" + name;
+            if (failure == null) {
               misses.add(mutant.getSimpleName() + " was not caught by " + name);
+            } else if (NOT_AN_ASSERTION.containsKey(pair)) {
+              usedExceptions.add(pair);
+              if (failure.getClass() != NOT_AN_ASSERTION.get(pair)) {
+                misses.add(
+                    pair
+                        + " was expected to fail with "
+                        + NOT_AN_ASSERTION.get(pair).getSimpleName()
+                        + " and failed with "
+                        + failure.getClass().getSimpleName());
+              }
+            } else if (!(failure instanceof AssertionError)) {
+              misses.add(
+                  mutant.getSimpleName()
+                      + " made "
+                      + name
+                      + " fail with "
+                      + failure.getClass().getSimpleName()
+                      + " and not with an assertion");
             }
           }
         });
+    // an entry of the registry must be a pair of the table above that still fails that way
+    for (String pair : NOT_AN_ASSERTION.keySet()) {
+      if (!usedExceptions.contains(pair)) {
+        misses.add("the registry of exceptions names a pair that is not expected above: " + pair);
+      }
+    }
     assertThat(misses).isEmpty();
   }
 
-  private static Set<String> failedMethodNames(Class<?> mutant) {
+  /**
+   * TESTS-5: a mutant is caught by a contract test when the test fails with an assertion, not with
+   * a stray exception of the adapter. The pairs below fail with the named exception instead: the
+   * flawed adapter makes the in-memory store itself refuse the call, and the contract test does not
+   * catch it. A change that makes any of them throw something else for an unrelated reason is seen,
+   * as is an entry that is no longer needed.
+   */
+  private static final Map<String, Class<? extends Throwable>> NOT_AN_ASSERTION =
+      Map.of(
+          "CaseFoldedKeysEvidenceContractTest#keysDifferingOnlyInCaseAreDistinct",
+          EvidenceIntegrityException.class,
+          "SubjectNotRegimeScopedLedgerContractTest#subjectKeyIsScopedByRegime",
+          IllegalArgumentException.class,
+          "WithdrawalGuardOnRedeliveryLedgerContractTest"
+              + "#aRedeliveryOfAnEarlierNonReportDecisionIsANoopWhenLaterVersionsExist",
+          WithdrawalRequiredException.class);
+
+  /** The failure of each contract method that failed when the mutant ran the suite. */
+  private static Map<String, Throwable> failuresOf(Class<?> mutant) {
     var request = LauncherDiscoveryRequestBuilder.request().selectors(selectClass(mutant)).build();
     var listener = new SummaryGeneratingListener();
     LauncherFactory.create().execute(request, listener);
-    Set<String> failed = new TreeSet<>();
+    Map<String, Throwable> failures = new TreeMap<>();
     for (var failure : listener.getSummary().getFailures()) {
       if (failure.getTestIdentifier().getSource().orElse(null) instanceof MethodSource source) {
-        failed.add(source.getMethodName());
+        failures.put(source.getMethodName(), failure.getException());
       }
     }
-    return failed;
+    return failures;
   }
 }

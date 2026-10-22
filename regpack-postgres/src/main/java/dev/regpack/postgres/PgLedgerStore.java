@@ -42,7 +42,10 @@ public final class PgLedgerStore implements LedgerStore {
    * @param partitionsOnDemand whether a missing daily partition of {@code decision} is created by
    *     the adapter (T16)
    * @param forceSynchronousCommit whether every unit sets {@code synchronous_commit = on}; only the
-   *     capacity variant C of T21 turns it off
+   *     capacity variant C of T21 and the standby tests of P3b1 ({@code PgDurabilityUpIT}, {@code
+   *     DurabilityHarness}) turn it off, so that only the unit under test waits for the standby;
+   *     {@link PgLedgerDurability} then reads the setting of the server instead of assuming {@code
+   *     on}
    * @param lockTimeout {@code lock_timeout} of every unit, a positive whole number of milliseconds
    * @param statementTimeout {@code statement_timeout} of every unit, likewise
    */

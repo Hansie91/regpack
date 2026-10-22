@@ -336,26 +336,37 @@ class JournalWriterTest {
   }
 
   @Test
-  void anObjectOverTheSizeLimitIsRefusedAtTheWriterAndNothingIsPut() {
+  void anObjectOverTheSizeLimitOfItsTypeIsRefusedAtTheWriterAndNothingIsPut() {
     MapStore store = new MapStore();
     JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
-    JournalObject over = JournalFixtures.feedbackOfLength(JournalObject.MAX_BYTES + 1L);
+    int small = JournalType.FEEDBACK_RECEIVED.maxBytes();
+    JournalObject over = JournalFixtures.feedbackOfLength(small + 1L);
     assertThatThrownBy(() -> writer.write(over)).isInstanceOf(IllegalArgumentException.class);
+    JournalObject largeOver = JournalFixtures.versionAssignedOfLength(JournalObject.MAX_BYTES + 1L);
+    assertThatThrownBy(() -> writer.write(largeOver)).isInstanceOf(IllegalArgumentException.class);
     assertThat(store.puts).isEmpty();
-    JournalObject exactly = JournalFixtures.feedbackOfLength(JournalObject.MAX_BYTES);
+    JournalObject exactly = JournalFixtures.feedbackOfLength(small);
     assertThat(writer.write(exactly)).isEqualTo(JournalWriter.Outcome.CREATED);
     assertThat(writer.read(exactly.key())).contains(exactly);
+    JournalObject largeExactly = JournalFixtures.versionAssignedOfLength(JournalObject.MAX_BYTES);
+    assertThat(writer.write(largeExactly)).isEqualTo(JournalWriter.Outcome.CREATED);
+    assertThat(writer.read(largeExactly.key())).contains(largeExactly);
   }
 
   @Test
-  void aStoredObjectOverTheSizeLimitIsAnIntegrityAlarmAndNotAnOutOfMemoryError() {
+  void aStoredObjectOverTheSizeLimitOfItsKeyIsAnIntegrityAlarmAndNotAnOutOfMemoryError() {
     MapStore store = new MapStore();
     JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
     JournalKey key = JournalFixtures.object(JournalType.DELIVERY_INTENT).key();
-    byte[] over = new byte[JournalObject.MAX_BYTES + 1];
+    byte[] over = new byte[JournalType.DELIVERY_INTENT.maxBytes() + 1];
     Arrays.fill(over, (byte) ' ');
     storeBytes(store, key.evidenceKey(), over);
     assertThatThrownBy(() -> writer.read(key)).isInstanceOf(EvidenceIntegrityException.class);
+    JournalKey large = JournalFixtures.object(JournalType.VERSION_ASSIGNED).key();
+    byte[] largeOver = new byte[JournalObject.MAX_BYTES + 1];
+    Arrays.fill(largeOver, (byte) ' ');
+    storeBytes(store, large.evidenceKey(), largeOver);
+    assertThatThrownBy(() -> writer.read(large)).isInstanceOf(EvidenceIntegrityException.class);
   }
 
   private static void storeBytes(MapStore store, EvidenceKey key, byte[] bytes) {
