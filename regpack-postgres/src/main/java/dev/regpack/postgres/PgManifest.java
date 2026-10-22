@@ -52,6 +52,16 @@ import javax.sql.DataSource;
  * COMMITTED} transaction, so it sees a row that a concurrent unit committed while this unit waited
  * for it.
  *
+ * <p><b>A call that writes nothing still waits for the standby (I1).</b> A {@link #recordObjects}
+ * whose keys are all stored already with the same hash inserts no row, so its unit has no
+ * transaction id and no WAL and the server would let its commit return without waiting for the
+ * synchronous standby. If it is the retry of a call whose commit was reported as "not confirmed",
+ * the manifest rows may exist on the primary only, and the success of the retry would say they are
+ * durable. So a call that inserted no row ends with {@link Unit#durabilityBarrier} (a share lock on
+ * the restore-epoch row; the ledger role has no {@code UPDATE} on this table, so the barrier cannot
+ * lock a manifest row). A caller of {@link #record} that writes other rows in its unit needs no
+ * barrier.
+ *
  * <p><b>Reading.</b> {@link #manifestRows} is a range on the primary key: {@code object_key >=
  * prefix AND object_key < prefix || U+007F AND object_key > after ORDER BY object_key LIMIT n}.
  * Every key is made of characters below U+007F ({@link EvidenceKey}), so the range holds exactly
@@ -122,7 +132,14 @@ final class PgManifest {
         dataSource,
         config,
         connection -> {
-          record(connection, writtenAt, copy, provenance, attempt);
+          boolean inserted = record(connection, writtenAt, copy, provenance, attempt);
+          if (!inserted) {
+            // every key was stored already with the same hash: this unit has written nothing, so
+            // it has no transaction id and no WAL and its commit would not wait for the standby,
+            // although the call may be the retry of one whose commit was "not confirmed" and the
+            // caller takes success to mean that the manifest rows are durable
+            Unit.durabilityBarrier(connection);
+          }
           return Boolean.TRUE;
         });
   }
@@ -194,9 +211,12 @@ final class PgManifest {
    *       waits for the key (one side then gets {@code 40P01}).
    *   <li><b>READ COMMITTED.</b> The read-back after the insert must be a new snapshot, so that it
    *       sees a row that a concurrent unit committed while this one waited for its key. {@link
-   *       Unit#begin} sets that level; a connection opened without it, on REPEATABLE READ or
-   *       stricter, cannot see the row, and the call fails with a {@link LedgerException} ("has no
-   *       manifest row after its insert") instead of recognising the conflict.
+   *       Unit#begin} sets that level. A connection opened without it, on REPEATABLE READ or
+   *       stricter, fails earlier: the {@code INSERT ... ON CONFLICT DO NOTHING} against a row that
+   *       the snapshot cannot see raises {@code 40001} ("could not serialize access due to
+   *       concurrent update") itself, which is a {@link LedgerException} with that SQLSTATE and
+   *       still fails closed. The branch below that fails with "has no manifest row after its
+   *       insert" is a safety net that no isolation level is known to reach.
    *   <li><b>Sorted inside, not outside.</b> This method inserts in key order whatever the order of
    *       {@code entries}, so that two units with overlapping sets of keys cannot wait for each
    *       other in a circle; a caller does not sort and must not split one set of keys over several
@@ -204,10 +224,16 @@ final class PgManifest {
    * </ol>
    *
    * @param writtenAt the ledger time of a new row; one value for the whole call
+   * @return true when this call inserted at least one row, false when every key was already stored
+   *     with the same hash (or the list is empty, or the driver could not say): then the unit has
+   *     written nothing through this call, and a caller whose success may be acknowledged must make
+   *     its commit wait for the standby ({@link Unit#durabilityBarrier}); {@link #recordObjects}
+   *     does. A caller that writes other rows in the same unit, like {@code beginSending}, needs
+   *     nothing: its own writes give the commit a transaction id and WAL.
    * @throws ManifestConflictException when a key is stored with another hash; the caller must roll
    *     its transaction back, which removes the rows that this call inserted before it found out
    */
-  static void record(
+  static boolean record(
       Connection connection,
       OffsetDateTime writtenAt,
       List<ObjectEntry> entries,
@@ -215,11 +241,12 @@ final class PgManifest {
       Optional<AttemptId> attempt)
       throws SQLException {
     if (entries.isEmpty()) {
-      return;
+      return false;
     }
     short provenanceCode = Codes.of(provenance);
     List<ObjectEntry> inKeyOrder = new ArrayList<>(entries);
     inKeyOrder.sort(Comparator.comparing(entry -> entry.key().path()));
+    boolean inserted;
     try (PreparedStatement insert = connection.prepareStatement(RECORD_SQL)) {
       for (ObjectEntry entry : inKeyOrder) {
         insert.setString(1, entry.key().path());
@@ -235,7 +262,7 @@ final class PgManifest {
         insert.setObject(7, writtenAt);
         insert.addBatch();
       }
-      insert.executeBatch();
+      inserted = anyRowInserted(insert.executeBatch());
     }
     Map<String, byte[]> stored = storedHashes(connection, entries);
     for (ObjectEntry entry : entries) {
@@ -250,6 +277,23 @@ final class PgManifest {
             "object key is recorded with another hash: " + entry.key().path());
       }
     }
+    return inserted;
+  }
+
+  /**
+   * Whether the counts of the insert batch show a row that this call inserted. A count of 1 is a
+   * row; 0 is a statement that conflicted and inserted nothing; a negative count (the driver's
+   * {@code SUCCESS_NO_INFO}, which a rewritten batch returns) says nothing, and nothing is the
+   * answer that makes the caller add the barrier: a barrier that was not needed costs one lock, a
+   * barrier that was missing costs an acknowledgement.
+   */
+  private static boolean anyRowInserted(int[] counts) {
+    for (int count : counts) {
+      if (count > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------------------------

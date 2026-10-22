@@ -17,6 +17,7 @@ import dev.regpack.ports.ledger.DecisionLedger.CommitStatus;
 import dev.regpack.ports.ledger.DecisionLedger.Committed;
 import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.LedgerException;
+import dev.regpack.ports.ledger.OutboxLedger.OutboxId;
 import dev.regpack.ports.ledger.ReportLedger.NewVersion;
 import dev.regpack.ports.ledger.ReportLedger.ReportableCommit;
 import dev.regpack.ports.ledger.ReportLedger.ReportableCommitted;
@@ -111,8 +112,18 @@ class PgUnitFlowTest {
       if (sql.equals(PgReports.EXISTING_SQL)) {
         return done(events, PgReports.SUBJECT_LOCK_SQL) ? row(9L, 1L, "TRN1", 77L) : none();
       }
+      if (sql.equals(Unit.BARRIER_SQL)) {
+        return row(1);
+      }
       return none();
     };
+  }
+
+  /** {@link #server} for a first decision of the chain: the head row is inserted. */
+  static SqlSpy.Answers serverOfAFirstDecision() {
+    SqlSpy.Answers base = server(0, true, FIRST.body());
+    return (sql, events) ->
+        sql.equals(PgDecisions.HEAD_INSERT_SQL) ? row((short) 1, EVENT) : base.rows(sql, events);
   }
 
   private static BatchCommit batch(NewDecision... list) {
@@ -261,6 +272,74 @@ class PgUnitFlowTest {
             "execute: " + PgReports.VERSION_INSERT_SQL,
             "execute: " + PgReports.SUBJECT_BUMP_SQL,
             "execute: " + PgDeliveries.CREATE_SQL);
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // I1, acknowledgement limb: a replay that writes nothing must still wait for the standby
+
+  /** The statements between the barrier and the commit that follows it: there must be none. */
+  private static void assertBarrierIsTheLastStatementBeforeTheCommit(List<String> events) {
+    int barrier = at(events, Unit.BARRIER_SQL);
+    int commit = next(events, "commit", barrier);
+    assertThat(events.subList(barrier + 1, commit))
+        .as("the statements between the barrier and the commit")
+        .noneMatch(event -> event.startsWith("execute: "));
+    assertThat(count(events, Unit.BARRIER_SQL)).as("barriers").isEqualTo(1);
+  }
+
+  @Test
+  void aRedeliveredDecisionBatchEndsWithTheDurabilityBarrierSoThatItsCommitWaitsForTheStandby() {
+    spy.answering(server(1, false, FIRST.body()));
+
+    List<Committed> committed = decisions.commitDecisions(batch(FIRST));
+
+    assertThat(committed.get(0).status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+    List<String> events = spy.events();
+    assertThat(at(events, Unit.BARRIER_SQL)).isGreaterThan(at(events, PgDecisions.STORED_SQL));
+    assertBarrierIsTheLastStatementBeforeTheCommit(events);
+  }
+
+  @Test
+  void aBatchThatInsertsADecisionAddsNoBarrier() {
+    spy.answering(serverOfAFirstDecision());
+
+    List<Committed> committed = decisions.commitDecisions(batch(FIRST));
+
+    assertThat(committed.get(0).status()).isEqualTo(CommitStatus.INSERTED);
+    assertThat(spy.events()).contains("commit").doesNotContain("execute: " + Unit.BARRIER_SQL);
+  }
+
+  @Test
+  void aRedeliveredBatchThatCompletesAnOutboxItemAddsNoBarrierBecauseTheCompletionWrites() {
+    spy.updatingRows(1).answering(server(1, false, FIRST.body()));
+    BatchCommit completing = new BatchCommit(List.of(FIRST), Optional.of(new OutboxId(4)));
+
+    List<Committed> committed = decisions.commitDecisions(completing);
+
+    assertThat(committed.get(0).status()).isEqualTo(CommitStatus.NOOP_REDELIVERY);
+    assertThat(spy.events())
+        .contains("execute: " + PgDecisions.OUTBOX_DONE_SQL, "commit")
+        .doesNotContain("execute: " + Unit.BARRIER_SQL);
+  }
+
+  @Test
+  void aReportableRedeliveryThatOnlyFindsItsVersionsEndsWithTheBarrier() {
+    spy.answering(server(1, false, FIRST.body()));
+
+    ReportableCommitted committed = reports.commitReportable(reportable(FIRST, VERSION)).get(0);
+
+    assertThat(committed.versions().get(0).status()).isEqualTo(VersionStatus.EXISTING);
+    assertBarrierIsTheLastStatementBeforeTheCommit(spy.events());
+  }
+
+  @Test
+  void aReportableCommitThatInsertsADecisionAddsNoBarrier() {
+    spy.answering(serverOfAFirstDecision());
+
+    ReportableCommitted committed = reports.commitReportable(reportable(FIRST)).get(0);
+
+    assertThat(committed.decision().status()).isEqualTo(CommitStatus.INSERTED);
+    assertThat(spy.events()).contains("commit").doesNotContain("execute: " + Unit.BARRIER_SQL);
   }
 
   // ------------------------------------------------------------------------------------------

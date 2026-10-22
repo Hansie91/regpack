@@ -46,10 +46,14 @@ import javax.sql.DataSource;
  * <p>{@code commitIngest} is one unit. It takes the advisory lock of its source (Convention 12,
  * purpose 3; one lock per commit, held through the commit, so that the batches of one source run
  * strictly one after another and the reads below cannot be overtaken), then inserts the batch row
- * {@code ON CONFLICT DO NOTHING}: a conflict is a redelivery and returns the stored result. Every
- * disposition is decided from set-based reads over the whole commit before anything is inserted
- * ({@link IngestDispositions}); only the new entries are inserted, in one statement; the outbox
- * item, the checkpoint and the stored result follow in the same transaction.
+ * {@code ON CONFLICT DO NOTHING}: a conflict is a redelivery and returns the stored result, read
+ * with a share lock on the batch row so that the commit of a unit that has written nothing still
+ * waits for the synchronous standby (I1: a redelivery after a commit that was "not confirmed" must
+ * not be acknowledged earlier than the first delivery could have been; see {@link
+ * Unit#durabilityBarrier}). Every disposition is decided from set-based reads over the whole commit
+ * before anything is inserted ({@link IngestDispositions}); only the new entries are inserted, in
+ * one statement; the outbox item, the checkpoint and the stored result follow in the same
+ * transaction.
  *
  * <p>The constraints stay the backstop (I2, D-L3): the insert names its arbiter {@code ingest_pk},
  * and a clash on {@code ingest_event_version_key} raises 23505, because the reads have already
@@ -64,22 +68,34 @@ final class PgIngest {
 
   private static final String LOCK_SQL = "SELECT pg_advisory_xact_lock(?, hashtext(?))";
 
-  private static final String SOURCE_SELECT_SQL =
-      "SELECT s.source_id FROM source s WHERE s.source = ?";
+  static final String SOURCE_SELECT_SQL = "SELECT s.source_id FROM source s WHERE s.source = ?";
 
   private static final String SOURCE_INSERT_SQL =
       "INSERT INTO source (source) VALUES (?) ON CONFLICT ON CONSTRAINT source_name_key DO NOTHING";
 
-  private static final String BATCH_INSERT_SQL =
+  static final String BATCH_INSERT_SQL =
       "INSERT INTO ingest_batch (batch_id, source_id, result, created_at) VALUES (?, ?, ?, ?)"
           + " ON CONFLICT ON CONSTRAINT ingest_batch_id_key DO NOTHING RETURNING batch_no";
 
   private static final String BATCH_UPDATE_SQL =
       "UPDATE ingest_batch SET result = ?, outbox_id = ? WHERE batch_no = ?";
 
-  private static final String BATCH_SELECT_SQL =
+  static final String BATCH_SELECT_SQL =
       "SELECT s.source, b.result, b.outbox_id FROM ingest_batch b"
           + " JOIN source s ON s.source_id = b.source_id WHERE b.batch_id = ?";
+
+  /**
+   * The read of a redelivery: the same read with a share lock on the batch row. A redelivery
+   * inserts nothing, so its transaction has no transaction id and writes no WAL, and the server
+   * lets such a commit return without waiting for the synchronous standby; the lock is WAL-logged,
+   * so the commit that follows it waits, and a standby that confirms it has also received the
+   * commit of the first delivery, which is earlier in the log (see {@link Unit#durabilityBarrier}).
+   * The lock is on the batch row and nothing else is locked: the row is never updated again after
+   * its first commit, so the lock conflicts with nothing, and the ledger role updates this table
+   * (the result of a batch is filled in by an update), so it holds the privilege that {@code FOR
+   * SHARE} needs.
+   */
+  static final String BATCH_SELECT_SHARE_SQL = BATCH_SELECT_SQL + " FOR SHARE OF b";
 
   /** The exact keys of the commit that are stored (the primary key {@code ingest_pk}). */
   private static final String BY_KEY_SQL =
@@ -114,7 +130,7 @@ final class PgIngest {
           + " FROM unnest(?::text[], ?::int8[], ?::text[], ?::text[]) AS t(rec, ver, ev, hx)"
           + " ON CONFLICT ON CONSTRAINT ingest_pk DO NOTHING";
 
-  private static final String OUTBOX_INSERT_SQL =
+  static final String OUTBOX_INSERT_SQL =
       "INSERT INTO outbox (kind, subject_id, state) VALUES (?, ?, ?) RETURNING outbox_id";
 
   private static final String CHECKPOINT_UPSERT_SQL =
@@ -222,7 +238,13 @@ final class PgIngest {
     OffsetDateTime at = PgTime.timestamp(now);
     OptionalLong inserted = insertBatch(connection, commit.batchId(), sourceId, at);
     if (inserted.isEmpty()) {
-      // the batch id is taken: a redelivery writes nothing and returns the stored result
+      // the batch id is taken: a redelivery inserts nothing and returns the stored result. Left
+      // alone, such a unit has no transaction id and no WAL, so its commit would return at once
+      // without waiting for the standby, even when the commit of the first delivery was reported
+      // as "not confirmed" and the batch may exist on this primary only; the caller (the pipeline)
+      // acknowledges the source on this result. So the read takes a share lock on the batch row
+      // (BATCH_SELECT_SHARE_SQL): it is the last statement of the unit, its commit waits like the
+      // commit of the first delivery, and it ends in the same exception when the wait is cancelled.
       return storedResult(connection, commit.batchId(), true)
           .orElseThrow(() -> new LedgerException("a batch id conflicted but no batch is stored"));
     }
@@ -452,10 +474,16 @@ final class PgIngest {
     }
   }
 
-  /** The stored result of a batch, rebuilt from {@code ingest_batch}; empty if there is none. */
+  /**
+   * The stored result of a batch, rebuilt from {@code ingest_batch}; empty if there is none. For a
+   * redelivery the batch row is read with a share lock ({@link #BATCH_SELECT_SHARE_SQL}), which is
+   * what makes the commit of a unit that writes nothing wait for the standby; the plain lookup of
+   * {@link #ingestResult} is a read and stays one.
+   */
   private static Optional<Result> storedResult(
       Connection connection, BatchId batchId, boolean redelivery) throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement(BATCH_SELECT_SQL)) {
+    String sql = redelivery ? BATCH_SELECT_SHARE_SQL : BATCH_SELECT_SQL;
+    try (PreparedStatement statement = connection.prepareStatement(sql)) {
       statement.setString(1, batchId.value());
       try (ResultSet rows = statement.executeQuery()) {
         if (!rows.next()) {

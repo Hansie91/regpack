@@ -263,7 +263,36 @@ final class PgDecisions {
   List<Committed> commitDecisions(BatchCommit commit) {
     Prepared prepared = prepare(commit);
     beforeUnit(prepared);
-    return runUnit(prepared.days(), connection -> commitIn(connection, prepared, WaveHook.NONE));
+    return runUnit(
+        prepared.days(),
+        connection -> {
+          List<Committed> committed = commitIn(connection, prepared, WaveHook.NONE);
+          if (wroteNothing(prepared, committed)) {
+            Unit.durabilityBarrier(connection);
+          }
+          return committed;
+        });
+  }
+
+  /**
+   * Whether a unit that ran {@link #commitIn} has written nothing: every decision was a redelivery
+   * (so no decision row, no head and nothing after them was written) and no outbox item was
+   * completed (that update writes even for an item that is done already). Such a unit has no
+   * transaction id and no WAL, and its commit would not wait for the synchronous standby, although
+   * it may be the retry of a commit that was reported as "not confirmed" and the caller takes its
+   * result as the decision to go on: its owner ends it with {@link Unit#durabilityBarrier}. A unit
+   * of no decisions has nothing a retry could be about.
+   */
+  static boolean wroteNothing(Prepared prepared, List<Committed> committed) {
+    if (committed.isEmpty() || prepared.completesOutbox().isPresent()) {
+      return false;
+    }
+    for (Committed one : committed) {
+      if (one.status() != CommitStatus.NOOP_REDELIVERY) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**

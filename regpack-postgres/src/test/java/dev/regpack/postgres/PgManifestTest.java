@@ -64,6 +64,9 @@ class PgManifestTest {
           rows.add(new Object[] {entry.key().path(), hashBytes(entry)});
         }
       }
+      if (sql.equals(Unit.BARRIER_SQL)) {
+        rows.add(new Object[] {1});
+      }
       return rows;
     };
   }
@@ -316,6 +319,73 @@ class PgManifestTest {
         .containsExactly("bind 1=order/C", "bind 1=order/a", "bind 1=order/b");
     assertThat(answering.events()).contains("commit").doesNotContain("rollback");
     assertThat(answering.openConnections()).isZero();
+  }
+
+  // I1, acknowledgement limb: a call that finds every key stored with the same hash writes nothing,
+  // has no transaction id and would commit without waiting for the standby; the barrier makes it
+  // wait like the call whose commit was not confirmed
+
+  private List<String> sentTo(SqlSpy answering) {
+    return answering.events().stream()
+        .filter(e -> e.startsWith("execute: ") || e.equals("commit"))
+        .map(e -> e.startsWith("execute: ") ? e.substring("execute: ".length()) : e)
+        .filter(
+            e -> e.equals("commit") || e.contains("object_manifest") || e.equals(Unit.BARRIER_SQL))
+        .toList();
+  }
+
+  @Test
+  void aReplayThatInsertsNothingEndsWithTheBarrierBeforeTheCommit() {
+    ObjectEntry entry = objectEntry("replay/one", "one");
+    ObjectEntry other = objectEntry("replay/two", "two");
+    SqlSpy answering = new SqlSpy().batchingRows(0).answering(storedHashesOf(entry, other));
+    PgManifest withAnswers = new PgManifest(answering.over(null), clock, config);
+
+    withAnswers.recordObjects(List.of(entry, other), Provenance.WRITTEN, Optional.empty());
+
+    assertThat(sentTo(answering))
+        .containsExactly(PgManifest.RECORD_SQL, PgManifest.STORED_SQL, Unit.BARRIER_SQL, "commit");
+  }
+
+  @Test
+  void aCallThatInsertsARowAddsNoBarrier() {
+    ObjectEntry entry = objectEntry("fresh/one", "one");
+    SqlSpy answering = new SqlSpy().batchingRows(1).answering(storedHashesOf(entry));
+    PgManifest withAnswers = new PgManifest(answering.over(null), clock, config);
+
+    withAnswers.recordObjects(List.of(entry), Provenance.WRITTEN, Optional.empty());
+
+    assertThat(sentTo(answering))
+        .containsExactly(PgManifest.RECORD_SQL, PgManifest.STORED_SQL, "commit");
+  }
+
+  @Test
+  void aBatchWhoseCountsAreUnknownIsTreatedAsAReplay() {
+    ObjectEntry entry = objectEntry("unknown/one", "one");
+    SqlSpy answering =
+        new SqlSpy()
+            .batchingRows(java.sql.Statement.SUCCESS_NO_INFO)
+            .answering(storedHashesOf(entry));
+    PgManifest withAnswers = new PgManifest(answering.over(null), clock, config);
+
+    withAnswers.recordObjects(List.of(entry), Provenance.WRITTEN, Optional.empty());
+
+    assertThat(sentTo(answering)).contains(Unit.BARRIER_SQL);
+  }
+
+  @Test
+  void aReplayWithAnotherHashIsAConflictAndSendsNoBarrier() {
+    ObjectEntry entry = objectEntry("replay/clash", "bytes-B");
+    ObjectEntry stored = objectEntry("replay/clash", "bytes-A");
+    SqlSpy answering = new SqlSpy().batchingRows(0).answering(storedHashesOf(stored));
+    PgManifest withAnswers = new PgManifest(answering.over(null), clock, config);
+
+    assertThatThrownBy(
+            () -> withAnswers.recordObjects(List.of(entry), Provenance.WRITTEN, Optional.empty()))
+        .isInstanceOf(ManifestConflictException.class);
+
+    assertThat(sentTo(answering)).doesNotContain(Unit.BARRIER_SQL);
+    assertThat(answering.events()).contains("rollback").doesNotContain("commit");
   }
 
   @Test

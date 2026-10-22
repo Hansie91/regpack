@@ -686,7 +686,7 @@ class PackagingFilesTest {
         methods.add("dev.regpack.postgres." + clazz + "#" + method.group(1));
       }
     }
-    assertThat(methods).as("the test methods of the two classes").hasSize(8);
+    assertThat(methods).as("the test methods of the two classes").hasSize(9);
     assertThat(lines).as("the REALSTANDBY lines of row I1").isEqualTo(methods);
   }
 

@@ -12,6 +12,7 @@ import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -473,5 +474,61 @@ class UnitTest {
         .isInstanceOf(LedgerException.class)
         .hasMessage("ledger statement failed: sqlstate=08006 constraint=none");
     assertThat(spy.events()).doesNotContain("getWarnings");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // the durability barrier (I1, acknowledgement limb)
+
+  private static final SqlSpy.Answers BARRIER_ROW =
+      (sql, events) ->
+          sql.equals(Unit.BARRIER_SQL)
+              ? Collections.<Object[]>singletonList(new Object[] {1})
+              : List.of();
+
+  @Test
+  void theBarrierIsAShareLockOnTheRestoreEpochRowAndRunsBeforeTheCommit() {
+    SqlSpy spy = new SqlSpy().answering(BARRIER_ROW);
+
+    Unit.inUnit(
+        spy.over(null),
+        CONFIG,
+        connection -> {
+          Unit.durabilityBarrier(connection);
+          return "x";
+        });
+
+    assertThat(Unit.BARRIER_SQL)
+        .as("a row lock is WAL-logged, a bare transaction id is not")
+        .isEqualTo("SELECT 1 FROM restore_epoch WHERE singleton FOR SHARE");
+    assertThat(spy.events())
+        .containsSubsequence("execute: " + Unit.BARRIER_SQL, "commit", "setAutoCommit(true)");
+    assertThat(spy.events()).containsOnlyOnce("execute: " + Unit.BARRIER_SQL);
+  }
+
+  @Test
+  void aUnitAddsNoBarrierOfItsOwn() {
+    SqlSpy spy = new SqlSpy().answering(BARRIER_ROW);
+
+    Unit.inUnit(spy.over(null), CONFIG, connection -> "x");
+
+    assertThat(spy.events()).doesNotContain("execute: " + Unit.BARRIER_SQL);
+  }
+
+  @Test
+  void aBarrierThatLockedNoRowFailsTheUnitAndRollsBack() {
+    SqlSpy spy = new SqlSpy();
+
+    assertThatThrownBy(
+            () ->
+                Unit.inUnit(
+                    spy.over(null),
+                    CONFIG,
+                    connection -> {
+                      Unit.durabilityBarrier(connection);
+                      return "x";
+                    }))
+        .isInstanceOf(LedgerException.class)
+        .hasMessage("the restore epoch row is missing");
+    assertThat(spy.events()).contains("rollback").doesNotContain("commit");
   }
 }

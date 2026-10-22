@@ -10,6 +10,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,6 +34,8 @@ final class SqlSpy {
   private volatile SQLException failWarnings;
   private volatile Fault fault;
   private volatile Answers answers;
+  private volatile int updateCount;
+  private volatile int batchCount = 1;
 
   /**
    * The warning chain of the connection, as {@code getWarnings} sees it. One chain for all the
@@ -150,6 +153,25 @@ final class SqlSpy {
     return this;
   }
 
+  /**
+   * The row count that a fake server returns from {@code executeUpdate} (default 0: nothing
+   * changed). It applies only over no real data source.
+   */
+  SqlSpy updatingRows(int count) {
+    this.updateCount = count;
+    return this;
+  }
+
+  /**
+   * The count that a fake server returns for each statement of an {@code executeBatch} (default 1:
+   * every statement of the batch stored a row; 0 is a batch of {@code ON CONFLICT DO NOTHING}
+   * inserts that all conflicted). It applies only over no real data source.
+   */
+  SqlSpy batchingRows(int count) {
+    this.batchCount = count;
+    return this;
+  }
+
   /** Marks a point of the test body in the event list. */
   void mark(String event) {
     events.add(event);
@@ -240,9 +262,13 @@ final class SqlSpy {
   }
 
   private Object statementProxy(Object real, Class<?> type, String preparedSql) {
+    AtomicInteger batched = new AtomicInteger();
     InvocationHandler handler =
         (proxy, method, args) -> {
           String name = method.getName();
+          if (name.equals("addBatch") && (args == null || args.length == 0)) {
+            batched.incrementAndGet();
+          }
           if (name.startsWith("execute")) {
             statements.incrementAndGet();
             String sql =
@@ -262,6 +288,14 @@ final class SqlSpy {
             events.add("bind " + args[0] + "=" + args[1]);
           }
           if (real == null) {
+            if (name.equals("executeBatch")) {
+              int[] counts = new int[batched.getAndSet(0)];
+              Arrays.fill(counts, batchCount);
+              return counts;
+            }
+            if (name.equals("executeUpdate")) {
+              return updateCount;
+            }
             return name.equals("executeQuery") ? resultSetProxy() : defaultFor(method);
           }
           return call(real, method, args);

@@ -16,6 +16,7 @@ import dev.regpack.ports.ledger.DeliveryLedger.Attempt;
 import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
+import dev.regpack.ports.ledger.IngestLedger;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerDurability.Status;
@@ -51,11 +52,14 @@ import org.junit.jupiter.api.io.TempDir;
  * not extend {@link AbstractPgStoreTest}: the fixtures of a primary without its standby must not
  * wait for it, see {@link DurabilityHarness}.
  *
- * <p>Four methods, four verdicts of the discriminating kind: the status says "not synchronous"; the
+ * <p>Five methods, five verdicts of the discriminating kind: the status says "not synchronous"; the
  * production gate refuses and a seal puts nothing; a commit whose wait for the standby is cancelled
- * is not reported as durable, once for the SENDING commit and once for the marker commit. The last
- * two are what the commit-warning rule of {@link Unit} is for: without it the cancelled commit
- * would return as an ordinary success and the file would go.
+ * is not reported as durable, once for the SENDING commit and once for the marker commit; and the
+ * redelivery of an ingest batch whose commit was not confirmed is not reported as durable either.
+ * The last three are what the commit-warning rule of {@link Unit} and its barrier are for: without
+ * the rule the cancelled commit would return as an ordinary success and the file would go, and
+ * without the barrier the redelivery, which writes nothing and so never waits, would return the
+ * stored result at once and the source would be acknowledged.
  *
  * <p>A second seal of the same sealed key behind a commit that is stuck in its wait would itself
  * wait for the unique key and be cut off by {@code lock_timeout} (SQLSTATE 55P03) after five
@@ -281,6 +285,65 @@ class PgDurabilityDownIT {
           .isTrue();
       DeliveryState state = harness.setup().delivery(delivery).orElseThrow().state();
       assertThat(state).as("the delivery state: %s", state).isEqualTo(DeliveryState.SENDING);
+    }
+  }
+
+  /**
+   * The acknowledgement limb of I1 (P3b1 final review, POSTGRES-1 and SEAL-3). The ingest commit
+   * waits for the standby that is not there and is cancelled: {@code commit not confirmed}, the
+   * pipeline would not acknowledge the source. The batch is on the primary all the same, so the
+   * source redelivers it, and the second {@code commitIngest} finds the batch and inserts nothing.
+   * A unit that writes nothing has no transaction id and no WAL, and the server would let its
+   * commit return at once; the source would then be acknowledged for a batch that only the primary
+   * has. The redelivery reads the batch row {@code FOR SHARE}, which is WAL-logged, so its commit
+   * waits as well: the harness has to cancel it after the same six seconds, and it ends in the same
+   * exception.
+   *
+   * <p>Two waits of about seven seconds each; the class bound of two minutes holds. The call under
+   * test is the only unit that writes while a commit waits (the harness cancels the first wait
+   * before the second call starts).
+   */
+  @Test
+  void aRedeliveryAfterAnUnconfirmedIngestCommitIsNotAcknowledgedEither() {
+    try (DurabilityHarness harness = DurabilityHarness.open()) {
+      IngestLedger.Commit commit =
+          LedgerFixtures.commit(
+              "DOWN-REDELIVERY",
+              "SRC-DOWN",
+              LedgerFixtures.checkpoint(1),
+              LedgerFixtures.entry("SRC-DOWN", "record-1", 1, "content-1"));
+
+      Waited first =
+          harness.callWhileTheCommitWaits(() -> harness.underTest().commitIngest(commit));
+
+      printCancelNotice("cancelled-ingest-wait", "commitIngest (first delivery)", first);
+      Throwable thrownFirst = first.thrown();
+      assertThat(thrownFirst)
+          .as("the first delivery waited for a standby that is not there; was: %s", thrownFirst)
+          .isInstanceOf(LedgerException.class);
+      assertThat(thrownFirst.getMessage()).as("message of %s", thrownFirst).startsWith(UNCONFIRMED);
+      Optional<IngestLedger.Result> stored = harness.setup().ingestResult(commit.batchId());
+      assertThat(stored)
+          .as("the batch committed locally and is visible to the redelivery: %s", stored)
+          .isPresent();
+
+      Waited second =
+          harness.callWhileTheCommitWaits(() -> harness.underTest().commitIngest(commit));
+
+      printCancelNotice("cancelled-redelivery-wait", "commitIngest (redelivery)", second);
+      Throwable thrownSecond = second.thrown();
+      assertThat(thrownSecond)
+          .as(
+              "a redelivery that returned a result would let the pipeline acknowledge a batch"
+                  + " that the standby may not have; was: %s",
+              thrownSecond)
+          .isInstanceOf(LedgerException.class);
+      assertThat(thrownSecond.getMessage())
+          .as("message of %s", thrownSecond)
+          .startsWith(UNCONFIRMED);
+      assertThat(second.cancelledByTheHarness())
+          .as("the redelivery's commit waited until the harness cancelled it: %s", second)
+          .isTrue();
     }
   }
 }
