@@ -102,8 +102,8 @@ public final class Gates {
 
   /**
    * The {@code traceability} gate: {@code --file <file> [--root <dir>] --scan <dir> [--scan <dir>
-   * ...] [--realstore all|skip|only] [--annotate]}. A relative file or scan directory is resolved
-   * against the root. The mode (default {@code all}) is described at {@link
+   * ...] [--realstore all|skip|only|standby] [--annotate]}. A relative file or scan directory is
+   * resolved against the root. The mode (default {@code all}) is described at {@link
    * TraceabilityCheck.Mode}; with {@code skip} the deferred rows are printed as information and the
    * OK line gains {@code deferred=<n>}. When the check fails and {@code --annotate} is given, or
    * the environment says it runs in GitHub Actions ({@code GITHUB_ACTIONS=true}), each problem is
@@ -132,6 +132,7 @@ public final class Gates {
             case "all" -> mode = TraceabilityCheck.Mode.ALL;
             case "skip" -> mode = TraceabilityCheck.Mode.SKIP;
             case "only" -> mode = TraceabilityCheck.Mode.ONLY;
+            case "standby" -> mode = TraceabilityCheck.Mode.STANDBY;
             default -> {
               return traceabilityUsage(err);
             }
@@ -186,7 +187,7 @@ public final class Gates {
   private static int traceabilityUsage(PrintStream err) {
     err.println(
         "usage: Gates traceability --file <file> [--root <dir>] --scan <dir> [--scan <dir> ...]"
-            + " [--realstore all|skip|only] [--annotate]");
+            + " [--realstore all|skip|only|standby] [--annotate]");
     return 2;
   }
 

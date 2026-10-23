@@ -12,7 +12,8 @@
   <name>regpack-postgres</name>
   <description>PostgreSQL adapter of the ledger ports (the only module that names the JDBC driver)</description>
   <properties>
-    <excludedGroups>mutant,capacity</excludedGroups>
+    <!-- durability: the integration tests of the job ledger-durability (primary with a quorum standby); selected there with -Dgroups=durability -DexcludedGroups=none -->
+    <excludedGroups>mutant,capacity,durability</excludedGroups>
     <!-- AP-5: the only third-party runtime dependencies of the release build; versions identical to spikes/pom.xml -->
     <postgresql.version>42.7.14</postgresql.version>
     <checker-qual.version>3.55.1</checker-qual.version>
@@ -23,6 +24,8 @@
     <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
     <dependency><groupId>org.checkerframework</groupId><artifactId>checker-qual</artifactId><version>${checker-qual.version}</version></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
+    <!-- T14b: P-SEALED and the sealer for the I1 scenarios on real PostgreSQL; test scope only, in this direction only -->
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-evidence</artifactId><scope>test</scope></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-tools</artifactId><scope>test</scope></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-bench</artifactId><scope>test</scope></dependency>
   </dependencies>

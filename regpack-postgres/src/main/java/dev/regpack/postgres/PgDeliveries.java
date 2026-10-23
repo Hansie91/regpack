@@ -16,6 +16,7 @@ import dev.regpack.ports.ledger.DuplicateKeyException;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerException;
+import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.postgres.PgErrors.Violation;
 import dev.regpack.postgres.PgLedgerStore.Config;
 import java.sql.Connection;
@@ -25,6 +26,7 @@ import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.sql.Types;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Objects;
@@ -47,11 +49,14 @@ import javax.sql.DataSource;
  * IllegalArgumentException}) and not be stored on an attempt (else {@link DuplicateKeyException}),
  * the fence {@link PgLeases#FENCE_SQL} (no match: {@code STALE_LEASE}, nothing written), then the
  * compare-and-set {@code QUEUED} to {@code SENDING} (no row: {@code STATE_MISMATCH}), then the
- * attempt row. {@code markCommitIssued}: the fence, then the compare-and-set of {@code
- * commit_issued} that requires the delivery to be {@code SENDING}. Because the fence is a share
- * lock on the lease row, a takeover that commits first makes the later unit find no match, and one
- * that has not committed makes the unit wait; either way no marker survives a takeover and no
- * SENDING delivery survives under a dead token (LF22).
+ * attempt row, then the manifest rows of the intent ({@link PgManifest#record}; a key stored with
+ * another hash is a {@code ManifestConflictException} and the unit rolls the state change back; a
+ * call that returns another status than {@code APPLIED} has recorded nothing). {@code
+ * markCommitIssued}: the fence, then the compare-and-set of {@code commit_issued} that requires the
+ * delivery to be {@code SENDING}. Because the fence is a share lock on the lease row, a takeover
+ * that commits first makes the later unit find no match, and one that has not committed makes the
+ * unit wait; either way no marker survives a takeover and no SENDING delivery survives under a dead
+ * token (LF22).
  *
  * <p>The methods that take a {@link Connection} work in a transaction that the caller owns and
  * started with {@link Unit#begin}; they commit nothing. The others run one unit each.
@@ -275,6 +280,16 @@ final class PgDeliveries {
 
   /**
    * {@link #beginSending(DeliveryId, AttemptId, LeaseToken, AttemptIntent)} in the caller's unit.
+   *
+   * <p>The caller must roll its transaction back when this method throws, in particular on a {@link
+   * dev.regpack.ports.ledger.ManifestConflictException}: the conflict is found in Java after the
+   * state change, the attempt row and the manifest rows of the other keys were written, and no SQL
+   * error has aborted the transaction, so a caller that caught the exception and committed would
+   * keep the {@code SENDING} state, the attempt row and those rows. Today the only caller outside
+   * the tests is the port variant above, which runs in {@link Unit#inUnit}: that rolls back on any
+   * exception and passes it on (and the tests that call this method use an intent without objects).
+   * A later unit that composes this method with other writes and wants to survive the conflict must
+   * take a savepoint before it and roll back to it.
    */
   SendingResult beginSending(
       Connection connection,
@@ -300,7 +315,13 @@ final class PgDeliveries {
     if (moved.getAsInt() == 0) {
       return new SendingResult(SendingStatus.STATE_MISMATCH, Optional.empty());
     }
-    insertAttempt(connection, id, attemptId, token, intent);
+    // one ledger time for the attempt row and the manifest rows of the unit
+    OffsetDateTime now = PgTime.timestamp(clock.now());
+    insertAttempt(connection, id, attemptId, token, intent, now);
+    // the manifest rows come last (EF21): a key that is already stored with another hash throws
+    // ManifestConflictException, and the unit that called us rolls the state change back
+    PgManifest.record(
+        connection, now, intent.objects(), Provenance.WRITTEN, Optional.of(attemptId));
     return new SendingResult(SendingStatus.APPLIED, Optional.of(attemptId));
   }
 
@@ -463,7 +484,8 @@ final class PgDeliveries {
       DeliveryId delivery,
       AttemptId attemptId,
       LeaseToken token,
-      AttemptIntent intent)
+      AttemptIntent intent,
+      OffsetDateTime createdAt)
       throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement(ATTEMPT_INSERT_SQL)) {
       statement.setLong(1, attemptId.value());
@@ -472,7 +494,7 @@ final class PgDeliveries {
       statement.setLong(4, token.counter());
       statement.setString(5, intent.artifactSha256().hex());
       statement.setString(6, intent.fileName());
-      statement.setObject(7, PgTime.timestamp(clock.now()));
+      statement.setObject(7, createdAt);
       statement.executeUpdate();
     } catch (SQLException e) {
       if (isViolationOf(e, ATTEMPT_KEY)) {

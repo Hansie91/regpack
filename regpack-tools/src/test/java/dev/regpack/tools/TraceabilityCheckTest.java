@@ -443,6 +443,301 @@ class TraceabilityCheckTest {
     assertThat(ordinary.closed()).isZero();
   }
 
+  // ---------------------------------------------------------------- REALFILES and REALSTANDBY
+  // (A14)
+
+  private static String line(String id, String closes, String ref, String store) {
+    return Table.line(id, closes, "TEST", ref, store, "BUILD");
+  }
+
+  private static String realFiles(String id, String ref) {
+    return line(id, "P3", ref, "REALFILES");
+  }
+
+  private static String realStandby(String id, String ref) {
+    return line(id, "P3", ref, "REALSTANDBY");
+  }
+
+  @Test
+  void realFilesLinesAreEvaluatedInSkipMode() throws IOException {
+    report(
+        "<testcase classname=\"a.B\" name=\"files()\"/>"
+            + "<testcase classname=\"a.B\" name=\"bad\"><failure/></testcase>");
+    var passed =
+        check(
+            new Table().exited("P3").set("I1", realFiles("I1", "a.B#files")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(passed.problems()).isEmpty();
+    assertThat(passed.closed()).isEqualTo(1);
+    assertThat(passed.deferred()).isEmpty();
+
+    var failed =
+        check(
+            new Table().exited("P3").set("I1", realFiles("I1", "a.B#bad")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(failed.problems()).contains("NOT_PASSING:I1:a.B#bad", "ROW_WITHOUT_EVIDENCE:I1");
+
+    var missing =
+        check(
+            new Table().exited("P3").set("I10", realFiles("I10", "a.B#gone")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(missing.problems())
+        .contains("ARTEFACT_MISSING:I10:a.B#gone", "ROW_WITHOUT_EVIDENCE:I10");
+
+    // next to a real-store line the real-files line counts, so nothing is deferred
+    var both =
+        check(
+            new Table()
+                .exited("P3")
+                .set("I1", realFiles("I1", "a.B#files"), realStore("I1", "a.B#gone")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(both.problems()).isEmpty();
+    assertThat(both.closed()).isEqualTo(1);
+    assertThat(both.deferred()).isEmpty();
+  }
+
+  @Test
+  void realFilesLinesAreIgnoredInOnlyMode() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    // the real-files line cites a test that does not exist: mode ONLY does not look at it
+    var result =
+        check(
+            new Table()
+                .exited("P3")
+                .set("I1", realFiles("I1", "x.Y#nowhere"), realStore("I1", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(result.problems()).isEmpty();
+    assertThat(result.closed()).isEqualTo(1);
+  }
+
+  @Test
+  void realStandbyLinesAreIgnoredInSkipAndOnlyModes() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/><testcase classname=\"a.B\" name=\"f()\"/>");
+    // a real-standby line that cites a missing test is not looked up in SKIP or ONLY
+    for (TraceabilityCheck.Mode mode :
+        List.of(TraceabilityCheck.Mode.SKIP, TraceabilityCheck.Mode.ONLY)) {
+      var result =
+          check(
+              new Table()
+                  .exited("P3")
+                  .set(
+                      "I1",
+                      realStandby("I1", "x.Y#nowhere"),
+                      realStore("I1", "a.B#it"),
+                      realFiles("I1", "a.B#f")),
+              mode);
+      assertThat(result.problems()).as(mode.name()).isEmpty();
+      assertThat(result.closed()).as(mode.name()).isEqualTo(1);
+    }
+    // SKIP defers a due row whose only non-interim line is a real-standby line
+    var deferred =
+        check(
+            new Table()
+                .exited("P3")
+                .set("I1", realStandby("I1", "x.Y#nowhere"), inMemory("I1", "a.B#it")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(deferred.problems()).isEmpty();
+    assertThat(deferred.deferred()).containsExactly("REALSTORE_DEFERRED:I1");
+    assertThat(deferred.closed()).isZero();
+    // ONLY needs a real-store line for I1: a real-standby line is not one
+    var only =
+        check(
+            new Table().exited("P3").set("I1", realStandby("I1", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(only.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I1");
+  }
+
+  @Test
+  void realStandbyLinesAreEvaluatedOnlyInStandbyMode() throws IOException {
+    report(
+        "<testcase classname=\"a.B\" name=\"up()\"/>"
+            + "<testcase classname=\"a.B\" name=\"bad\"><failure/></testcase>");
+    // the other labels cite tests that do not exist: STANDBY does not look at them
+    var passed =
+        check(
+            new Table()
+                .exited("P3")
+                .set(
+                    "I1",
+                    realStandby("I1", "a.B#up"),
+                    realFiles("I1", "x.Y#nowhere"),
+                    realStore("I1", "x.Y#nowhere"),
+                    inMemory("I1", "x.Y#nowhere")),
+            TraceabilityCheck.Mode.STANDBY);
+    assertThat(passed.problems()).isEmpty();
+    assertThat(passed.closed()).isEqualTo(1);
+    assertThat(passed.deferred()).isEmpty();
+
+    var failed =
+        check(
+            new Table().exited("P3").set("I1", realStandby("I1", "a.B#bad")),
+            TraceabilityCheck.Mode.STANDBY);
+    assertThat(failed.problems()).contains("NOT_PASSING:I1:a.B#bad", "ROW_WITHOUT_EVIDENCE:I1");
+
+    var missing =
+        check(
+            new Table().exited("P3").set("I1", realStandby("I1", "a.B#gone")),
+            TraceabilityCheck.Mode.STANDBY);
+    assertThat(missing.problems())
+        .contains("ARTEFACT_MISSING:I1:a.B#gone", "ROW_WITHOUT_EVIDENCE:I1");
+
+    // mode ALL evaluates the line as well
+    var all = check(new Table().exited("P3").set("I1", realStandby("I1", "a.B#gone")));
+    assertThat(all.problems()).contains("ARTEFACT_MISSING:I1:a.B#gone");
+  }
+
+  @Test
+  void aRowWithoutStandbyLinesIsOpenInStandbyMode() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    var result =
+        check(
+            new Table()
+                .exited("P3")
+                .set("I1", realFiles("I1", "a.B#it"), realStore("I1", "a.B#it"))
+                .set("I10", Table.line("I10", "P3", "NONE", "-", "NA", "NA"))
+                .set("R12", inMemory("R12", "x.Y#nowhere")),
+            TraceabilityCheck.Mode.STANDBY);
+    assertThat(result.problems()).isEmpty();
+    assertThat(result.closed()).isZero();
+    assertThat(result.open()).isEqualTo(24);
+    assertThat(result.deferred()).isEmpty();
+  }
+
+  @Test
+  void aSkippedTestNeverCountsForTheNewLabels() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"><skipped message=\"no server\"/></testcase>");
+    for (TraceabilityCheck.Mode mode :
+        List.of(TraceabilityCheck.Mode.ALL, TraceabilityCheck.Mode.SKIP)) {
+      var files = check(new Table().exited("P3").set("I1", realFiles("I1", "a.B#it")), mode);
+      assertThat(files.problems())
+          .as("files " + mode)
+          .contains("NOT_PASSING:I1:a.B#it", "ROW_WITHOUT_EVIDENCE:I1");
+      assertThat(files.closed()).isZero();
+    }
+    for (TraceabilityCheck.Mode mode :
+        List.of(TraceabilityCheck.Mode.ALL, TraceabilityCheck.Mode.STANDBY)) {
+      var standby = check(new Table().exited("P3").set("I10", realStandby("I10", "a.B#it")), mode);
+      assertThat(standby.problems())
+          .as("standby " + mode)
+          .contains("NOT_PASSING:I10:a.B#it", "ROW_WITHOUT_EVIDENCE:I10");
+      assertThat(standby.closed()).isZero();
+    }
+  }
+
+  @Test
+  void realFilesAndRealStandbyCountOnlyForI1AndI10() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    for (String id : List.of("I1", "I10")) {
+      var files =
+          check(
+              new Table().exited("P3,P4").set(id, line(id, "P3,P4", "a.B#it", "REALFILES")),
+              TraceabilityCheck.Mode.SKIP);
+      assertThat(files.problems()).as(id + " files").isEmpty();
+      assertThat(files.closed()).as(id + " files").isEqualTo(1);
+      var standby =
+          check(
+              new Table().exited("P3,P4").set(id, line(id, "P3,P4", "a.B#it", "REALSTANDBY")),
+              TraceabilityCheck.Mode.STANDBY);
+      assertThat(standby.problems()).as(id + " standby").isEmpty();
+      assertThat(standby.closed()).as(id + " standby").isEqualTo(1);
+    }
+    // R4 and R12 are ordinary rows: neither label counts for them, in any mode that reads it
+    for (String id : List.of("R4", "R12")) {
+      var files =
+          check(
+              new Table().exited("P3,P4").set(id, line(id, "P3,P4", "a.B#it", "REALFILES")),
+              TraceabilityCheck.Mode.SKIP);
+      assertThat(files.problems()).as(id + " files").containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+      assertThat(files.closed()).as(id + " files").isZero();
+      var standby =
+          check(
+              new Table().exited("P3,P4").set(id, line(id, "P3,P4", "a.B#it", "REALSTANDBY")),
+              TraceabilityCheck.Mode.STANDBY);
+      assertThat(standby.problems())
+          .as(id + " standby")
+          .containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+      assertThat(standby.closed()).as(id + " standby").isZero();
+      var all =
+          check(
+              new Table()
+                  .exited("P3,P4")
+                  .set(
+                      id,
+                      line(id, "P3,P4", "a.B#it", "REALFILES"),
+                      line(id, "P3,P4", "a.B#it", "REALSTANDBY")));
+      assertThat(all.problems()).as(id + " all").containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+    }
+  }
+
+  @Test
+  void realFilesLinesNeverCloseI2OrI9() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    for (String id : List.of("I2", "I9")) {
+      var alone =
+          check(
+              new Table().exited("P3").set(id, realFiles(id, "a.B#it")),
+              TraceabilityCheck.Mode.SKIP);
+      assertThat(alone.problems()).as(id + " alone").containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+      assertThat(alone.closed()).as(id + " alone").isZero();
+
+      // with a real-store line next to it the row is deferred to the ledger job, never closed
+      var withRealStore =
+          check(
+              new Table().exited("P3").set(id, realFiles(id, "a.B#it"), realStore(id, "a.B#gone")),
+              TraceabilityCheck.Mode.SKIP);
+      assertThat(withRealStore.problems()).as(id + " deferred").isEmpty();
+      assertThat(withRealStore.deferred()).containsExactly("REALSTORE_DEFERRED:" + id);
+      assertThat(withRealStore.closed()).isZero();
+
+      var standby =
+          check(
+              new Table().exited("P3").set(id, realStandby(id, "a.B#it")),
+              TraceabilityCheck.Mode.STANDBY);
+      assertThat(standby.problems())
+          .as(id + " standby")
+          .containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+      assertThat(standby.closed()).isZero();
+    }
+  }
+
+  @Test
+  void anI2RowWithOnlyARealFilesLineStaysOpenOrIsAProblem() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    String files = realFiles("I2", "a.B#it");
+    var notDue = check(new Table().set("I2", files).exited("none"), TraceabilityCheck.Mode.SKIP);
+    assertThat(notDue.problems()).isEmpty();
+    assertThat(notDue.open()).isEqualTo(24);
+    assertThat(notDue.closed()).isZero();
+    for (TraceabilityCheck.Mode mode :
+        List.of(TraceabilityCheck.Mode.ALL, TraceabilityCheck.Mode.SKIP)) {
+      var due = check(new Table().exited("P3").set("I2", files), mode);
+      assertThat(due.problems()).as(mode.name()).containsExactly("ROW_WITHOUT_EVIDENCE:I2");
+    }
+  }
+
+  @Test
+  void anI1RowWithOnlyARealFilesLineIsAProblemInOnlyMode() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    var only =
+        check(
+            new Table().exited("P3").set("I1", realFiles("I1", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(only.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I1");
+    assertThat(only.closed()).isZero();
+    var i10 =
+        check(
+            new Table().exited("P3,P4").set("I10", line("I10", "P3,P4", "a.B#it", "REALFILES")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(i10.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I10");
+    // the same table passes where the real-files line is evaluated
+    var skip =
+        check(
+            new Table().exited("P3").set("I1", realFiles("I1", "a.B#it")),
+            TraceabilityCheck.Mode.SKIP);
+    assertThat(skip.problems()).isEmpty();
+    assertThat(skip.closed()).isEqualTo(1);
+  }
+
   @Test
   void planPatternAcceptsP3aToP3d() {
     String line = Table.line("R1", "P3a,P3d", "NONE", "-", "NA", "NA");
@@ -465,6 +760,22 @@ class TraceabilityCheckTest {
     assertThat(implicit.problems())
         .contains("ARTEFACT_MISSING:I2:a.B#it", "ROW_WITHOUT_EVIDENCE:I2");
     assertThat(implicit.deferred()).isEmpty();
+    // the new labels change nothing for the old modes: ALL evaluates every line of every label
+    Table labels =
+        new Table()
+            .exited("P3")
+            .set(
+                "I1",
+                realFiles("I1", "a.B#files"),
+                realStandby("I1", "a.B#standby"),
+                realStore("I1", "a.B#it"));
+    var allLabels = TraceabilityCheck.check(labels.render(), repo, List.of(repo));
+    assertThat(allLabels.problems())
+        .contains(
+            "ARTEFACT_MISSING:I1:a.B#files",
+            "ARTEFACT_MISSING:I1:a.B#standby",
+            "ARTEFACT_MISSING:I1:a.B#it");
+    assertThat(allLabels).isEqualTo(check(labels, TraceabilityCheck.Mode.ALL));
     var fourArguments = new TraceabilityCheck.Result(List.of("p"), 1, 2, 3);
     assertThat(fourArguments.deferred()).isEmpty();
   }

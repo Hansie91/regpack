@@ -8,7 +8,6 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
@@ -24,9 +23,9 @@ import org.junit.jupiter.api.Timeout;
  *
  * <p>Only the named tests are run per mutant (see {@link MutantRunner}): the rest of a mutant class
  * is a complete binding that may be run by hand, but a whole class per mutant would run about 100
- * tests six times, and under a missing constraint every concurrent test would wait for its own
- * timeout. Every DDL step has a lock and a statement timeout, each test has a timeout, and every
- * schema is dropped afterwards ({@link AbstractPgStoreTest}, {@link
+ * tests once per mutant, and under a missing constraint every concurrent test would wait for its
+ * own timeout. Every DDL step has a lock and a statement timeout, each test has a timeout, and
+ * every schema is dropped afterwards ({@link AbstractPgStoreTest}, {@link
  * PgTestDatabase#dropSchema(String)}). The unmutated binding is {@link PgLedgerStoreContractIT},
  * which the same job runs: a named test that fails there makes the job red. Skipped without {@code
  * REGPACK_PG_URL}; a failure with {@code REGPACK_PG_REQUIRED=true} and no server, so that a missing
@@ -39,17 +38,7 @@ class PgSchemaTeethIT {
     PgTestDatabase.dataSource();
     List<String> misses = new ArrayList<>();
     for (Entry entry : SchemaMutants.all()) {
-      String mutant = entry.type().getSimpleName();
-      MutantRunner.Outcome outcome = MutantRunner.run(entry.type(), entry.caughtBy());
-      if (outcome.found() != entry.caughtBy().size()) {
-        misses.add(
-            mutant + " ran " + outcome.found() + " tests, but names " + entry.caughtBy().size());
-      }
-      for (String name : new TreeSet<>(entry.caughtBy())) {
-        if (!outcome.failed().contains(name)) {
-          misses.add(mutant + " was not caught by " + name);
-        }
-      }
+      misses.addAll(SchemaMutants.misses(entry, MutantRunner.run(entry.type(), entry.caughtBy())));
     }
     assertThat(misses).isEmpty();
   }

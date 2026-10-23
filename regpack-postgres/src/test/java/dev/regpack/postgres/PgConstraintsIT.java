@@ -10,7 +10,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -18,16 +20,17 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * The constraints of {@code V001} against seeded duplicates and orphans (spec 14.1, review focus
- * LF23; Convention 6): raw SQL on a migrated schema, each statement expected to be rejected with a
- * SQLState and, where the server names one, the constraint. They are the seeded-duplicate evidence
- * of the constraint clause of the P3 exit criterion, together with {@code
+ * The constraints of {@code V001} and (P3b1 T12) of {@code V002} against seeded duplicates and
+ * orphans (spec 14.1, review focus LF23; Convention 6): raw SQL on a migrated schema, each
+ * statement expected to be rejected with a SQLState and, where the server names one, the
+ * constraint. They are the seeded-duplicate evidence of the constraint clause of the P3 exit
+ * criterion, together with {@code
  * PgDecisionsIT#crossPartitionDuplicateDecisionSeqIsRejectedByTheHead}. The adapter is not used:
- * what the schema itself refuses is the point. Skipped without {@code REGPACK_PG_URL}; first run at
- * CP-3. The tests of the dictionary, batch, checkpoint, lease and restore-epoch keys and of the
- * foreign keys of the decision, ingest, TRN, attempt and lease tables were added in FP3 and first
- * run at the checkpoint after it; docs/ledger/p3a-notes.md (section 4) lists which constraints have
- * a seeded test.
+ * what the schema itself refuses is the point. Skipped without {@code REGPACK_PG_URL}. The tests of
+ * P3a first ran at P3a CP-3; the tests of {@code V002} (T12) first run at P3b1 CP-1. The tests of
+ * the dictionary, batch, checkpoint, lease and restore-epoch keys and of the foreign keys of the
+ * decision, ingest, TRN, attempt and lease tables were added in FP3 and first run at the checkpoint
+ * after it; docs/ledger/p3a-notes.md (section 4) lists which constraints have a seeded test.
  *
  * <p>State and kind codes in the statements are the stored ones of {@link Codes}: delivery states
  * QUEUED 3, SENDING 4, AWAITING_ACK 5; outcome REPORT 1; leg MARKET 1, CLIENT 2; version origin
@@ -692,6 +695,199 @@ class PgConstraintsIT extends AbstractPgStoreTest {
     assertThat(count("SELECT count(*) FROM decision WHERE outcome = 1")).isEqualTo(1);
     assertThat(count("SELECT count(*) FROM report_version WHERE action = 'NEWT'")).isEqualTo(1);
     assertThat(count("SELECT count(*) FROM trn_assignment WHERE trn = 'TRN1'")).isEqualTo(1);
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // the object manifest (V002, T12)
+
+  /**
+   * A manifest row: class SEALED_FILE 1, provenance WRITTEN 1, no attempt; the hash is {@code
+   * hashBytes} bytes of {@code hashByte} ({@code decode(repeat(..), 'hex')}), the size {@code
+   * size}.
+   */
+  private static String manifestRow(String key, String hashByte, int hashBytes, long size) {
+    return "INSERT INTO object_manifest (object_key, object_class, sha256, size_bytes,"
+        + " provenance, written_at) VALUES ('"
+        + key
+        + "', 1, decode(repeat('"
+        + hashByte
+        + "', "
+        + hashBytes
+        + "), 'hex'), "
+        + size
+        + ", 1, now())";
+  }
+
+  @Test
+  void duplicateObjectKeyIsRejected() throws SQLException {
+    exec(manifestRow("sealed/ab/key-one", "ab", 32, 10));
+    // the same key with another hash, size and class: only the primary key can clash
+    assertRejected(manifestRow("sealed/ab/key-one", "cd", 32, 99), "23505", "object_manifest_pk");
+    // a key that differs in case is another key (byte order), and so is a longer one
+    exec(
+        manifestRow("sealed/ab/Key-one", "cd", 32, 99),
+        manifestRow("sealed/ab/key-one2", "cd", 32, 99));
+    assertThat(count("SELECT count(*) FROM object_manifest")).isEqualTo(3);
+    assertThat(
+            count(
+                "SELECT count(*) FROM object_manifest WHERE object_key = 'sealed/ab/key-one'"
+                    + " AND sha256 = decode(repeat('ab', 32), 'hex') AND size_bytes = 10"))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void updateAndDeleteOfObjectManifestRowsAreRejected() throws SQLException {
+    // a row-level trigger fires only for a row, so the table is not empty
+    exec(manifestRow("sealed/ab/key-one", "ab", 32, 10));
+    List<String> statements =
+        List.of(
+            "UPDATE object_manifest SET size_bytes = 11",
+            "UPDATE object_manifest SET sha256 = decode(repeat('ff', 32), 'hex')",
+            "UPDATE object_manifest SET object_key = 'sealed/ab/key-two'",
+            "DELETE FROM object_manifest");
+    for (String sql : statements) {
+      // the trigger raises 55000 without a constraint name
+      assertRejected(sql, "55000", null);
+    }
+    assertThat(count("SELECT count(*) FROM object_manifest")).isEqualTo(1);
+    assertThat(
+            count(
+                "SELECT count(*) FROM object_manifest WHERE object_key = 'sealed/ab/key-one'"
+                    + " AND sha256 = decode(repeat('ab', 32), 'hex') AND size_bytes = 10"))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void aShortHashAndANegativeSizeAreRejected() throws SQLException {
+    assertRejected(
+        manifestRow("sealed/ab/short", "ab", 31, 10), "23514", "object_manifest_hash_check");
+    assertRejected(
+        manifestRow("sealed/ab/long", "ab", 33, 10), "23514", "object_manifest_hash_check");
+    assertRejected(
+        manifestRow("sealed/ab/negative", "ab", 32, -1), "23514", "object_manifest_size_check");
+    assertThat(count("SELECT count(*) FROM object_manifest")).isZero();
+    // the limits themselves are accepted: 32 bytes and a size of zero
+    exec(manifestRow("sealed/ab/empty", "ab", 32, 0));
+    assertThat(count("SELECT count(*) FROM object_manifest")).isEqualTo(1);
+  }
+
+  /**
+   * Decision D4: the key is compared byte by byte. The ordering contract method ({@code
+   * ManifestLedgerContract#rowsAreListedInKeyOrderWithPrefixAfterAndLimit}) would fail without the
+   * clause, but only on a cluster whose default collation is not byte order (the pinned image is
+   * en_US.utf8; a cluster started with {@code --locale=C} or {@code C.UTF-8} sorts the contract
+   * keys in byte order by itself), and the range predicate of {@code PgManifest} is exact only in
+   * byte order. So the column is asked in the catalogue: the collation of {@code object_key} is
+   * {@code C}, and it is the only column of the table that has a collation at all.
+   */
+  @Test
+  void theObjectKeyColumnHasTheCCollation() throws SQLException {
+    String table = schema() + ".object_manifest";
+    assertThat(
+            strings(
+                "SELECT c.collname::text FROM pg_attribute a"
+                    + " JOIN pg_collation c ON c.oid = a.attcollation"
+                    + " WHERE a.attrelid = to_regclass(?) AND a.attname = 'object_key'",
+                table))
+        .containsExactly("C");
+    // a text column added later has the default collation and is a decision of its own: the
+    // table has no collatable column but the key today
+    assertThat(
+            strings(
+                "SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid = to_regclass(?)"
+                    + " AND a.attnum > 0 AND NOT a.attisdropped AND a.attcollation <> 0",
+                table))
+        .containsExactly("object_key");
+    // the partial index of the attempt column holds only the rows that name an attempt
+    assertThat(
+            strings(
+                "SELECT pg_get_indexdef(to_regclass(?))",
+                schema() + ".object_manifest_attempt_idx"))
+        .singleElement()
+        .asString()
+        .contains("WHERE")
+        .contains("attempt_id IS NOT NULL");
+  }
+
+  /**
+   * The text of the plan that the server makes for {@code sql} with the arguments of {@code binds}.
+   */
+  private String planOf(Connection connection, String sql, Binds binds) throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement("EXPLAIN (COSTS OFF) " + sql)) {
+      binds.bind(statement);
+      try (ResultSet rows = statement.executeQuery()) {
+        StringBuilder plan = new StringBuilder();
+        while (rows.next()) {
+          plan.append(rows.getString(1)).append('\n');
+        }
+        return plan.toString();
+      }
+    }
+  }
+
+  @FunctionalInterface
+  private interface Binds {
+    void bind(PreparedStatement statement) throws SQLException;
+  }
+
+  /**
+   * The three reads of {@code PgManifest} use the primary-key index, on a table big enough to have
+   * statistics. The statements are the ones the adapter prepares (the package-visible constants)
+   * and are run under {@code EXPLAIN} through the driver with the same kinds of arguments (text for
+   * the keys, a {@code text[]} for the list, a bigint for the limit), so the types are the
+   * driver's. {@code enable_seqscan} is off for the transaction: a statement that cannot use the
+   * index (a cast or a function on the key, an argument of another type, a collation that is not
+   * the index's) then shows as a sequential scan, whatever the size of the table, and the check
+   * does not depend on the cost estimates of a small table.
+   */
+  @Test
+  void theThreeManifestReadsUseThePrimaryKeyIndex() throws SQLException {
+    exec(
+        "INSERT INTO object_manifest (object_key, object_class, sha256, size_bytes, provenance,"
+            + " written_at) SELECT 'bulk/' || lpad(g::text, 6, '0'), 1,"
+            + " decode(repeat('ab', 32), 'hex'), 1, 1, now() FROM generate_series(1, 3000) g",
+        "ANALYZE object_manifest");
+    assertThat(count("SELECT count(*) FROM object_manifest")).isEqualTo(3000);
+
+    String prefix = "bulk/0012";
+    String index = "object_manifest_pk";
+    try (Connection connection = raw()) {
+      connection.setAutoCommit(false);
+      try (Statement statement = connection.createStatement()) {
+        statement.execute("SET LOCAL enable_seqscan = off");
+      }
+      Map<String, String> plans = new LinkedHashMap<>();
+      plans.put(
+          "ROWS_SQL",
+          planOf(
+              connection,
+              PgManifest.ROWS_SQL,
+              s -> {
+                s.setString(1, prefix);
+                s.setString(2, PgManifest.upperBound(prefix));
+                s.setString(3, "bulk/001205");
+                s.setLong(4, 5);
+              }));
+      plans.put(
+          "ROW_SQL", planOf(connection, PgManifest.ROW_SQL, s -> s.setString(1, "bulk/001234")));
+      plans.put(
+          "STORED_SQL",
+          planOf(
+              connection,
+              PgManifest.STORED_SQL,
+              s ->
+                  s.setArray(
+                      1,
+                      connection.createArrayOf(
+                          "text", new String[] {"bulk/000001", "bulk/002999", "bulk/none"}))));
+      connection.rollback();
+      plans.forEach(
+          (name, plan) ->
+              assertThat(plan)
+                  .as("plan of %s:%n%s", name, plan)
+                  .contains(index)
+                  .doesNotContain("Seq Scan"));
+    }
   }
 
   // ------------------------------------------------------------------------------------------

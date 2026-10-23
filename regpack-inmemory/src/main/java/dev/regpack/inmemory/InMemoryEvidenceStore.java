@@ -10,6 +10,7 @@ import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -22,12 +23,18 @@ import java.util.TreeMap;
 public final class InMemoryEvidenceStore implements EvidenceStore {
   private static final Grade GRADE = new Grade("P-MEMORY", "");
   private static final Durability DURABILITY = new Durability(false, 0);
+  private static final Instant FIRST_YEAR_0000 = Instant.parse("0000-01-01T00:00:00Z");
+  private static final Instant LAST_YEAR_9999 = Instant.parse("9999-12-31T23:59:59.999999999Z");
 
   /** Deliberate faults for ContractSuiteTeethTest; {@code NONE} is the correct adapter. */
   public enum Flaw {
     NONE,
     OVERWRITE_ON_DUPLICATE,
-    ALLOW_RETENTION_SHORTENING
+    ALLOW_RETENTION_SHORTENING,
+    CASE_FOLDED_KEYS,
+    LIST_IGNORES_AFTER,
+    SILENT_MISSING_KEY,
+    ACCEPT_ANY_RETAIN_UNTIL
   }
 
   private final Clock clock;
@@ -67,15 +74,16 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
   public PutOutcome put(PutRequest request) {
     failIfDown();
     Objects.requireNonNull(request, "request");
+    requireStorable(request.retention().retainUntil());
     byte[] bytes = request.bytes();
     Sha256 digest = Sha256.of(bytes);
     synchronized (lock) {
-      StoredObject existing = objects.get(request.key().path());
+      StoredObject existing = objects.get(mapKey(request.key()));
       // test double only: deliberate flaw for ContractSuiteTeethTest
       if (existing == null
           || (flaw == Flaw.OVERWRITE_ON_DUPLICATE && !existing.sha256().equals(digest))) {
         objects.put(
-            request.key().path(),
+            mapKey(request.key()),
             new StoredObject(
                 request.key(),
                 bytes,
@@ -99,7 +107,7 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     failIfDown();
     Objects.requireNonNull(key, "key");
     synchronized (lock) {
-      return Optional.ofNullable(objects.get(key.path()));
+      return Optional.ofNullable(objects.get(mapKey(key)));
     }
   }
 
@@ -117,7 +125,10 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
         if (result.size() >= limit || !entry.getKey().startsWith(prefix)) {
           break;
         }
-        if (after.isEmpty() || entry.getKey().compareTo(after.get().path()) > 0) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest
+        if (after.isEmpty()
+            || flaw == Flaw.LIST_IGNORES_AFTER
+            || entry.getKey().compareTo(after.get().path()) > 0) {
           result.add(entry.getValue().key());
         }
       }
@@ -130,7 +141,11 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     failIfDown();
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(newRetainUntil, "newRetainUntil");
+    requireStorable(newRetainUntil);
     synchronized (lock) {
+      if (missingIsSilent(key)) {
+        return;
+      }
       StoredObject existing = require(key);
       // test double only: deliberate flaw for ContractSuiteTeethTest
       if (flaw != Flaw.ALLOW_RETENTION_SHORTENING
@@ -144,7 +159,7 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
                 + newRetainUntil);
       }
       objects.put(
-          key.path(),
+          mapKey(key),
           new StoredObject(
               existing.key(),
               existing.bytes(),
@@ -161,9 +176,12 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     failIfDown();
     Objects.requireNonNull(key, "key");
     synchronized (lock) {
+      if (missingIsSilent(key)) {
+        return;
+      }
       StoredObject existing = require(key);
       objects.put(
-          key.path(),
+          mapKey(key),
           new StoredObject(
               existing.key(),
               existing.bytes(),
@@ -175,8 +193,36 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     }
   }
 
+  /**
+   * The rule of the port (SPEC-7): a retain-until has at most microsecond precision and a year from
+   * 0000 to 9999, so that every store can hold what another holds. A pure check, before any state
+   * changes. The deliberate flaw ACCEPT_ANY_RETAIN_UNTIL (test double only) skips it.
+   */
+  private void requireStorable(Instant retainUntil) {
+    if (flaw == Flaw.ACCEPT_ANY_RETAIN_UNTIL) {
+      return;
+    }
+    if (retainUntil.getNano() % 1000 != 0) {
+      throw new IllegalArgumentException("a retain-until has at most microsecond precision");
+    }
+    // compared as instants: Instant.MIN and Instant.MAX have no calendar year to read
+    if (retainUntil.isBefore(FIRST_YEAR_0000) || retainUntil.isAfter(LAST_YEAR_9999)) {
+      throw new IllegalArgumentException("a retain-until must be in the years 0000 to 9999");
+    }
+  }
+
+  /** Test double only: the deliberate flaw SILENT_MISSING_KEY ignores a never-put key. */
+  private boolean missingIsSilent(EvidenceKey key) {
+    return flaw == Flaw.SILENT_MISSING_KEY && !objects.containsKey(mapKey(key));
+  }
+
+  /** The map key of {@code key}; the deliberate flaw CASE_FOLDED_KEYS lower-cases it. */
+  private String mapKey(EvidenceKey key) {
+    return flaw == Flaw.CASE_FOLDED_KEYS ? key.path().toLowerCase(Locale.ROOT) : key.path();
+  }
+
   private StoredObject require(EvidenceKey key) {
-    StoredObject existing = objects.get(key.path());
+    StoredObject existing = objects.get(mapKey(key));
     if (existing == null) {
       throw new IllegalArgumentException("no such evidence key: " + key.path());
     }

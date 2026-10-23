@@ -211,6 +211,55 @@ class EntryCheckTest {
   }
 
   @Test
+  void theP3bTargetsAreWired() throws IOException {
+    Path repo = Path.of(System.getProperty("regpack.repo.root"));
+    String tsv = Files.readString(repo.resolve("docs/spikes/entry-wiring.tsv"));
+    List<EntryCheck.Requirement> all = EntryCheck.parse(tsv);
+    assertThat(all)
+        .contains(
+            new EntryCheck.Requirement(
+                "P-SEALED-outside-tests",
+                "SP-W",
+                "REPORT_EXISTS",
+                "spec 16 entry: SP-W before the P-SEALED adapter is used outside tests"),
+            new EntryCheck.Requirement(
+                "P-WORM-non-aws",
+                "SP-O",
+                "REPORT_EXISTS",
+                "spec 16 entry: SP-O before a non-AWS store is called P-WORM or compliance mode in"
+                    + " production"));
+    assertThat(tsv)
+        .contains(
+            "P-SEALED-outside-tests\tSP-W\tREPORT_EXISTS\t",
+            "P-WORM-non-aws\tSP-O\tREPORT_EXISTS\t");
+
+    // the reports do not exist in the repository: both targets are blocked, the intended state
+    EntryCheck.Outcome sealed = EntryCheck.check("P-SEALED-outside-tests", all, root);
+    assertThat(sealed.satisfied()).isFalse();
+    assertThat(sealed.lines())
+        .containsExactly("entry: P-SEALED-outside-tests: SP-W REPORT_EXISTS MISSING");
+    EntryCheck.Outcome worm = EntryCheck.check("P-WORM-non-aws", all, root);
+    assertThat(worm.satisfied()).isFalse();
+    assertThat(worm.lines()).containsExactly("entry: P-WORM-non-aws: SP-O REPORT_EXISTS MISSING");
+
+    // through the command, on a root that holds the committed wiring and no report
+    write("docs/spikes/entry-wiring.tsv", tsv);
+    var wired = new ByteArrayOutputStream();
+    int blocked =
+        gates(
+            new PrintStream(wired, true, StandardCharsets.UTF_8),
+            new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
+            "entry",
+            "--target",
+            "P-SEALED-outside-tests",
+            "--root",
+            root.toString());
+    assertThat(blocked).isEqualTo(1);
+    assertThat(wired.toString(StandardCharsets.UTF_8).lines().toList())
+        .containsExactly("entry: P-SEALED-outside-tests: SP-W REPORT_EXISTS MISSING");
+  }
+
+  @Test
   void gatesEntryPrintsOneLinePerRequirementAndExitsOneUntilSatisfied() throws IOException {
     write("docs/spikes/entry-wiring.tsv", WIRING);
     report("SP-R", "PASS", "RAW");

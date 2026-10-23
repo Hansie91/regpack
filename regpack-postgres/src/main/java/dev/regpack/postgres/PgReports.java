@@ -340,6 +340,12 @@ final class PgReports {
     if (run.anyCreated && plan.commit().sequenceBatch().isPresent()) {
       insertSequenceItem(connection, plan.commit().sequenceBatch().get().value());
     }
+    if (!run.anyCreated && PgDecisions.wroteNothing(plan.prepared(), committed)) {
+      // a redelivery that only found its decisions and versions: see PgDecisions#wroteNothing.
+      // Last statement of the unit; in a unit that the caller owns (commitReportableIn) the
+      // statement is still the last of this call, and the lock is held to the caller's commit
+      Unit.durabilityBarrier(connection);
+    }
     return List.copyOf(results);
   }
 

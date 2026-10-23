@@ -43,9 +43,11 @@ import javax.sql.DataSource;
  * what it owns, because every acquisition sweeps.
  *
  * <p>Locks are taken in one order: the {@code restore_epoch} singleton, then lease rows (by
- * endpoint id), then delivery rows. {@code acquire} reads the singleton with {@code FOR SHARE}
- * first, so that the epoch it writes cannot be overtaken by a {@code declareRestoreEpoch} that
- * commits while the statement runs (a plain read would be a stale snapshot inside a conflict
+ * endpoint id), then delivery rows, then the attempt row, then the {@code object_manifest} keys in
+ * byte order ({@link PgManifest#record} sorts them). A unit that takes a key before a delivery row
+ * can form a cycle with {@code beginSending}. {@code acquire} reads the singleton with {@code FOR
+ * SHARE} first, so that the epoch it writes cannot be overtaken by a {@code declareRestoreEpoch}
+ * that commits while the statement runs (a plain read would be a stale snapshot inside a conflict
  * re-check).
  *
  * <p>Time is the injected {@link Clock}: every instant in a statement is a bind parameter.

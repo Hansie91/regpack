@@ -3,11 +3,20 @@ package dev.regpack.postgres;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
+import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerException;
 import dev.regpack.postgres.PgLedgerStore.Config;
+import dev.regpack.testkit.clock.ManualClock;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.ServerErrorMessage;
@@ -248,5 +257,278 @@ class UnitTest {
     assertThatThrownBy(
             () -> new Config(null, true, true, Duration.ofSeconds(1), Duration.ofDays(1)))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // The warning after COMMIT (P3b1 T17, assumption A11, review focus EF15). On a primary with a
+  // synchronous standby, a wait that is cancelled (query cancel) ends with a WARNING and the
+  // commit returns normally: the transaction has committed locally and may not be on the standby.
+  // pgjdbc hands that warning to Connection#getWarnings (its COMMIT handler adds it). The unit
+  // refuses every warning after the commit whose SQLSTATE is not of class 00 (a NOTICE), so that
+  // no SQLSTATE list and no message text is matched.
+
+  private static final String UNCONFIRMED = "commit not confirmed by the synchronous standby";
+
+  private static String unconfirmed(String shownState) {
+    return UNCONFIRMED + " (sqlstate=" + shownState + ")";
+  }
+
+  private static SQLWarning warning(String sqlState) {
+    return new SQLWarning("a warning of the server", sqlState);
+  }
+
+  /**
+   * Whatever the SQLSTATE of a warning after the commit, even none, the unit fails; the message
+   * carries the SQLSTATE only when it has the shape of one, and the work has run and committed.
+   */
+  @Test
+  void aWarningAfterCommitFailsTheUnitWhateverItsSqlstate() {
+    String[] states = {
+      "01000", "57014", "57P01", "25P01", "01P01", "0", "", "a secret value", null
+    };
+    for (String state : states) {
+      SqlSpy spy = new SqlSpy().warnOnCommit(warning(state));
+      AtomicInteger ran = new AtomicInteger();
+      String shown = state != null && state.matches("[0-9A-Z]{5}") ? state : "none";
+      assertThatThrownBy(
+              () ->
+                  Unit.inUnit(
+                      spy.over(null),
+                      CONFIG,
+                      connection -> {
+                        ran.incrementAndGet();
+                        return "done";
+                      }))
+          .as("sqlstate %s", state)
+          .isInstanceOf(LedgerException.class)
+          .hasMessage(unconfirmed(shown));
+      assertThat(ran).as("the work ran").hasValue(1);
+      assertThat(spy.events()).as("sqlstate %s", state).containsOnlyOnce("commit");
+      assertThat(spy.openConnections()).isZero();
+    }
+  }
+
+  /**
+   * The case of the plan: the driver reports the cancelled wait with SQLSTATE 01000. The
+   * transaction has committed, so the connection is released as committed (auto-commit restored, no
+   * rollback), and the warning is the cause of the exception.
+   */
+  @Test
+  void aWarning01000AfterCommitFailsTheUnit() {
+    SQLWarning cancelled = warning("01000");
+    SqlSpy spy = new SqlSpy().warnOnCommit(cancelled);
+    assertThatThrownBy(() -> Unit.inUnit(spy.over(null), CONFIG, connection -> "x"))
+        .isInstanceOf(LedgerException.class)
+        .hasMessage(unconfirmed("01000"))
+        .hasCause(cancelled);
+    assertThat(spy.events())
+        .containsSubsequence("commit", "getWarnings", "setAutoCommit(true)", "close")
+        .doesNotContain("rollback");
+    assertThat(spy.openConnections()).isZero();
+  }
+
+  /**
+   * A warning that a statement of the work raised is the statement's, not the commit's: it is
+   * dropped immediately before the commit (and again when the unit begins), so only what the commit
+   * itself raised can fail the unit.
+   */
+  @Test
+  void aWarningRaisedBeforeTheCommitIsClearedAndDoesNotFailTheUnit() {
+    SqlSpy spy = new SqlSpy();
+    String result =
+        Unit.inUnit(
+            spy.over(null),
+            CONFIG,
+            connection -> {
+              spy.raise(warning("01000"));
+              spy.mark("work");
+              return "done";
+            });
+    assertThat(result).isEqualTo("done");
+    assertThat(spy.events())
+        .containsSubsequence("clearWarnings", "work", "clearWarnings", "commit", "getWarnings")
+        .doesNotContain("rollback");
+  }
+
+  /** The driver reports a NOTICE with SQLSTATE 00000: class 00 is not a warning of the commit. */
+  @Test
+  void aClass00NoticeAfterCommitIsIgnored() {
+    SQLWarning notice = warning("00000");
+    notice.setNextWarning(warning("00001"));
+    SqlSpy spy = new SqlSpy().warnOnCommit(notice);
+    String result = Unit.inUnit(spy.over(null), CONFIG, connection -> "done");
+    assertThat(result).isEqualTo("done");
+    assertThat(spy.events()).containsSubsequence("commit", "getWarnings", "setAutoCommit(true)");
+    assertThat(spy.events()).doesNotContain("rollback");
+  }
+
+  /** The whole chain is walked: a warning behind a notice still fails the unit. */
+  @Test
+  void aWarningLaterInTheChainIsFoundToo() {
+    SQLWarning notice = warning("00000");
+    notice.setNextWarning(warning("01000"));
+    SqlSpy spy = new SqlSpy().warnOnCommit(notice);
+    assertThatThrownBy(() -> Unit.inUnit(spy.over(null), CONFIG, connection -> "x"))
+        .isInstanceOf(LedgerException.class)
+        .hasMessage(unconfirmed("01000"));
+  }
+
+  /**
+   * A commit that raised nothing succeeds. The driver has no empty chain: {@code getWarnings}
+   * returns null, and the unit must have looked (the event), or the check would be a no-op.
+   */
+  @Test
+  void aCommitWithoutWarningSucceeds() {
+    SqlSpy spy = new SqlSpy();
+    String result = Unit.inUnit(spy.over(null), CONFIG, connection -> "done");
+    assertThat(result).isEqualTo("done");
+    assertThat(spy.events())
+        .containsSubsequence("commit", "getWarnings", "setAutoCommit(true)", "close");
+    assertThat(spy.events()).doesNotContain("rollback");
+    assertThat(spy.openConnections()).isZero();
+  }
+
+  /**
+   * The check is part of every unit, not of the first one: a unit of the adapter (here the attempt
+   * marker, and an attempt id) that commits cleanly is a success, and the same unit fails once the
+   * commit raises a warning.
+   */
+  @Test
+  void aWarningAfterTheCommitOfASecondUnitFailsThatUnitToo() {
+    SqlSpy spy =
+        new SqlSpy()
+            .answering(
+                (sql, events) ->
+                    sql.equals(PgDeliveries.ALLOCATE_SQL)
+                        ? List.<Object[]>of(new Object[] {7L})
+                        : List.<Object[]>of());
+    PgDeliveries deliveries =
+        new PgDeliveries(
+            spy.over(null), new ManualClock(Instant.parse("2026-10-09T08:00:00Z")), CONFIG);
+
+    assertThat(deliveries.allocateAttemptId()).isEqualTo(new AttemptId(7));
+
+    spy.warnOnCommit(warning("01000"));
+    assertThatThrownBy(() -> deliveries.markCommitIssued(new AttemptId(7), new LeaseToken(0, 1)))
+        .isInstanceOf(LedgerException.class)
+        .hasMessage(unconfirmed("01000"));
+    assertThatThrownBy(deliveries::allocateAttemptId)
+        .isInstanceOf(LedgerException.class)
+        .hasMessage(unconfirmed("01000"));
+    assertThat(spy.openConnections()).isZero();
+  }
+
+  /**
+   * A leftover warning of an earlier use of a pooled connection is gone when the work starts, and
+   * the clear comes before anything else of the unit.
+   */
+  @Test
+  void warningsAreClearedWhenTheUnitBegins() {
+    SqlSpy spy = new SqlSpy();
+    spy.raise(warning("01000"));
+    AtomicReference<SQLWarning> seen = new AtomicReference<>(warning("99999"));
+    String result =
+        Unit.inUnit(
+            spy.over(null),
+            CONFIG,
+            connection -> {
+              seen.set(connection.getWarnings());
+              spy.mark("work");
+              return "done";
+            });
+    assertThat(result).isEqualTo("done");
+    assertThat(seen.get() == null).as("the leftover warning is gone").isTrue();
+    assertThat(spy.events())
+        .containsSubsequence(
+            "open",
+            "setAutoCommit(false)",
+            "clearWarnings",
+            "execute: SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            "work");
+  }
+
+  /**
+   * After a commit whose warnings cannot be read the outcome is unknown, and an unknown outcome is
+   * a failure (the connection is released as committed: the commit itself had returned).
+   */
+  @Test
+  void warningsThatCannotBeReadAfterTheCommitFailTheUnit() {
+    SqlSpy spy = new SqlSpy().failGetWarningsWith(new SQLException("connection closed", "08003"));
+    DataSource source = spy.over(null);
+    assertThatThrownBy(() -> Unit.inUnit(source, CONFIG, connection -> "x"))
+        .isInstanceOf(LedgerException.class)
+        .hasMessage("ledger statement failed: sqlstate=08003 constraint=none");
+    assertThat(spy.events())
+        .containsSubsequence("commit", "getWarnings", "setAutoCommit(true)", "close")
+        .doesNotContain("rollback");
+  }
+
+  /** A failed commit is still the exception of the driver; there is nothing to read after it. */
+  @Test
+  void aFailedCommitIsNeverFollowedByAReadOfTheWarnings() {
+    SqlSpy spy =
+        new SqlSpy()
+            .failCommitWith(new SQLException("connection lost", "08006"))
+            .warnOnCommit(warning("01000"));
+    assertThatThrownBy(() -> Unit.inUnit(spy.over(null), CONFIG, connection -> "x"))
+        .isInstanceOf(LedgerException.class)
+        .hasMessage("ledger statement failed: sqlstate=08006 constraint=none");
+    assertThat(spy.events()).doesNotContain("getWarnings");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // the durability barrier (I1, acknowledgement limb)
+
+  private static final SqlSpy.Answers BARRIER_ROW =
+      (sql, events) ->
+          sql.equals(Unit.BARRIER_SQL)
+              ? Collections.<Object[]>singletonList(new Object[] {1})
+              : List.of();
+
+  @Test
+  void theBarrierIsAShareLockOnTheRestoreEpochRowAndRunsBeforeTheCommit() {
+    SqlSpy spy = new SqlSpy().answering(BARRIER_ROW);
+
+    Unit.inUnit(
+        spy.over(null),
+        CONFIG,
+        connection -> {
+          Unit.durabilityBarrier(connection);
+          return "x";
+        });
+
+    assertThat(Unit.BARRIER_SQL)
+        .as("a row lock is WAL-logged, a bare transaction id is not")
+        .isEqualTo("SELECT 1 FROM restore_epoch WHERE singleton FOR SHARE");
+    assertThat(spy.events())
+        .containsSubsequence("execute: " + Unit.BARRIER_SQL, "commit", "setAutoCommit(true)");
+    assertThat(spy.events()).containsOnlyOnce("execute: " + Unit.BARRIER_SQL);
+  }
+
+  @Test
+  void aUnitAddsNoBarrierOfItsOwn() {
+    SqlSpy spy = new SqlSpy().answering(BARRIER_ROW);
+
+    Unit.inUnit(spy.over(null), CONFIG, connection -> "x");
+
+    assertThat(spy.events()).doesNotContain("execute: " + Unit.BARRIER_SQL);
+  }
+
+  @Test
+  void aBarrierThatLockedNoRowFailsTheUnitAndRollsBack() {
+    SqlSpy spy = new SqlSpy();
+
+    assertThatThrownBy(
+            () ->
+                Unit.inUnit(
+                    spy.over(null),
+                    CONFIG,
+                    connection -> {
+                      Unit.durabilityBarrier(connection);
+                      return "x";
+                    }))
+        .isInstanceOf(LedgerException.class)
+        .hasMessage("the restore epoch row is missing");
+    assertThat(spy.events()).contains("rollback").doesNotContain("commit");
   }
 }

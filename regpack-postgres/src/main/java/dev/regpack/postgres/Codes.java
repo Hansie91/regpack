@@ -4,6 +4,8 @@ import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.IngestLedger.Disposition;
+import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
+import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
 import dev.regpack.ports.ledger.ReportLedger.VersionOrigin;
@@ -21,7 +23,9 @@ import java.util.Objects;
  *
  * <p>The numbers 4, 5 and 11 of {@link DeliveryState} and 1 of {@link OutboxState} are also written
  * into the partial-index predicates of {@code V001__core.sql}; {@code CodesTest} and {@code
- * SchemaDocMatchesMigrationsTest} pin both sides.
+ * SchemaDocMatchesMigrationsTest} pin both sides. {@link ObjectClass} and {@link Provenance} are
+ * the two code columns of {@code object_manifest} (V002); the database has no CHECK on their set,
+ * so a new constant needs a code here and nothing else.
  */
 public final class Codes {
   private static final Table<Outcome> OUTCOME =
@@ -77,6 +81,21 @@ public final class Codes {
           .put(VersionOrigin.SOURCE, 1)
           .put(VersionOrigin.ARM, 2)
           .put(VersionOrigin.IMPORTED, 3);
+
+  private static final Table<ObjectClass> OBJECT_CLASS =
+      new Table<>("object class", ObjectClass.class)
+          .put(ObjectClass.SEALED_FILE, 1)
+          .put(ObjectClass.JOURNAL_A, 2)
+          .put(ObjectClass.JOURNAL_B, 3)
+          .put(ObjectClass.LANDING_BATCH, 4)
+          .put(ObjectClass.ENRICHMENT_RESPONSE, 5)
+          .put(ObjectClass.SIGNED_MANIFEST, 6)
+          .put(ObjectClass.OTHER, 7);
+
+  private static final Table<Provenance> PROVENANCE =
+      new Table<>("provenance", Provenance.class)
+          .put(Provenance.WRITTEN, 1)
+          .put(Provenance.ADOPTED_AT_RESTORE, 2);
 
   private Codes() {}
 
@@ -134,6 +153,22 @@ public final class Codes {
 
   public static VersionOrigin versionOrigin(short code) {
     return VERSION_ORIGIN.constant(code);
+  }
+
+  public static short of(ObjectClass objectClass) {
+    return OBJECT_CLASS.code(objectClass);
+  }
+
+  public static ObjectClass objectClass(short code) {
+    return OBJECT_CLASS.constant(code);
+  }
+
+  public static short of(Provenance provenance) {
+    return PROVENANCE.code(provenance);
+  }
+
+  public static Provenance provenance(short code) {
+    return PROVENANCE.constant(code);
   }
 
   /** One enum's explicit code table; built once in the static initializer, read-only after. */

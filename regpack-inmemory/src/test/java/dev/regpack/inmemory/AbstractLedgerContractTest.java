@@ -7,6 +7,8 @@ import dev.regpack.testkit.contract.ExitFixturesContract;
 import dev.regpack.testkit.contract.FencingScenarioContract;
 import dev.regpack.testkit.contract.IngestLedgerContract;
 import dev.regpack.testkit.contract.LeaseDeliveryLedgerContract;
+import dev.regpack.testkit.contract.LedgerDurabilityContract;
+import dev.regpack.testkit.contract.ManifestLedgerContract;
 import dev.regpack.testkit.contract.ReportLedgerContract;
 import dev.regpack.testkit.contract.StorableValuesLedgerContract;
 import java.time.Instant;
@@ -20,7 +22,9 @@ public abstract class AbstractLedgerContractTest
         ReportLedgerContract,
         ExitFixturesContract,
         FencingScenarioContract,
-        StorableValuesLedgerContract {
+        StorableValuesLedgerContract,
+        ManifestLedgerContract,
+        LedgerDurabilityContract {
   private ManualClock clock;
   private LedgerStore ledger;
 

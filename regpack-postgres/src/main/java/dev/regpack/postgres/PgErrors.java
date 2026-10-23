@@ -4,6 +4,7 @@ import dev.regpack.ports.ledger.LedgerException;
 import java.sql.SQLException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLTransientConnectionException;
+import java.sql.SQLWarning;
 import java.util.Optional;
 import java.util.regex.Pattern;
 import org.postgresql.util.PSQLException;
@@ -46,6 +47,14 @@ public final class PgErrors {
     LOCK_TIMEOUT,
     OTHER
   }
+
+  /**
+   * The start of the message of a unit whose COMMIT returned with a warning (I1): the transaction
+   * has committed locally, but the synchronous standby may not have it. The tests of the standby
+   * job look for this prefix.
+   */
+  public static final String COMMIT_NOT_CONFIRMED =
+      "commit not confirmed by the synchronous standby";
 
   private static final Pattern SQL_STATE = Pattern.compile("[0-9A-Z]{5}");
   private static final Pattern CONSTRAINT = Pattern.compile("[A-Za-z0-9_$]{1,63}");
@@ -118,6 +127,19 @@ public final class PgErrors {
     String name = constraint(e).filter(c -> CONSTRAINT.matcher(c).matches()).orElse("none");
     return new LedgerException(
         "ledger statement failed: sqlstate=" + stateText + " constraint=" + name, e);
+  }
+
+  /**
+   * The exception of a unit whose COMMIT returned with this warning: {@code commit not confirmed by
+   * the synchronous standby (sqlstate=<SQLSTATE|none>)}, with the warning as the cause. The
+   * SQLState is written only when it has the shape of one, the text of the warning never (it
+   * depends on the language of the server). The unit has committed locally, so the caller must
+   * treat the outcome as unknown (see {@link Unit#inUnit}).
+   */
+  static LedgerException commitNotConfirmed(SQLWarning warning) {
+    String state = warning.getSQLState();
+    String stateText = state != null && SQL_STATE.matcher(state).matches() ? state : "none";
+    return new LedgerException(COMMIT_NOT_CONFIRMED + " (sqlstate=" + stateText + ")", warning);
   }
 
   private static String sqlState(SQLException e) {

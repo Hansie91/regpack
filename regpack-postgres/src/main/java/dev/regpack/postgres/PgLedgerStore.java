@@ -9,6 +9,7 @@ import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.LedgerStore;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -24,9 +25,12 @@ import javax.sql.DataSource;
  * schema (I2, D-L3); every unit of work starts through {@link Unit#begin} (Convention 11).
  *
  * <p>Built in tasks: T15 ingest, outbox and context reads; T16 decisions and partitions; T17 leases
- * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work). No
- * method is left unbuilt ({@code NoStubsLeftTest}). The integrity queries of T19 are not part of
- * the {@link LedgerStore} port: {@link LedgerIntegrity} reads the same schema through a {@link
+ * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work); P3b1
+ * T12 the object manifest; P3b1 T17 the durability query of {@link
+ * dev.regpack.ports.ledger.LedgerDurability} ({@link PgLedgerDurability}). No method is left
+ * unbuilt: {@code NoStubsLeftTest} scans this module's main sources for the exception of an unbuilt
+ * method and for the placeholder text of an unbuilt task. The integrity queries of T19 are not part
+ * of the {@link LedgerStore} port: {@link LedgerIntegrity} reads the same schema through a {@link
  * DataSource} and the schema name of the {@link Config}.
  */
 public final class PgLedgerStore implements LedgerStore {
@@ -38,7 +42,10 @@ public final class PgLedgerStore implements LedgerStore {
    * @param partitionsOnDemand whether a missing daily partition of {@code decision} is created by
    *     the adapter (T16)
    * @param forceSynchronousCommit whether every unit sets {@code synchronous_commit = on}; only the
-   *     capacity variant C of T21 turns it off
+   *     capacity variant C of T21 and the standby tests of P3b1 ({@code PgDurabilityUpIT}, {@code
+   *     DurabilityHarness}) turn it off, so that only the unit under test waits for the standby;
+   *     {@link PgLedgerDurability} then reads the setting of the server instead of assuming {@code
+   *     on}
    * @param lockTimeout {@code lock_timeout} of every unit, a positive whole number of milliseconds
    * @param statementTimeout {@code statement_timeout} of every unit, likewise
    */
@@ -105,6 +112,8 @@ public final class PgLedgerStore implements LedgerStore {
   private final PgLeases leases;
   private final PgDeliveries deliveries;
   private final PgReports reports;
+  private final PgManifest manifest;
+  private final PgLedgerDurability durability;
 
   public PgLedgerStore(DataSource dataSource, Clock clock, Config config) {
     Objects.requireNonNull(dataSource, "dataSource");
@@ -118,6 +127,8 @@ public final class PgLedgerStore implements LedgerStore {
     this.deliveries = new PgDeliveries(dataSource, clock, config);
     // the report unit shares the decision side: its partitions cache and its head conflicts
     this.reports = new PgReports(dataSource, clock, config, decisions);
+    this.manifest = new PgManifest(dataSource, clock, config);
+    this.durability = new PgLedgerDurability(dataSource, config);
   }
 
   /**
@@ -264,6 +275,31 @@ public final class PgLedgerStore implements LedgerStore {
   @Override
   public Optional<Attempt> attempt(AttemptId id) {
     return deliveries.attempt(id);
+  }
+
+  // ManifestLedger (P3b1 T12; the manifest rows of a SENDING unit are written by PgDeliveries)
+
+  @Override
+  public void recordObjects(
+      List<ObjectEntry> entries, Provenance provenance, Optional<AttemptId> attempt) {
+    manifest.recordObjects(entries, provenance, attempt);
+  }
+
+  @Override
+  public Optional<ManifestRow> manifestRow(EvidenceKey key) {
+    return manifest.manifestRow(key);
+  }
+
+  @Override
+  public List<ManifestRow> manifestRows(String prefix, Optional<EvidenceKey> after, int limit) {
+    return manifest.manifestRows(prefix, after, limit);
+  }
+
+  // LedgerDurability (P3b1 T17)
+
+  @Override
+  public Status durability() {
+    return durability.durability();
   }
 
   // ReportLedger (T18)

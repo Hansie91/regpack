@@ -19,11 +19,49 @@ class EvidenceKeyTest {
     assertThatThrownBy(() -> EvidenceKey.of("a", "")).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> EvidenceKey.of("a b")).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> EvidenceKey.of()).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> EvidenceKey.of("a", null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("invalid EvidenceKey segment: null");
     assertThatThrownBy(() -> new EvidenceKey("a//b")).isInstanceOf(IllegalArgumentException.class);
+    // 200 characters per segment: refused by the segment rule (the 512-character total is tested in
+    // aMaximumLengthKeyOfSegmentsWithinTheLimitIsAccepted)
     String segment = "x".repeat(200);
     assertThatThrownBy(() -> EvidenceKey.of(segment, segment, segment))
         .isInstanceOf(IllegalArgumentException.class);
-    assertThat(EvidenceKey.of("x".repeat(512)).path()).hasSize(512);
+    // A single segment over 100 characters is refused even when the 512-character total holds.
+    assertThatThrownBy(() -> EvidenceKey.of("x".repeat(512)))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new EvidenceKey("x".repeat(512)))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void aSegmentOf100CharactersIsAcceptedAndOf101Refused() {
+    assertThat(EvidenceKey.of("x".repeat(100)).path()).hasSize(100);
+    assertThat(new EvidenceKey("a/" + "y".repeat(100)).path()).hasSize(102);
+    assertThatThrownBy(() -> EvidenceKey.of("x".repeat(101)))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> EvidenceKey.of("a", "y".repeat(101)))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new EvidenceKey("a/" + "y".repeat(101)))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void aMaximumLengthKeyOfSegmentsWithinTheLimitIsAccepted() {
+    String segment = "z".repeat(100);
+    EvidenceKey key = EvidenceKey.of(segment, segment, segment, segment, segment, "q".repeat(7));
+    assertThat(key.path()).hasSize(512);
+    assertThatThrownBy(
+            () -> EvidenceKey.of(segment, segment, segment, segment, segment, "q".repeat(8)))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    // the constructor, with segments that are each valid: only the 513-character total is wrong
+    String slashed = String.join("/", segment, segment, segment, segment, segment);
+    assertThat(new EvidenceKey(slashed + "/" + "q".repeat(7)).path()).hasSize(512);
+    assertThatThrownBy(() -> new EvidenceKey(slashed + "/" + "q".repeat(8)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("1 to 512 characters");
   }
 
   @Test

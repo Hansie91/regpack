@@ -17,8 +17,8 @@ import javax.sql.DataSource;
  * enforce by itself. Chain linearity across the daily pieces of {@code decision} rests on the head
  * compare-and-set alone (D-S4: no trigger), the context of a decision can be a stub (D-S7), and the
  * gaplessness of {@code version_seq} rests on the subject row lock. This is what P4 {@code verify}
- * will call; the durability gate ({@code synchronous_commit}, {@code pg_stat_replication}) and the
- * ledger clock are P3b.
+ * will call; the durability gate ({@code synchronous_commit}, {@code pg_stat_replication}) is
+ * {@code PgLedgerDurability}, and the ledger clock is P3c.
  *
  * <p>Every check is bounded by the range of {@code as_at} days that the caller names, and is driven
  * from the decisions of that range, so that the cost follows the range and not the history: the

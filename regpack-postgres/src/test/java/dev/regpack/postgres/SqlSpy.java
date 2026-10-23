@@ -8,7 +8,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.sql.Statement;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -28,8 +30,19 @@ final class SqlSpy {
   private final AtomicInteger closed = new AtomicInteger();
   private volatile SQLException failOpen;
   private volatile SQLException failCommit;
+  private volatile SQLWarning commitWarning;
+  private volatile SQLException failWarnings;
   private volatile Fault fault;
   private volatile Answers answers;
+  private volatile int updateCount;
+  private volatile int batchCount = 1;
+
+  /**
+   * The warning chain of the connection, as {@code getWarnings} sees it. One chain for all the
+   * connections of this spy: a test works with one connection at a time, and a chain that is there
+   * before a unit starts is the leftover of an earlier use of a pooled connection.
+   */
+  private final AtomicReference<SQLWarning> warnings = new AtomicReference<>();
 
   /** A statement whose text contains {@code fragment} fails with {@code exception}. */
   private record Fault(String fragment, SQLException exception, AtomicInteger remaining) {}
@@ -80,6 +93,39 @@ final class SqlSpy {
   }
 
   /**
+   * Every {@code commit} raises this warning on the connection, as the driver does with the {@code
+   * WARNING} that the server sends when a wait for a synchronous standby is cancelled: after the
+   * commit has returned, {@code getWarnings} holds it, and {@code clearWarnings} drops it.
+   */
+  SqlSpy warnOnCommit(SQLWarning warning) {
+    this.commitWarning = warning;
+    return this;
+  }
+
+  /**
+   * A warning arrives on the connection now, for example the notice of a statement. It is added to
+   * the end of the chain that {@code getWarnings} returns until {@code clearWarnings} drops it.
+   */
+  void raise(SQLWarning warning) {
+    warnings.updateAndGet(
+        chain -> {
+          if (chain == null) {
+            return warning;
+          }
+          if (chain != warning) {
+            chain.setNextWarning(warning);
+          }
+          return chain;
+        });
+  }
+
+  /** {@code getWarnings} fails with this exception (a connection that broke after its commit). */
+  SqlSpy failGetWarningsWith(SQLException exception) {
+    this.failWarnings = exception;
+    return this;
+  }
+
+  /**
    * Every execution of a statement whose text contains {@code sqlFragment} (execute, executeQuery,
    * executeUpdate, executeBatch) fails with this exception, after it is recorded. For a batch the
    * exception is what the driver throws from {@code executeBatch}, for example a {@link
@@ -104,6 +150,25 @@ final class SqlSpy {
    */
   SqlSpy answering(Answers answers) {
     this.answers = answers;
+    return this;
+  }
+
+  /**
+   * The row count that a fake server returns from {@code executeUpdate} (default 0: nothing
+   * changed). It applies only over no real data source.
+   */
+  SqlSpy updatingRows(int count) {
+    this.updateCount = count;
+    return this;
+  }
+
+  /**
+   * The count that a fake server returns for each statement of an {@code executeBatch} (default 1:
+   * every statement of the batch stored a row; 0 is a batch of {@code ON CONFLICT DO NOTHING}
+   * inserts that all conflicted). It applies only over no real data source.
+   */
+  SqlSpy batchingRows(int count) {
+    this.batchCount = count;
     return this;
   }
 
@@ -161,6 +226,21 @@ final class SqlSpy {
             if (failCommit != null) {
               throw failCommit;
             }
+            if (commitWarning != null) {
+              raise(commitWarning);
+            }
+          } else if (name.equals("clearWarnings")) {
+            events.add("clearWarnings");
+            warnings.set(null);
+          } else if (name.equals("getWarnings")) {
+            events.add("getWarnings");
+            if (failWarnings != null) {
+              throw failWarnings;
+            }
+            SQLWarning chain = warnings.get();
+            if (chain != null || real == null) {
+              return chain;
+            }
           } else if (name.equals("rollback")) {
             events.add("rollback");
           } else if (name.equals("close")) {
@@ -182,9 +262,13 @@ final class SqlSpy {
   }
 
   private Object statementProxy(Object real, Class<?> type, String preparedSql) {
+    AtomicInteger batched = new AtomicInteger();
     InvocationHandler handler =
         (proxy, method, args) -> {
           String name = method.getName();
+          if (name.equals("addBatch") && (args == null || args.length == 0)) {
+            batched.incrementAndGet();
+          }
           if (name.startsWith("execute")) {
             statements.incrementAndGet();
             String sql =
@@ -204,6 +288,14 @@ final class SqlSpy {
             events.add("bind " + args[0] + "=" + args[1]);
           }
           if (real == null) {
+            if (name.equals("executeBatch")) {
+              int[] counts = new int[batched.getAndSet(0)];
+              Arrays.fill(counts, batchCount);
+              return counts;
+            }
+            if (name.equals("executeUpdate")) {
+              return updateCount;
+            }
             return name.equals("executeQuery") ? resultSetProxy() : defaultFor(method);
           }
           return call(real, method, args);
