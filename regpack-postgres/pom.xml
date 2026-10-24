@@ -16,7 +16,7 @@
     <excludedGroups>mutant,capacity,durability</excludedGroups>
     <!-- AP-5: the only third-party runtime dependencies of the release build; versions identical to spikes/pom.xml -->
     <postgresql.version>42.7.14</postgresql.version>
-    <checker-qual.version>3.55.1</checker-qual.version>
+    <checker-qual.version>4.3.1</checker-qual.version>
   </properties>
   <dependencies>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-model</artifactId></dependency>
