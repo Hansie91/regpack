@@ -37,6 +37,10 @@ What the S3-compatible CI service really does, read from the first CI run that e
 - The tail of P7 and the page sizes of P8 as exact text (cut and reduced by the probe).
 - Any behaviour outside the one run: the probe ran once, with one writer set per item, in one CI job.
 
+## Later observation (CP-2)
+
+The behaviour contract `S3BehaviourContract`, bound to the service as `WormServiceBehaviourIT`, ran 13 tests at CP-2 ([run 40141048211](https://github.com/Hansie91/regpack/actions/runs/40141048211), head `6b21151`) with failed 0, errors 0, skipped 0. It includes a case that the probe text did not record: two versions of one key straddling a page of 7 in a version listing (added in T7 because P7 and P8 do not say whether a page can end inside a key); that case was observed passing against the service at CP-2 for the first time. The position of a delete marker in the list stays recorded only as `newestFirst=true` of P7.
+
 ## Deviations from the plan that the read-out causes
 
 None so far. P12 is a difference between this service and the AWS behaviour the plan recollected, not a contradiction of a decision. The names of the behaviour-contract methods stand; `theRetainUntilResolutionIsWholeSeconds` is implemented as the plan's T7 text says and asserts the whole-second round trip of the adapter's own writes.
