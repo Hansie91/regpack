@@ -1,4 +1,4 @@
-FROM eclipse-temurin:25-jre-noble@sha256:d9a39a23634650173f1e2bbc176227af9728587ecf0f4b62d53e9355cd7a19ab
+FROM eclipse-temurin:25-jre-noble@sha256:3f2223fe04b750aa5a8179e29b5c9a1ddf7665fc9bb08bfe11ad01d143bc13a5
 LABEL org.opencontainers.image.title="regpack" \
       org.opencontainers.image.description="regpack walking skeleton (plan P0)"
 COPY --chown=10001:10001 regpack-dist/ /opt/regpack/
