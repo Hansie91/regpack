@@ -19,6 +19,7 @@
     <module>regpack-bench</module>
     <module>regpack-inmemory</module>
     <module>regpack-evidence</module>
+    <module>regpack-evidence-s3</module>
     <module>regpack-postgres</module>
     <module>regpack-engine</module>
     <module>regpack-app</module>
@@ -76,6 +77,7 @@
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-bench</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-inmemory</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-evidence</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>dev.regpack</groupId><artifactId>regpack-evidence-s3</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-engine</artifactId><version>${project.version}</version></dependency>
     </dependencies>
   </dependencyManagement>
