@@ -25,8 +25,9 @@ import org.w3c.dom.NodeList;
  * Checks the traceability file (spec 14.4): every requirement and invariant row has named evidence,
  * every cited artefact exists and records a pass, and a row whose closing plans have all exited
  * needs evidence that counts. Consistency-only golden cases never count, and for I1, I2, I9 and I10
- * only a real-store run counts; for I1 and I10 a real-files run (P-SEALED on the real file system)
- * and a real-standby run (the quorum standby job) count as well, for no other row.
+ * only a real-store run counts; for I1 and I10 a real-files run (P-SEALED on the real file system),
+ * a real-standby run (the quorum standby job) and a real-worm run (P-WORM on a real object-lock
+ * service) count as well, for no other row.
  */
 public final class TraceabilityCheck {
   /** One evidence line of the table. */
@@ -57,12 +58,23 @@ public final class TraceabilityCheck {
    * <p>{@code STANDBY} (the job with a quorum standby) evaluates only lines with store {@code
    * REALSTANDBY}, which count as non-interim evidence for I1 and I10 only; a due row that has no
    * such line is not evaluated and counts as open.
+   *
+   * <p>{@code WORM} (the job with a real S3-compatible object-lock service) evaluates only lines
+   * with store {@code REALWORM}, which count as non-interim evidence for I1 and I10 only; a due I1
+   * or I10 row without a passed such line is a problem, and any other due row is not evaluated and
+   * counts as open. {@code SKIP}, {@code ONLY} and {@code STANDBY} do not look a {@code REALWORM}
+   * line up and it never counts there; in {@code SKIP} a due row of I1, I2, I9 or I10 that has one
+   * and no counting line is reported as {@code REALSTORE_DEFERRED:<row>}. A {@code REALWORM} line
+   * that cites a class whose name ends in {@code Test} is a problem in every mode ({@code
+   * REALWORM_FAKE_BACKED:<row>:<ref>}): such a class runs against the fake service, and the fake is
+   * never real-store evidence.
    */
   public enum Mode {
     ALL,
     SKIP,
     ONLY,
-    STANDBY
+    STANDBY,
+    WORM
   }
 
   /**
@@ -100,7 +112,7 @@ public final class TraceabilityCheck {
   private static final Set<String> KINDS =
       Set.of("TEST", "GOLDEN", "BENCHMARK", "SPIKE", "GATE", "REVIEW", "NONE");
   private static final Set<String> STORES =
-      Set.of("UNIT", "INMEMORY", "REALFILES", "REALSTORE", "REALSTANDBY", "NA");
+      Set.of("UNIT", "INMEMORY", "REALFILES", "REALSTORE", "REALSTANDBY", "REALWORM", "NA");
   private static final Set<String> CIS = Set.of("BUILD", "NIGHTLY", "RC", "NA");
   private static final Set<String> REAL_STORE_ONLY = Set.of("I1", "I2", "I9", "I10");
 
@@ -177,7 +189,8 @@ public final class TraceabilityCheck {
       boolean needsRealStore = REAL_STORE_ONLY.contains(id);
       boolean hasRealStoreLine = row.evidence().stream().anyMatch(e -> isRealStore(e));
       boolean hasDeferrableLine =
-          row.evidence().stream().anyMatch(e -> isRealStore(e) || isRealStandby(e));
+          row.evidence().stream()
+              .anyMatch(e -> isRealStore(e) || isRealStandby(e) || isRealWorm(e));
       boolean hasStandbyLine = row.evidence().stream().anyMatch(e -> isRealStandby(e));
       if (!due) {
         open++;
@@ -189,6 +202,8 @@ public final class TraceabilityCheck {
       } else if (mode == Mode.ONLY && !needsRealStore && !hasRealStoreLine) {
         open++;
       } else if (mode == Mode.STANDBY && !hasStandbyLine) {
+        open++;
+      } else if (mode == Mode.WORM && !REAL_FILES_COUNT.contains(id)) {
         open++;
       } else {
         problems.add("ROW_WITHOUT_EVIDENCE:" + id);
@@ -205,25 +220,30 @@ public final class TraceabilityCheck {
     return e.store().equals("REALSTANDBY");
   }
 
+  private static boolean isRealWorm(Evidence e) {
+    return e.store().equals("REALWORM");
+  }
+
   /** Whether the mode looks the line up at all; a line it does not evaluate never counts. */
   private static boolean evaluated(Mode mode, Evidence e) {
     return switch (mode) {
       case ALL -> true;
-      case SKIP -> !isRealStore(e) && !isRealStandby(e);
+      case SKIP -> !isRealStore(e) && !isRealStandby(e) && !isRealWorm(e);
       case ONLY -> isRealStore(e);
       case STANDBY -> isRealStandby(e);
+      case WORM -> isRealWorm(e);
     };
   }
 
   /**
    * Whether a passing line is non-interim evidence for the row: a {@code REALSTORE} line always is,
-   * a {@code REALFILES} or {@code REALSTANDBY} line only for I1 and I10, and any other line unless
-   * the row is one of I1, I2, I9 and I10.
+   * a {@code REALFILES}, {@code REALSTANDBY} or {@code REALWORM} line only for I1 and I10, and any
+   * other line unless the row is one of I1, I2, I9 and I10.
    */
   private static boolean countsFor(String rowId, Evidence e) {
     return switch (e.store()) {
       case "REALSTORE" -> true;
-      case "REALFILES", "REALSTANDBY" -> REAL_FILES_COUNT.contains(rowId);
+      case "REALFILES", "REALSTANDBY", "REALWORM" -> REAL_FILES_COUNT.contains(rowId);
       default -> !REAL_STORE_ONLY.contains(rowId);
     };
   }
@@ -262,6 +282,9 @@ public final class TraceabilityCheck {
         problems.add("UNKNOWN_ROW:" + id);
         continue;
       }
+      if (cells.get(4).equals("REALWORM") && citesFakeBackedClass(cells.get(2), cells.get(3))) {
+        problems.add("REALWORM_FAKE_BACKED:" + id + ":" + cells.get(3));
+      }
       List<String> plans = plans(id, cells.get(1), problems);
       List<String> known = closes.putIfAbsent(id, plans);
       if (known != null && !known.equals(plans)) {
@@ -279,6 +302,19 @@ public final class TraceabilityCheck {
       rows.put(e.getKey(), new Row(e.getKey(), e.getValue(), evidence.get(e.getKey())));
     }
     return rows;
+  }
+
+  /**
+   * Whether a {@code TEST} reference names a class whose simple name ends in {@code Test}: such a
+   * class runs against the fake service, which is never real-store evidence.
+   */
+  private static boolean citesFakeBackedClass(String kind, String ref) {
+    if (!kind.equals("TEST")) {
+      return false;
+    }
+    int hash = ref.indexOf('#');
+    String type = hash < 0 ? ref : ref.substring(0, hash);
+    return type.substring(type.lastIndexOf('.') + 1).endsWith("Test");
   }
 
   private static void readExited(String value, List<String> problems, Set<String> exited) {
@@ -332,6 +368,10 @@ public final class TraceabilityCheck {
     boolean counted = false;
     for (Evidence e : row.evidence()) {
       if (e.kind().equals("NONE") || !evaluated(mode, e)) {
+        continue;
+      }
+      if (isRealWorm(e) && citesFakeBackedClass(e.kind(), e.ref())) {
+        // reported when the table is read; the fake never counts, whatever its report says
         continue;
       }
       String where = row.id() + ":" + e.ref();
