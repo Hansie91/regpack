@@ -13,10 +13,11 @@ import java.util.regex.Pattern;
 
 /**
  * Reads the job {@code evidence-worm} of {@code ci.yml} by its meaning, as text (no YAML library,
- * no shell parser): the job that runs the S3 service probe (version 1) against one digest-pinned
- * S3-compatible service container on the loopback of the runner. {@link #problems} is the one
- * checker; {@code PackagingFilesTest} runs it on the real workflow and on deliberately broken
- * copies of it, in the style of {@link CiLedgerJob} and {@link CiDurabilityJob}.
+ * no shell parser): the job that runs the P-WORM suites against one digest-pinned S3-compatible
+ * service container and one digest-pinned PostgreSQL container on the loopback of the runner
+ * (version 2). {@link #problems} is the one checker; {@code PackagingFilesTest} runs it on the real
+ * workflow and on deliberately broken copies of it, in the style of {@link CiLedgerJob} and {@link
+ * CiDurabilityJob}.
  *
  * <p>The text is owner-approved (AP-3, AP-6), so the job is an allow-list: every line of the job is
  * given word for word in this class, the SHA-256 of the whole text is pinned, and, as a second
@@ -25,9 +26,12 @@ import java.util.regex.Pattern;
  * a digest, a port only on {@code 127.0.0.1}, no flag that skips tests. A message names the rule
  * that is broken, so that a test can show that the rule, not only the hash, found the edit.
  *
- * <p>Version 1 is the probe only (no PostgreSQL service, no {@code REGPACK_PG_*}). What the service
- * image needs (its listen port, the variables that give it fixed credentials and an on-disk
- * backend, the readiness of its port) is recollection [R] until the probe has run.
+ * <p>Version 1 was the probe only (no PostgreSQL service, no {@code REGPACK_PG_*}); version 2
+ * replaces the probe step by the {@code Worm*IT} classes of the S3 module and the {@code PgWorm*IT}
+ * classes of the PostgreSQL module, and adds the traceability step in {@code --realstore worm}
+ * mode. What the service image needs (its listen port, the variables that give it fixed credentials
+ * and an on-disk backend, the readiness of its port) is recollection [R] until the probe has run
+ * (it has: docs/evidence/p3b2-probe.md).
  */
 final class CiWormJob {
   static final String JOB = "evidence-worm";
@@ -39,7 +43,13 @@ final class CiWormJob {
       "ghcr.io/scality/cloudserver:9.5.0@sha256:"
           + "652d50d0d92f5ef948b8c3aae92251b5707a70892d886835f904a069f60a0727";
 
+  /** The PostgreSQL image of the job {@code ledger-pg}. */
+  static final String PG_IMAGE =
+      "postgres:18.6-trixie@sha256:"
+          + "74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336";
+
   static final String ALWAYS = "        if: always()";
+  static final String NOT_CANCELLED = "        if: ${{ !cancelled() }}";
   static final String NOT_APPROVED = "is not the approved text";
 
   private static final String RUNS_ON = "    runs-on: ubuntu-24.04";
@@ -48,7 +58,7 @@ final class CiWormJob {
   static final List<String> HEADER =
       List.of(
           "  evidence-worm:",
-          "    name: evidence P-WORM probe (S3-compatible object-lock service)",
+          "    name: evidence P-WORM (S3-compatible object-lock service, PostgreSQL 18)",
           RUNS_ON,
           "    timeout-minutes: 40");
 
@@ -63,11 +73,22 @@ final class CiWormJob {
           "          SCALITY_SECRET_ACCESS_KEY: regpack-ci-secret-key-000000000000000001",
           "          REMOTE_MANAGEMENT_DISABLE: '1'",
           "        ports:",
-          "          - 127.0.0.1:8000:8000");
+          "          - 127.0.0.1:8000:8000",
+          "      postgres:",
+          "        image: " + PG_IMAGE,
+          "        env:",
+          "          POSTGRES_HOST_AUTH_METHOD: trust",
+          "        ports:",
+          "          - 127.0.0.1:5432:5432",
+          "        options: >-",
+          "          --health-cmd \"pg_isready -U postgres\" --health-interval 5s"
+              + " --health-timeout 5s --health-retries 12");
 
   static final List<String> ENV =
       List.of(
           "    env:",
+          "      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres",
+          "      REGPACK_PG_REQUIRED: 'true'",
           "      REGPACK_S3_ENDPOINT: http://127.0.0.1:8000",
           "      REGPACK_S3_REGION: us-east-1",
           "      REGPACK_S3_ACCESS_KEY: REGPACKCIACCESSKEY1",
@@ -85,7 +106,7 @@ final class CiWormJob {
 
   static final String INSTALL_LINE =
       "      - run: ./mvnw -DskipTests -DskipITs -Dspotless.check.skip=true install"
-          + " -pl regpack-evidence-s3 -am";
+          + " -pl regpack-evidence-s3,regpack-postgres -am";
   static final List<String> INSTALL = List.of(INSTALL_LINE);
 
   static final List<String> WAIT =
@@ -102,13 +123,37 @@ final class CiWormJob {
               + " 127.0.0.1:8000 after 40 attempts\"",
           "          exit 1");
 
-  static final String PROBE_RUN =
+  static final String S3_RUN =
       "        run: ./mvnw verify -pl regpack-evidence-s3 -Dspotless.check.skip=true"
-          + " -Dgroups=probe -DexcludedGroups=none -Dit.test=S3ServiceProbeIT"
+          + " -Dgroups=worm -DexcludedGroups=none -Dit.test='Worm*IT'"
           + " -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false";
 
-  static final List<String> PROBE =
-      List.of("      - name: S3 service probe", "        timeout-minutes: 15", PROBE_RUN);
+  static final List<String> S3_TESTS =
+      List.of(
+          "      - name: P-WORM tests against the S3 service",
+          "        timeout-minutes: 15",
+          S3_RUN);
+
+  static final String PG_RUN =
+      "        run: ./mvnw verify -pl regpack-postgres -Dspotless.check.skip=true"
+          + " -Dgroups=worm -DexcludedGroups=none -Dit.test='PgWorm*IT'"
+          + " -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false";
+
+  static final List<String> PG_TESTS =
+      List.of(
+          "      - name: P-WORM tests with the PostgreSQL ledger",
+          NOT_CANCELLED,
+          "        timeout-minutes: 15",
+          PG_RUN);
+
+  static final List<String> TRACEABILITY =
+      List.of(
+          "      - name: Real-store traceability (P-WORM)",
+          ALWAYS,
+          "        shell: bash",
+          "        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates traceability"
+              + " --file docs/traceability.md --root . --scan regpack-evidence-s3/target"
+              + " --scan regpack-postgres/target --realstore worm");
 
   static final List<String> ANNOTATE =
       List.of(
@@ -116,7 +161,7 @@ final class CiWormJob {
           ALWAYS,
           "        shell: bash",
           "        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate"
-              + " --scan regpack-evidence-s3/target");
+              + " --scan regpack-evidence-s3/target --scan regpack-postgres/target");
 
   static final List<String> UPLOAD =
       List.of(
@@ -125,23 +170,27 @@ final class CiWormJob {
           "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
           "        with:",
           "          name: evidence-worm-reports",
-          "          path: regpack-evidence-s3/target/failsafe-reports/TEST-*.xml",
+          "          path: |",
+          "            regpack-evidence-s3/target/failsafe-reports/TEST-*.xml",
+          "            regpack-postgres/target/failsafe-reports/TEST-*.xml",
           "          if-no-files-found: warn");
 
   /** The steps of the job, in the order they must run. */
   private static final List<List<String>> APPROVED =
-      List.of(CHECKOUT, SETUP_JAVA, INSTALL, WAIT, PROBE, ANNOTATE, UPLOAD);
+      List.of(
+          CHECKOUT, SETUP_JAVA, INSTALL, WAIT, S3_TESTS, PG_TESTS, TRACEABILITY, ANNOTATE, UPLOAD);
 
-  /** The SHA-256 of {@link #text()}: the approved job text, version 1. */
+  /** The SHA-256 of {@link #text()}: the approved job text, version 2. */
   static final String APPROVED_SHA256 =
-      "9099263b3f3afdd76b635f54a79b567fe4403fb8e091b977de9bdfd71c3ce06c";
+      "bd419fd96d7b9448144e2246e0e9b083ca893a8e2c32fcf84789de4caeb80821";
 
-  private static final Set<String> ALLOWED_PROBE_PROPERTIES =
+  private static final Set<String> ALLOWED_TEST_PROPERTIES =
       Set.of(
           "-Dspotless.check.skip=true",
-          "-Dgroups=probe",
+          "-Dgroups=worm",
           "-DexcludedGroups=none",
-          "-Dit.test=S3ServiceProbeIT",
+          "-Dit.test='Worm*IT'",
+          "-Dit.test='PgWorm*IT'",
           "-Dtest=NoUnitTestsInThisRun",
           "-Dsurefire.failIfNoSpecifiedTests=false");
 
@@ -199,7 +248,7 @@ final class CiWormJob {
     return CiCompareStep.jobLines(ci, JOB).stream().filter(l -> !l.isBlank()).toList();
   }
 
-  /** Everything that lets the job pass without its probe, or lets it do more than approved. */
+  /** Everything that lets the job pass without its suites, or lets it do more than approved. */
   static List<String> problems(String ci) {
     List<String> problems = new ArrayList<>();
     if (!ci.contains("\n  MAVEN_ARGS: -B -ntp --strict-checksums\n")) {
@@ -224,6 +273,10 @@ final class CiWormJob {
 
   // ---------------------------------------------------------------- rules on every line
 
+  private static boolean isApprovedCondition(String line) {
+    return line.equals(ALWAYS) || line.equals(NOT_CANCELLED);
+  }
+
   private static void lineProblems(List<String> job, List<String> problems) {
     boolean inPorts = false;
     boolean ports = false;
@@ -235,7 +288,7 @@ final class CiWormJob {
       if (line.startsWith("    if:")) {
         problems.add("the job may be skipped: " + stripped);
       }
-      if (line.startsWith("        if:") && !line.equals(ALWAYS)) {
+      if (line.startsWith("        if:") && !isApprovedCondition(line)) {
         problems.add("a step may be skipped: " + stripped);
       }
       if (line.contains("secrets.")
@@ -284,6 +337,9 @@ final class CiWormJob {
     }
     if (!job.contains("      REGPACK_S3_REQUIRED: 'true'")) {
       problems.add("a missing service does not fail the job (REGPACK_S3_REQUIRED is not 'true')");
+    }
+    if (!job.contains("      REGPACK_PG_REQUIRED: 'true'")) {
+      problems.add("a missing server does not fail the job (REGPACK_PG_REQUIRED is not 'true')");
     }
     if (job.stream().filter(l -> l.startsWith("    runs-on:")).count() != 1) {
       problems.add("the job does not have exactly one runs-on");
@@ -389,17 +445,26 @@ final class CiWormJob {
       problems.add(
           "the step '" + title + "' " + NOT_APPROVED + ": " + firstDifference(approved, step));
     }
-    if (approved.contains(ALWAYS) && !step.contains(ALWAYS)) {
-      problems.add(
-          "the step '"
-              + title
-              + "' does not run when an earlier step fails (if: always() is missing)");
+    for (String condition : List.of(ALWAYS, NOT_CANCELLED)) {
+      if (approved.contains(condition) && !step.contains(condition)) {
+        problems.add(
+            "the step '"
+                + title
+                + "' does not run when an earlier step fails ("
+                + condition.strip()
+                + " is missing)");
+      }
     }
-    if (!approved.contains(ALWAYS) && step.contains(ALWAYS)) {
+    boolean approvedHasCondition = approved.stream().anyMatch(CiWormJob::isApprovedCondition);
+    boolean stepHasCondition = step.stream().anyMatch(l -> l.startsWith("        if:"));
+    if (!approvedHasCondition && stepHasCondition) {
       problems.add("the step '" + title + "' has a condition that is not approved for it");
     }
-    if (approved == PROBE && !step.contains(PROBE_RUN)) {
-      problems.add("the probe step does not run exactly: " + PROBE_RUN.strip());
+    if (approved == S3_TESTS && !step.contains(S3_RUN)) {
+      problems.add("the S3 test step does not run exactly: " + S3_RUN.strip());
+    }
+    if (approved == PG_TESTS && !step.contains(PG_RUN)) {
+      problems.add("the PostgreSQL test step does not run exactly: " + PG_RUN.strip());
     }
   }
 
@@ -417,30 +482,35 @@ final class CiWormJob {
   // ---------------------------------------------------------------- Maven
 
   /**
-   * The Maven lines: the install step and the probe step as approved, the probe step names the one
-   * module and the one class, and no flag skips or ignores tests.
+   * The Maven lines: the install step and the two test steps as approved, each test step names its
+   * one module and its one class pattern, and no flag skips or ignores tests.
    */
   private static void mavenProblems(List<String> job, List<String> problems) {
-    int probes = 0;
+    int s3 = 0;
+    int pg = 0;
     for (String line : job) {
       int at = line.indexOf("./mvnw");
       if (at < 0) {
         continue;
       }
       boolean install = line.equals(INSTALL_LINE);
-      boolean probe = line.equals(PROBE_RUN);
-      if (probe) {
-        probes++;
+      boolean s3Run = line.equals(S3_RUN);
+      boolean pgRun = line.equals(PG_RUN);
+      if (s3Run) {
+        s3++;
       }
-      if (!install && !probe) {
+      if (pgRun) {
+        pg++;
+      }
+      if (!install && !s3Run && !pgRun) {
         List<String> words = CiDurabilityJob.words(line.substring(at + "./mvnw".length()));
         boolean verify = words.contains("verify");
         problems.add(
             "a Maven line " + NOT_APPROVED + (verify ? " (verify)" : "") + ": " + line.strip());
         for (String word : words) {
           boolean approvedWord =
-              ALLOWED_PROBE_PROPERTIES.contains(word) || INSTALL_PROPERTIES.contains(word);
-          if (TOLERANT_FLAG.matcher(word).matches() && !ALLOWED_PROBE_PROPERTIES.contains(word)) {
+              ALLOWED_TEST_PROPERTIES.contains(word) || INSTALL_PROPERTIES.contains(word);
+          if (TOLERANT_FLAG.matcher(word).matches() && !ALLOWED_TEST_PROPERTIES.contains(word)) {
             problems.add("a flag skips or ignores tests: " + word);
           } else if (word.startsWith("-D") && !approvedWord) {
             problems.add("a Maven property outside the approved set: " + word);
@@ -448,12 +518,16 @@ final class CiWormJob {
         }
       }
     }
-    if (probes != 1) {
-      problems.add("expected exactly one probe step, found " + probes);
+    if (s3 != 1) {
+      problems.add("expected exactly one S3 test step, found " + s3);
+    }
+    if (pg != 1) {
+      problems.add("expected exactly one PostgreSQL test step, found " + pg);
     }
     long maven = job.stream().filter(l -> l.contains("./mvnw")).count();
-    if (maven != 2) {
-      problems.add("expected exactly two Maven lines (install and probe), found " + maven);
+    if (maven != 3) {
+      problems.add(
+          "expected exactly three Maven lines (install and two test steps), found " + maven);
     }
   }
 }

@@ -393,7 +393,7 @@ jobs:
           if-no-files-found: warn
 
   evidence-worm:
-    name: evidence P-WORM probe (S3-compatible object-lock service)
+    name: evidence P-WORM (S3-compatible object-lock service, PostgreSQL 18)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     services:
@@ -406,7 +406,17 @@ jobs:
           REMOTE_MANAGEMENT_DISABLE: '1'
         ports:
           - 127.0.0.1:8000:8000
+      postgres:
+        image: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 12
     env:
+      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres
+      REGPACK_PG_REQUIRED: 'true'
       REGPACK_S3_ENDPOINT: http://127.0.0.1:8000
       REGPACK_S3_REGION: us-east-1
       REGPACK_S3_ACCESS_KEY: REGPACKCIACCESSKEY1
@@ -421,7 +431,7 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
-      - run: ./mvnw -DskipTests -DskipITs -Dspotless.check.skip=true install -pl regpack-evidence-s3 -am
+      - run: ./mvnw -DskipTests -DskipITs -Dspotless.check.skip=true install -pl regpack-evidence-s3,regpack-postgres -am
       - name: Wait for the S3 service
         timeout-minutes: 3
         shell: bash
@@ -432,19 +442,29 @@ jobs:
           done
           echo "::error::the S3 service did not answer an HTTP request on 127.0.0.1:8000 after 40 attempts"
           exit 1
-      - name: S3 service probe
+      - name: P-WORM tests against the S3 service
         timeout-minutes: 15
-        run: ./mvnw verify -pl regpack-evidence-s3 -Dspotless.check.skip=true -Dgroups=probe -DexcludedGroups=none -Dit.test=S3ServiceProbeIT -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
+        run: ./mvnw verify -pl regpack-evidence-s3 -Dspotless.check.skip=true -Dgroups=worm -DexcludedGroups=none -Dit.test='Worm*IT' -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
+      - name: P-WORM tests with the PostgreSQL ledger
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: ./mvnw verify -pl regpack-postgres -Dspotless.check.skip=true -Dgroups=worm -DexcludedGroups=none -Dit.test='PgWorm*IT' -Dtest=NoUnitTestsInThisRun -Dsurefire.failIfNoSpecifiedTests=false
+      - name: Real-store traceability (P-WORM)
+        if: always()
+        shell: bash
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates traceability --file docs/traceability.md --root . --scan regpack-evidence-s3/target --scan regpack-postgres/target --realstore worm
       - name: Test tallies and failure annotations
         if: always()
         shell: bash
-        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-evidence-s3/target
+        run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-evidence-s3/target --scan regpack-postgres/target
       - name: Upload P-WORM test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: evidence-worm-reports
-          path: regpack-evidence-s3/target/failsafe-reports/TEST-*.xml
+          path: |
+            regpack-evidence-s3/target/failsafe-reports/TEST-*.xml
+            regpack-postgres/target/failsafe-reports/TEST-*.xml
           if-no-files-found: warn
 
   smoke-linux:
