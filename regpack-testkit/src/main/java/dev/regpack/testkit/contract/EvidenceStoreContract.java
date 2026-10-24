@@ -572,4 +572,58 @@ public interface EvidenceStoreContract {
       pool.shutdownNow();
     }
   }
+
+  /**
+   * P3b2 (D-W10): an answer shorter than the limit means that no key remains, so a caller may stop
+   * at a short page. The answer holds the first {@code min(limit, n)} matching keys after {@code
+   * after}.
+   */
+  @Test
+  default void listReturnsFullPagesWhileKeysRemain() {
+    List<EvidenceKey> keys = new ArrayList<>();
+    for (int i = 1; i <= 25; i++) {
+      EvidenceKey key = EvidenceKey.of("full", String.format("k%02d", i));
+      keys.add(key);
+      store().put(request(key, "v" + i, "text/plain", fiveYears()));
+    }
+    assertThat(store().list("full/", Optional.empty(), 10))
+        .containsExactlyElementsOf(keys.subList(0, 10));
+    assertThat(store().list("full/", Optional.of(keys.get(9)), 10))
+        .containsExactlyElementsOf(keys.subList(10, 20));
+    assertThat(store().list("full/", Optional.of(keys.get(19)), 10))
+        .containsExactlyElementsOf(keys.subList(20, 25));
+    assertThat(store().list("full/", Optional.of(keys.get(24)), 10)).isEmpty();
+    assertThat(store().list("full/", Optional.empty(), 7))
+        .containsExactlyElementsOf(keys.subList(0, 7));
+  }
+
+  @Test
+  default void keysWithPlusEqualsAndCommaAreDistinctAndListedInCodeUnitOrder() {
+    List<String> shuffled = List.of("k=1", "ka1", "k+1", "k_1", "kA1", "k,1", "k.1", "k-1");
+    for (String name : shuffled) {
+      store().put(request(EvidenceKey.of("sym", name), name, "text/plain", fiveYears()));
+    }
+    List<String> expected = List.of("k+1", "k,1", "k-1", "k.1", "k=1", "kA1", "k_1", "ka1");
+    List<EvidenceKey> listed = store().list("sym/", Optional.empty(), 100);
+    assertThat(listed.stream().map(EvidenceKey::path).toList())
+        .containsExactlyElementsOf(expected.stream().map(name -> "sym/" + name).toList());
+    for (String name : expected) {
+      EvidenceKey key = EvidenceKey.of("sym", name);
+      assertThat(store().get(key).orElseThrow().bytes()).isEqualTo(utf8(name));
+    }
+  }
+
+  @Test
+  default void aMediaTypeOf255CharactersAndARetentionClassNameOf100CharactersRoundTrip() {
+    // three-byte BMP characters, so that the worst case is exercised on every adapter
+    String mediaType = "€".repeat(255);
+    String className = "€".repeat(100);
+    Retention retention = new Retention(new RetentionClass(className), fiveYears().retainUntil());
+    store().put(request(K, "hello", mediaType, retention));
+    StoredObject got = store().get(K).orElseThrow();
+    assertThat(got.mediaType()).isEqualTo(mediaType);
+    assertThat(got.retention().retentionClass().name()).isEqualTo(className);
+    assertThat(got.retention()).isEqualTo(retention);
+    assertThat(got.bytes()).isEqualTo(utf8("hello"));
+  }
 }

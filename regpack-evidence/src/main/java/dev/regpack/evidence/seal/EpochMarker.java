@@ -89,7 +89,8 @@ public final class EpochMarker {
    * The highest declared epoch, 0 when no marker exists.
    *
    * @throws IllegalStateException a key under the marker prefix is no marker key, or the highest
-   *     marker is not exactly the canonical text of the epoch of its key
+   *     marker is not exactly the canonical text of the epoch of its key, or the listing does not
+   *     advance
    * @throws dev.regpack.ports.evidence.EvidenceUnavailableException the tier cannot be read
    */
   public long current() {
@@ -98,15 +99,21 @@ public final class EpochMarker {
     long highest = 0;
     while (true) {
       List<EvidenceKey> page = store.list(PREFIX, after, PAGE);
+      // read to an empty page: a page shorter than the limit is not taken for the end (D-W10)
+      if (page.isEmpty()) {
+        break;
+      }
+      // a non-empty page must start strictly after the previous page's last key, else the loop
+      // would never end
+      if (after.isPresent() && page.get(0).path().compareTo(after.get().path()) <= 0) {
+        throw new IllegalStateException("evidence listing does not advance: " + PREFIX);
+      }
       for (EvidenceKey listed : page) {
         long epoch = epochOf(listed);
         if (highestKey.isEmpty() || epoch > highest) {
           highestKey = Optional.of(listed);
           highest = epoch;
         }
-      }
-      if (page.size() < PAGE) {
-        break;
       }
       after = Optional.of(page.get(page.size() - 1));
     }

@@ -28,6 +28,7 @@ import dev.regpack.inmemory.mutants.OverwriteOnDuplicateEvidenceContractTest;
 import dev.regpack.inmemory.mutants.OverwriteOnDuplicateJournalContractTest;
 import dev.regpack.inmemory.mutants.PageUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.RedeliveryReingestsLedgerContractTest;
+import dev.regpack.inmemory.mutants.ShortPagesEvidenceContractTest;
 import dev.regpack.inmemory.mutants.ShortenRetentionEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SilentMissingKeyEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SubjectNotRegimeScopedLedgerContractTest;
@@ -70,6 +71,9 @@ class ContractSuiteTeethTest {
     expected.put(
         CaseFoldedKeysEvidenceContractTest.class, Set.of("keysDifferingOnlyInCaseAreDistinct"));
     expected.put(ListIgnoresAfterEvidenceContractTest.class, Set.of("listPagesWalkAllKeysOnce"));
+    // P3b2 (D-W10): a full page while keys remain
+    expected.put(
+        ShortPagesEvidenceContractTest.class, Set.of("listReturnsFullPagesWhileKeysRemain"));
     expected.put(
         SilentMissingKeyEvidenceContractTest.class,
         Set.of("extendRetentionOfAMissingKeyIsRejected", "setLegalHoldOfAMissingKeyIsRejected"));

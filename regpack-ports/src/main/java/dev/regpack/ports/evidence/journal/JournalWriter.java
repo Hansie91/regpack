@@ -127,11 +127,17 @@ public final class JournalWriter {
     long highest = 0;
     while (true) {
       List<EvidenceKey> page = store.list(prefix, after, PAGE);
+      // read to an empty page: a page shorter than the limit is not taken for the end (D-W10)
+      if (page.isEmpty()) {
+        return highest + 1;
+      }
+      // a non-empty page must start strictly after the previous page's last key, else the loop
+      // would never end
+      if (after.isPresent() && page.get(0).path().compareTo(after.get().path()) <= 0) {
+        throw new EvidenceIntegrityException("evidence listing does not advance: " + prefix);
+      }
       for (EvidenceKey listed : page) {
         highest = Math.max(highest, ordinalOf(listed));
-      }
-      if (page.size() < PAGE) {
-        return highest + 1;
       }
       after = Optional.of(page.get(page.size() - 1));
     }

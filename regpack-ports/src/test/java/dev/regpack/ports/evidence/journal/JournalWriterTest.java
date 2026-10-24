@@ -38,6 +38,12 @@ class JournalWriterTest {
     RuntimeException failWith;
     int calls;
 
+    /** The most keys one {@code list} call answers, however large the limit. */
+    int pageCap = Integer.MAX_VALUE;
+
+    /** When set, {@code list} answers from the start again whatever {@code after} is. */
+    boolean listIgnoresAfter;
+
     @Override
     public Grade grade() {
       return new Grade("P-MEMORY", "");
@@ -87,11 +93,14 @@ class JournalWriterTest {
     @Override
     public List<EvidenceKey> list(String prefix, Optional<EvidenceKey> after, int limit) {
       List<EvidenceKey> result = new ArrayList<>();
+      int max = Math.min(limit, pageCap);
       for (var entry : objects.tailMap(prefix, true).entrySet()) {
-        if (result.size() >= limit || !entry.getKey().startsWith(prefix)) {
+        if (result.size() >= max || !entry.getKey().startsWith(prefix)) {
           break;
         }
-        if (after.isEmpty() || entry.getKey().compareTo(after.get().path()) > 0) {
+        if (after.isEmpty()
+            || listIgnoresAfter
+            || entry.getKey().compareTo(after.get().path()) > 0) {
           result.add(entry.getValue().key());
         }
       }
@@ -157,6 +166,31 @@ class JournalWriterTest {
       storeKeyOnly(store, intentKey("42", ordinal));
     }
     assertThat(writer.nextOrdinal(SCOPE, 3, JournalType.DELIVERY_INTENT, "42")).isEqualTo(2_346);
+  }
+
+  @Test
+  void nextOrdinalReadsUntilAnEmptyPage() {
+    MapStore store = new MapStore();
+    store.pageCap = 4;
+    JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
+    for (long ordinal = 1; ordinal <= 10; ordinal++) {
+      storeKeyOnly(store, intentKey("42", ordinal));
+    }
+    // the old loop stopped at the first page shorter than 1,000 and answered 5
+    assertThat(writer.nextOrdinal(SCOPE, 3, JournalType.DELIVERY_INTENT, "42")).isEqualTo(11);
+  }
+
+  @Test
+  void aListingThatDoesNotAdvanceFailsInsteadOfSpinning() {
+    MapStore store = new MapStore();
+    store.listIgnoresAfter = true;
+    JournalWriter writer = new JournalWriter(store, FIVE_YEARS);
+    storeKeyOnly(store, intentKey("42", 1));
+    storeKeyOnly(store, intentKey("42", 2));
+    assertThatThrownBy(() -> writer.nextOrdinal(SCOPE, 3, JournalType.DELIVERY_INTENT, "42"))
+        .isInstanceOf(EvidenceIntegrityException.class)
+        .hasMessageContaining("evidence listing does not advance")
+        .hasMessageContaining("/DeliveryIntent/n00000000/000000000042/");
   }
 
   @Test
