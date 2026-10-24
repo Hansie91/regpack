@@ -12,6 +12,7 @@ import dev.regpack.ports.Clock;
 import dev.regpack.ports.evidence.EvidenceCorruptionException;
 import dev.regpack.ports.evidence.EvidenceIntegrityException;
 import dev.regpack.ports.evidence.EvidenceKey;
+import dev.regpack.ports.evidence.EvidenceRetentionException;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import java.nio.ByteBuffer;
@@ -36,8 +37,7 @@ import java.util.regex.Pattern;
 
 /**
  * P-WORM: an {@link EvidenceStore} on an S3-compatible object-lock service in governance mode, path
- * style, through the hand-written client of this module. Put, get and list are built here (T8a);
- * retention, legal hold and the durability check follow in T8b.
+ * style, through the hand-written client of this module.
  *
  * <p><strong>Object model (D-W2).</strong> The object under an evidence key {@code k} is the S3
  * object {@code k} of the bucket. Content type is always {@code application/octet-stream}. The user
@@ -85,6 +85,31 @@ import java.util.regex.Pattern;
  * short while keys remain (D-W10). A key that holds only delete markers has no data version and is
  * absent.
  *
+ * <p><strong>Retention (D-W5).</strong> The lock of a put is the retain-until rounded up to whole
+ * seconds and at most {@code maxLockDate}, never shorter than the record except in the last second
+ * of year 9999; the exact value is kept in the metadata of the version. An extension takes the
+ * stripe lock of the key and moves the lock first and the record second: {@code PutObjectRetention}
+ * only if the new lock date is later than the one the version has (a lock is never shortened, and
+ * the mode is the one the version already has), then the tag {@code regpack-retain-until} with the
+ * exact value (object metadata cannot change, tags can). The exact retain-until of a version is its
+ * tag if it has one, else its metadata; a tag below the metadata or one that is no instant is an
+ * {@link EvidenceCorruptionException}. What {@code get} reports is the exact value when its rounded
+ * form equals the lock date, the lock date when the lock is longer (an extension that lost its
+ * tag), and an {@link EvidenceCorruptionException} when the lock is shorter or absent: a governance
+ * lock was shortened by a principal with the bypass permission, or never set. A retry of an
+ * extension that lost its tag completes it. Tags are not protected by the lock; that is why the
+ * lock date is the floor of what is reported.
+ *
+ * <p><strong>Legal hold (D-W6).</strong> {@code PutObjectLegalHold} on the oldest data version,
+ * under the stripe lock of the key; the header of GET and HEAD, absent before any hold was set,
+ * reads as off. A key that was never put is an {@link IllegalArgumentException} after the outage
+ * check, and a key hidden by a delete marker an {@link EvidenceCorruptionException}, as for a put.
+ *
+ * <p><strong>Durability (D-W9).</strong> {@link #durability()} reads the versioning status and the
+ * object-lock configuration of the bucket on every call, throws {@link
+ * EvidenceUnavailableException} unless both are on, and returns what the {@link WormConfig}
+ * declares: the S3 API shows no replication, so the declaration is the operator's, attested at G8.
+ *
  * <p><strong>Failures (D-W7).</strong> Every outcome that is not the documented success of a call
  * is {@link EvidenceUnavailableException}, with a message that holds the operation, the status and
  * the S3 code only: a transport failure, a timeout, an interrupt (the flag is restored), any status
@@ -111,6 +136,10 @@ public final class WormEvidenceStore implements EvidenceStore {
   private static final String LOCK_MODE = "x-amz-object-lock-mode";
   private static final String LOCK_RETAIN_UNTIL = "x-amz-object-lock-retain-until-date";
   private static final String LEGAL_HOLD = "x-amz-object-lock-legal-hold";
+  private static final String TAGGING_COUNT = "x-amz-tagging-count";
+
+  /** The tag that carries the exact retain-until of an extended version (D-W5). */
+  private static final String RETAIN_UNTIL_TAG = "regpack-retain-until";
 
   private static final Instant FIRST_YEAR_0000 = Instant.parse("0000-01-01T00:00:00Z");
   private static final Instant LAST_YEAR_9999 = Instant.parse("9999-12-31T23:59:59.999999999Z");
@@ -171,9 +200,21 @@ public final class WormEvidenceStore implements EvidenceStore {
     return new Grade(PROFILE, config.gradeMode());
   }
 
+  /**
+   * What the configuration declares, after the service has shown versioning and object lock to be
+   * on. Both are read on every call, with no cache: an outage throws, as the port says (D-W9).
+   */
   @Override
   public Durability durability() {
-    throw new UnsupportedOperationException("the durability check is built in T8b");
+    boolean versioned = s3("getBucketVersioning", () -> client.versioningEnabled(bucket));
+    boolean locked = s3("getObjectLockConfiguration", () -> client.objectLockEnabled(bucket));
+    if (!versioned) {
+      throw unavailable("getBucketVersioning", 200, "VersioningNotEnabled");
+    }
+    if (!locked) {
+      throw unavailable("getObjectLockConfiguration", 200, "ObjectLockNotEnabled");
+    }
+    return config.declaredDurability();
   }
 
   // ---- put
@@ -267,6 +308,7 @@ public final class WormEvidenceStore implements EvidenceStore {
     }
     requireNotHidden(key, versions);
     Stored stored = readData(key, oldest.get());
+    Retained retained = retained(stored, tagsOf(key, oldest.get(), stored, false));
     return Optional.of(
         new StoredObject(
             key,
@@ -274,7 +316,7 @@ public final class WormEvidenceStore implements EvidenceStore {
             stored.mediaType(),
             stored.sha256(),
             stored.writtenAt(),
-            new Retention(new RetentionClass(stored.className()), stored.retainUntil()),
+            new Retention(new RetentionClass(stored.className()), retained.reported()),
             stored.legalHold()));
   }
 
@@ -340,16 +382,166 @@ public final class WormEvidenceStore implements EvidenceStore {
     }
   }
 
-  // ---- retention and legal hold: built in T8b
+  // ---- retention and legal hold
 
+  /**
+   * Moves the retain-until later (D-W5). The new instant is checked first, with no request; then,
+   * under the stripe lock of the key, the oldest data version is read, its retention is worked out
+   * (an alarm if its lock is short or absent, or its tag unreadable), and: an instant earlier than
+   * the exact retain-until is an {@link EvidenceRetentionException}, an equal one changes nothing;
+   * otherwise the lock is extended first and only if the rounded date is later than the lock the
+   * version has, and the tag is written second.
+   */
   @Override
   public void extendRetention(EvidenceKey key, Instant newRetainUntil) {
-    throw new UnsupportedOperationException("retention is built in T8b");
+    Objects.requireNonNull(key, "key");
+    Objects.requireNonNull(newRetainUntil, "newRetainUntil");
+    requireStorable(newRetainUntil);
+    ReentrantLock lock = stripe(key);
+    acquire(lock);
+    try {
+      extendLocked(key, newRetainUntil);
+    } finally {
+      lock.unlock();
+    }
   }
 
+  private void extendLocked(EvidenceKey key, Instant requested) {
+    VersionEntry version = existingOldest(key);
+    Stored stored = readData(key, version);
+    // the write path always reads the tags, whatever the count header says
+    Map<String, String> tags = tagsOf(key, version, stored, true);
+    Retained current = retained(stored, tags);
+    if (requested.isBefore(current.exact())) {
+      throw new EvidenceRetentionException(
+          "retention can only be extended: "
+              + key.path()
+              + " until "
+              + current.exact()
+              + ", requested "
+              + requested);
+    }
+    if (requested.equals(current.exact())) {
+      return;
+    }
+    Instant target = lockDate(requested);
+    if (target.isAfter(current.lockUntil())) {
+      // the lock protects, so it moves first; and never to an earlier date than it has
+      s3Run(
+          "putObjectRetention",
+          () ->
+              client.putRetention(
+                  bucket, key.path(), version.versionId(), current.lockMode(), target.toString()));
+    }
+    Map<String, String> next = new TreeMap<>(tags);
+    next.put(RETAIN_UNTIL_TAG, requested.toString());
+    s3Run("putObjectTagging", () -> client.putTags(bucket, key.path(), version.versionId(), next));
+  }
+
+  /** Sets or clears the legal hold of the oldest data version (D-W6), under the stripe lock. */
   @Override
   public void setLegalHold(EvidenceKey key, boolean hold) {
-    throw new UnsupportedOperationException("legal hold is built in T8b");
+    Objects.requireNonNull(key, "key");
+    ReentrantLock lock = stripe(key);
+    acquire(lock);
+    try {
+      VersionEntry version = existingOldest(key);
+      s3Run(
+          "putObjectLegalHold",
+          () -> client.putLegalHold(bucket, key.path(), version.versionId(), hold));
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * The oldest data version of a key that was put. The version list comes first, so an outage is
+   * {@link EvidenceUnavailableException} before a key that is not there; a key that holds no data
+   * version is an {@link IllegalArgumentException} (M28, M33); a key hidden by a delete marker is
+   * an {@link EvidenceCorruptionException}, as for a put.
+   */
+  private VersionEntry existingOldest(EvidenceKey key) {
+    List<VersionEntry> versions = versionsOf(key);
+    requireNotHidden(key, versions);
+    return oldestData(versions)
+        .orElseThrow(() -> new IllegalArgumentException("no such evidence key: " + key.path()));
+  }
+
+  /**
+   * The retention of one version: its exact retain-until (tag, else metadata), the lock the service
+   * holds for it, and the retain-until that {@code get} reports (D-W5).
+   */
+  private record Retained(Instant exact, Instant lockUntil, String lockMode, Instant reported) {}
+
+  /**
+   * The tags of a version: read when the count header says there are some, or when {@code always}.
+   */
+  private Map<String, String> tagsOf(
+      EvidenceKey key, VersionEntry version, Stored stored, boolean always) {
+    if (!always && taggingCount(stored.headers()) == 0) {
+      return Map.of();
+    }
+    return s3("getObjectTagging", () -> client.tags(bucket, key.path(), version.versionId()));
+  }
+
+  /** The count header of GET; one that cannot be read counts as "there are tags". */
+  private static int taggingCount(Map<String, String> headers) {
+    String text = headers.get(TAGGING_COUNT);
+    if (text == null) {
+      return 0;
+    }
+    try {
+      return Integer.parseInt(text.trim());
+    } catch (NumberFormatException e) {
+      return 1;
+    }
+  }
+
+  /**
+   * Works out the retention of a version read with {@link #readData}. The exact retain-until is the
+   * tag when there is one, else the metadata; a tag that is no instant, or lies below the metadata
+   * (an extension never writes one), cannot be trusted. The lock is read from the headers of the
+   * same GET; a version with no lock, or a lock shorter than the exact value rounded up as at the
+   * put, was changed behind the adapter's back. A lock date that is no instant is the service's
+   * fault, not the data's, and is unavailable (D-W7).
+   */
+  private Retained retained(Stored stored, Map<String, String> tags) {
+    Instant exact = stored.retainUntil();
+    String tag = tags.get(RETAIN_UNTIL_TAG);
+    if (tag != null) {
+      try {
+        exact = Instant.parse(tag);
+      } catch (DateTimeParseException e) {
+        throw new EvidenceCorruptionException(
+            "the retention tag of an evidence object is unreadable: " + stored.key().path());
+      }
+      if (exact.isBefore(stored.retainUntil())) {
+        throw new EvidenceCorruptionException(
+            "the retention tag of an evidence object is below its recorded retain-until: "
+                + stored.key().path());
+      }
+    }
+    String mode = stored.headers().get(LOCK_MODE);
+    String until = stored.headers().get(LOCK_RETAIN_UNTIL);
+    if (mode == null
+        || until == null
+        || !(mode.equals("GOVERNANCE") || mode.equals("COMPLIANCE"))) {
+      throw new EvidenceCorruptionException(
+          "an evidence object has no retention lock: " + stored.key().path());
+    }
+    Instant lockUntil;
+    try {
+      lockUntil = Instant.parse(until);
+    } catch (DateTimeParseException e) {
+      throw unavailable("getObject", 200, "BadLockDate");
+    }
+    int order = lockUntil.compareTo(lockDate(exact));
+    if (order < 0) {
+      throw new EvidenceCorruptionException(
+          "the lock of an evidence object is shorter than its recorded retain-until: "
+              + stored.key().path());
+    }
+    return new Retained(exact, lockUntil, mode, order == 0 ? exact : lockUntil);
   }
 
   // ---- the version list of a key
@@ -440,13 +632,15 @@ public final class WormEvidenceStore implements EvidenceStore {
 
   /** What the adapter keeps of a version: its bytes, checked, and the metadata it recorded. */
   private record Stored(
+      EvidenceKey key,
       byte[] bytes,
       Sha256 sha256,
       String mediaType,
       String className,
       Instant writtenAt,
       Instant retainUntil,
-      boolean legalHold) {}
+      boolean legalHold,
+      Map<String, String> headers) {}
 
   /**
    * GET of one data version, its metadata read and its bytes hashed against the recorded hash. A
@@ -484,7 +678,8 @@ public final class WormEvidenceStore implements EvidenceStore {
           "the stored bytes do not match their recorded hash: " + key.path());
     }
     boolean legalHold = "ON".equals(headers.get(LEGAL_HOLD));
-    return new Stored(bytes, recorded, mediaType, className, writtenAt, retainUntil, legalHold);
+    return new Stored(
+        key, bytes, recorded, mediaType, className, writtenAt, retainUntil, legalHold, headers);
   }
 
   private static String required(Map<String, String> headers, String name) {
@@ -608,6 +803,16 @@ public final class WormEvidenceStore implements EvidenceStore {
       String name = e.getClass().getSimpleName();
       throw unavailable(operation, 0, SIMPLE_NAME.matcher(name).matches() ? name : "invalid");
     }
+  }
+
+  /** {@link #s3} for a call with no result. */
+  private static void s3Run(String operation, Runnable call) {
+    s3(
+        operation,
+        () -> {
+          call.run();
+          return Boolean.TRUE;
+        });
   }
 
   private static EvidenceUnavailableException unavailable(

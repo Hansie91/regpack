@@ -8,6 +8,7 @@ import dev.regpack.evidence.s3.client.JdkTransport;
 import dev.regpack.evidence.s3.client.S3Response;
 import dev.regpack.evidence.s3.client.S3Transport;
 import dev.regpack.evidence.s3.client.SigV4.Credentials;
+import dev.regpack.evidence.s3.client.SigV4.Param;
 import dev.regpack.evidence.s3.fake.FakeS3Server.Fault;
 import dev.regpack.ports.evidence.EvidenceCorruptionException;
 import dev.regpack.ports.evidence.EvidenceIntegrityException;
@@ -820,6 +821,127 @@ class WormEvidenceStoreTest {
     assertThat(store.grade()).isEqualTo(new Grade("P-WORM", "governance (unverified)"));
   }
 
+  // ---- durability (T8b; D-W9, WF9)
+
+  private static final Credentials CREDENTIALS =
+      new Credentials(FakeWormBackend.KEY_ID, FakeWormBackend.SECRET);
+
+  /** A store of the fixture's service on another bucket. */
+  private WormEvidenceStore storeOn(String bucket) {
+    return WormEvidenceStore.open(
+        WormConfig.governance(
+            f.server().endpoint(),
+            FakeWormBackend.REGION,
+            bucket,
+            CREDENTIALS,
+            new Durability(true, 1)),
+        f.dataClock,
+        f.backend.signingClock());
+  }
+
+  /** Sets the versioning status of a bucket through the raw client (the fake only). */
+  private void setVersioning(String bucket, String status) {
+    byte[] body =
+        ("<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>"
+                + status
+                + "</Status></VersioningConfiguration>")
+            .getBytes(UTF_8);
+    f.raw()
+        .send(
+            "PUT", bucket, Optional.empty(), List.of(new Param("versioning", "")), Map.of(), body);
+  }
+
+  @Test
+  void durabilityIsRefusedWhenObjectLockIsOff() {
+    // versioning on, object lock off: the bucket keeps versions but nothing locks them
+    String bucket = "rp-nolock00001";
+    f.raw().createBucket(bucket, false);
+    setVersioning(bucket, "Enabled");
+    WormEvidenceStore store = storeOn(bucket);
+    assertThatThrownBy(store::durability)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("S3 getObjectLockConfiguration status=200 code=ObjectLockNotEnabled");
+    // the grade does not judge; the durability check does
+    assertThat(store.grade()).isEqualTo(new Grade("P-WORM", "governance (unverified)"));
+  }
+
+  @Test
+  void durabilityIsRefusedWhenVersioningIsNotEnabled() {
+    String never = "rp-nover000001";
+    f.raw().createBucket(never, false);
+    assertThatThrownBy(storeOn(never)::durability)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("S3 getBucketVersioning status=200 code=VersioningNotEnabled");
+    // versioning that was suspended is not enabled either
+    String suspended = "rp-suspend0001";
+    f.raw().createBucket(suspended, false);
+    setVersioning(suspended, "Suspended");
+    assertThatThrownBy(storeOn(suspended)::durability)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("S3 getBucketVersioning status=200 code=VersioningNotEnabled");
+  }
+
+  @Test
+  void durabilityReportsExactlyWhatTheConfigurationDeclares() {
+    assertThat(f.store.durability()).isEqualTo(new Durability(true, 1));
+    // the declaration of the configuration, not a number made up by the adapter
+    WormConfig three =
+        new WormConfig(
+            f.server().endpoint(),
+            FakeWormBackend.REGION,
+            f.bucket,
+            CREDENTIALS,
+            WormConfig.LockMode.GOVERNANCE,
+            WormConfig.Verification.SP_O_VERIFIED,
+            new Durability(true, 3),
+            WormConfig.DEFAULT_MAX_LOCK_DATE,
+            WormConfig.DEFAULT_REQUEST_TIMEOUT);
+    WormEvidenceStore declaresThree =
+        WormEvidenceStore.open(three, f.dataClock, f.backend.signingClock());
+    assertThat(declaresThree.durability()).isEqualTo(new Durability(true, 3));
+    assertThat(declaresThree.grade()).isEqualTo(new Grade("P-WORM", "governance"));
+
+    // every call reads the bucket again: versioning, then object lock, and no cache
+    int mark = f.mark();
+    f.store.durability();
+    f.store.durability();
+    assertThat(f.kindsSince(mark)).containsExactly("GET", "GET", "GET", "GET");
+    f.transport.setDown(true);
+    assertThatThrownBy(() -> f.store.durability())
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessageMatching("S3 getBucketVersioning status=0 code=[A-Za-z0-9]+");
+    f.transport.setDown(false);
+    assertThat(f.store.durability()).isEqualTo(new Durability(true, 1));
+  }
+
+  @Test
+  void aMissingBucketIsUnavailableForGetPutListRetentionHoldAndDurabilityAndNeverAbsentOrEmpty() {
+    WormEvidenceStore store = storeOn("rp-missing0001");
+    Instant later = f.dataClock.now().plus(Duration.ofDays(2000));
+    String listing = "S3 listObjectVersions status=404 code=NoSuchBucket";
+    assertThatThrownBy(() -> store.get(K))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage(listing);
+    assertThatThrownBy(() -> store.put(f.request(K, "hello")))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage(listing);
+    assertThatThrownBy(() -> store.list("landing/", Optional.empty(), 10))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage(listing);
+    assertThatThrownBy(() -> store.extendRetention(K, later))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage(listing);
+    assertThatThrownBy(() -> store.setLegalHold(K, true))
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage(listing);
+    assertThatThrownBy(store::durability)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("S3 getBucketVersioning status=404 code=NoSuchBucket");
+    assertThatThrownBy(store::grade)
+        .isInstanceOf(EvidenceUnavailableException.class)
+        .hasMessage("S3 getBucketVersioning status=404 code=NoSuchBucket");
+  }
+
   // ---- WF10: no secret, key id, host or signature in any message
 
   @Test
@@ -1056,5 +1178,54 @@ class WormEvidenceStoreTest {
       gate.release();
     }
     assertThat(first.get(30, TimeUnit.SECONDS)).isEqualTo(PutOutcome.CREATED);
+  }
+
+  @Test
+  void aRetentionChangeAndALegalHoldWaitForTheStripeOfTheirKeyWhileOtherKeysGoOn()
+      throws Exception {
+    EvidenceKey other = keyOnAnotherStripeThan(K);
+    f.store.put(f.request(K, "same"));
+    f.store.put(f.request(other, "other"));
+    Instant later = f.retention().retainUntil().plus(Duration.ofDays(30));
+    GatedTransport gate = new GatedTransport(new JdkTransport(Duration.ofSeconds(30)));
+    WormEvidenceStore held = f.openOn(gate);
+    FutureTask<Void> extend =
+        new FutureTask<>(
+            () -> {
+              held.extendRetention(K, later);
+              return null;
+            });
+    FutureTask<Void> hold =
+        new FutureTask<>(
+            () -> {
+              held.setLegalHold(K, true);
+              return null;
+            });
+    try {
+      startDaemon(extend);
+      gate.awaitHeld();
+      assertThat(gate.sent()).isEqualTo(1);
+      Thread waiting = startDaemon(hold);
+      awaitParked(waiting);
+      // the hold sent nothing: it waits inside the lock of the extension
+      assertThat(gate.sent()).isEqualTo(1);
+      // another key of the same store object is not held up
+      within(
+          () -> {
+            held.extendRetention(other, later);
+            held.setLegalHold(other, true);
+            return null;
+          });
+    } finally {
+      gate.release();
+    }
+    extend.get(30, TimeUnit.SECONDS);
+    hold.get(30, TimeUnit.SECONDS);
+    StoredObject got = f.store.get(K).orElseThrow();
+    assertThat(got.retention().retainUntil()).isEqualTo(later);
+    assertThat(got.legalHold()).isTrue();
+    StoredObject otherGot = f.store.get(other).orElseThrow();
+    assertThat(otherGot.retention().retainUntil()).isEqualTo(later);
+    assertThat(otherGot.legalHold()).isTrue();
   }
 }
