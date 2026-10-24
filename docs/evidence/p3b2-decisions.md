@@ -42,4 +42,6 @@ None yet.
 
 ## CI checkpoints
 
-None yet.
+| Checkpoint | Head, run | Started / ended (UTC) | Asked / answered (UTC) | Result |
+|---|---|---|---|---|
+| CP-1 | `ab7dab2`, [40123391011](https://github.com/Hansie91/regpack/actions/runs/40123391011) | 2026-10-24 19:01:31 / 19:08:25 | job text 2026-10-24 15:37:05 / 16:17:12; push: "Yes, push ab7dab2 now (Recommended)" | green: 10 jobs succeeded, `ledger capacity` skipped by design (11 listed); `evidence-worm`: `S3ServiceProbeIT` run 1, failed 0; the 17 probe items are read out in [p3b2-probe.md](p3b2-probe.md); no result contradicts A1, A3 or A5 |
