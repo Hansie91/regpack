@@ -1013,31 +1013,75 @@ class TraceabilityCheckTest {
     if (Pattern.compile("\\bvoid\\s+" + Pattern.quote(method) + "\\s*\\(").matcher(text).find()) {
       return true;
     }
-    Matcher base =
-        Pattern.compile("\\bclass\\s+\\w+(?:<[^{]*>)?\\s+extends\\s+(\\w+)").matcher(text);
-    if (depth == 0 || !base.find()) {
+    if (depth == 0) {
       return false;
     }
-    String name = base.group(1) + ".java";
     Path module = root.resolve(root.relativize(file).getName(0));
     List<Path> places =
         List.of(
             module.resolve("src/test/java"),
             module.resolve("src/main/java"),
             root.resolve("regpack-testkit/src/main/java"));
-    for (Path place : places) {
-      if (!Files.isDirectory(place)) {
-        continue;
-      }
-      try (var files = Files.walk(place)) {
-        Optional<Path> found =
-            files.filter(p -> p.getFileName().toString().equals(name)).findFirst();
-        if (found.isPresent() && declaresMethod(root, found.get(), method, depth - 1)) {
-          return true;
+    for (String supertype : supertypesOf(text)) {
+      String name = supertype + ".java";
+      for (Path place : places) {
+        if (!Files.isDirectory(place)) {
+          continue;
+        }
+        try (var files = Files.walk(place)) {
+          Optional<Path> found =
+              files.filter(p -> p.getFileName().toString().equals(name)).findFirst();
+          if (found.isPresent() && declaresMethod(root, found.get(), method, depth - 1)) {
+            return true;
+          }
         }
       }
     }
     return false;
+  }
+
+  /**
+   * The simple names after {@code extends} and {@code implements} in the header of the first class
+   * or interface of a source (type arguments dropped), so that a method that comes from a shared
+   * contract interface, as the P-WORM suites inherit theirs, is found as well as one from a base
+   * class.
+   */
+  private static List<String> supertypesOf(String text) {
+    // a declaration starts its line (after modifiers), so the words of a comment do not match
+    Matcher header =
+        Pattern.compile(
+                "^[ \\t]*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\\s+)*"
+                    + "(?:class|interface)\\s+\\w+([^{;]*)\\{",
+                Pattern.MULTILINE)
+            .matcher(text);
+    List<String> names = new ArrayList<>();
+    if (!header.find()) {
+      return names;
+    }
+    String clause = header.group(1);
+    String previous;
+    do {
+      previous = clause;
+      clause = clause.replaceAll("<[^<>]*>", "");
+    } while (!clause.equals(previous));
+    Matcher parts =
+        Pattern.compile(
+                "\\b(extends|implements|permits)\\s+(.*?)(?=\\b(?:extends|implements|permits)\\b|$)",
+                Pattern.DOTALL)
+            .matcher(clause);
+    while (parts.find()) {
+      if (parts.group(1).equals("permits")) {
+        continue;
+      }
+      for (String piece : parts.group(2).split(",")) {
+        String simple = piece.strip();
+        simple = simple.substring(simple.lastIndexOf('.') + 1);
+        if (!simple.isEmpty()) {
+          names.add(simple);
+        }
+      }
+    }
+    return names;
   }
 
   /** The problems of the REALWORM lines of a table with respect to the sources under the root. */
@@ -1095,6 +1139,21 @@ class TraceabilityCheckTest {
     write(
         "regpack-y/src/test/java/a/OtherIT.java",
         "package a;\n@Tag(\"worm\")\nclass OtherIT extends BaseContract { }\n");
+    // a method that comes from an interface, directly or through an abstract base (the shape of
+    // the P-WORM suites: an abstract class implements the shared contracts of regpack-testkit)
+    write(
+        "regpack-x/src/test/java/a/Shape.java",
+        "package a;\ninterface Shape { default void fromInterface() {} }\n");
+    write(
+        "regpack-x/src/test/java/a/Other.java",
+        "package a;\ninterface Other<T> extends Shape { default void fromOther() {} }\n");
+    write(
+        "regpack-x/src/test/java/a/AbstractViaInterface.java",
+        "package a;\nabstract class AbstractViaInterface implements Comparable<String>, Other<String>"
+            + " { }\n");
+    write(
+        "regpack-x/src/test/java/a/ViaInterfaceIT.java",
+        "package a;\n@Tag(\"worm\")\nclass ViaInterfaceIT extends AbstractViaInterface { }\n");
     Table fixture =
         new Table()
             .exited("P3")
@@ -1107,6 +1166,9 @@ class TraceabilityCheckTest {
                 realWorm("I1", "a.FakeTest#own"),
                 realWorm("I1", "a.NoSuchIT#own"),
                 realWorm("I1", "a.OtherIT#inherited"),
+                realWorm("I1", "a.ViaInterfaceIT#fromOther"),
+                realWorm("I1", "a.ViaInterfaceIT#fromInterface"),
+                realWorm("I1", "a.ViaInterfaceIT#missingInTheInterfaces"),
                 realStore("I1", "a.NoSuchClass#ignored"));
     assertThat(realWormSourceProblems(fixture.render(), repo))
         .containsExactly(
@@ -1114,7 +1176,8 @@ class TraceabilityCheckTest {
             "NO_WORM_TAG:a.UntaggedIT#own",
             "NOT_AN_IT:a.FakeTest#own",
             "NO_SOURCE:a.NoSuchIT#own",
-            "NO_METHOD:a.OtherIT#inherited");
+            "NO_METHOD:a.OtherIT#inherited",
+            "NO_METHOD:a.ViaInterfaceIT#missingInTheInterfaces");
 
     // the real table: vacuous until the REALWORM lines of T10 and T11 exist
     Path root = repositoryRoot();

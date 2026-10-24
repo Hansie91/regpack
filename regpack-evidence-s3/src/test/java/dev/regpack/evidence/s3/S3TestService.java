@@ -1,6 +1,7 @@
 package dev.regpack.evidence.s3;
 
 import dev.regpack.evidence.s3.client.JdkTransport;
+import dev.regpack.evidence.s3.client.S3Client;
 import dev.regpack.evidence.s3.client.S3Request;
 import dev.regpack.evidence.s3.client.SigV4.Credentials;
 import dev.regpack.ports.Clock;
@@ -12,6 +13,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Assumptions;
 
@@ -133,6 +135,33 @@ final class S3TestService {
       Assertions.fail(REQUIRED_VARIABLE + "=true and " + reason);
     }
     return Assumptions.abort("real-service test skipped: " + reason);
+  }
+
+  // ---- the seam of T8a (T9, T10) over the real service
+
+  /** The raw client of the service: the test credentials, real time, the JDK transport. */
+  static S3Client rawClient(S3Settings settings) {
+    return new S3Client(
+        settings.endpoint(),
+        settings.region(),
+        settings.credentials(),
+        signingClock(),
+        new JdkTransport(Duration.ofSeconds(60)));
+  }
+
+  /**
+   * A fresh bucket with object lock on: {@code rp-} and 12 hex digits of a random UUID (test code
+   * only, D-W13). Buckets are never emptied: the container is discarded with the job.
+   */
+  static String newBucket(S3Client raw) {
+    String bucket = "rp-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+    raw.createBucket(bucket, true);
+    return bucket;
+  }
+
+  /** The clock of {@code X-Amz-Date} against the service: real time. */
+  static Clock signingClock() {
+    return realClock();
   }
 
   /**

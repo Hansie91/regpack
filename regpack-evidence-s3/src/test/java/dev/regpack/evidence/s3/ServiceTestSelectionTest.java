@@ -1,0 +1,116 @@
+package dev.regpack.evidence.s3;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.IOException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.PathMatcher;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
+
+/**
+ * A local catch of a selection error that CI would otherwise be the first to see (T10): the job
+ * {@code evidence-worm} selects the real-service classes of this module with {@code
+ * -Dit.test='Worm*IT'}; a pattern that matched nothing, matched a fake-backed {@code *Test} class
+ * or missed a class would only show at the checkpoint. The integration tests themselves skip here
+ * (no service), so this unit test is what shows locally that the selection is the four classes.
+ */
+class ServiceTestSelectionTest {
+  /** The pattern of the job step (the {@code -Dit.test} value), matched against the class name. */
+  private static final String WORM_PATTERN = "Worm*IT";
+
+  private static final List<String> FOUR =
+      List.of(
+          "WormEvidenceStoreContractIT",
+          "WormSealScenariosIT",
+          "WormServiceBehaviourIT",
+          "WormVerifyIT");
+
+  private static Path testSources() {
+    return Path.of(System.getProperty("regpack.repo.root"))
+        .resolve("regpack-evidence-s3/src/test/java");
+  }
+
+  /** The simple names of the test source files whose name ends in {@code suffix}. */
+  private static List<String> classesEndingIn(Path root, String suffix) throws IOException {
+    try (Stream<Path> files = Files.walk(root)) {
+      return files
+          .filter(Files::isRegularFile)
+          .map(path -> path.getFileName().toString())
+          .filter(name -> name.endsWith(suffix + ".java"))
+          .map(name -> name.substring(0, name.length() - ".java".length()))
+          .sorted()
+          .toList();
+    }
+  }
+
+  private static List<String> selectedBy(String pattern, List<String> names) {
+    PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
+    List<String> selected = new ArrayList<>();
+    for (String name : names) {
+      if (matcher.matches(Path.of(name))) {
+        selected.add(name);
+      }
+    }
+    return selected;
+  }
+
+  private static List<String> allClasses(Path root) throws IOException {
+    try (Stream<Path> files = Files.walk(root)) {
+      return files
+          .filter(Files::isRegularFile)
+          .map(path -> path.getFileName().toString())
+          .filter(name -> name.endsWith(".java"))
+          .map(name -> name.substring(0, name.length() - ".java".length()))
+          .sorted()
+          .toList();
+    }
+  }
+
+  @Test
+  void theWormPatternSelectsTheFourServiceClassesAndNoUnitTest() throws IOException {
+    Path root = testSources();
+    List<String> all = allClasses(root);
+
+    // the pattern selects exactly the four service classes, among every class of the module
+    assertThat(selectedBy(WORM_PATTERN, all)).containsExactlyElementsOf(FOUR);
+    // the Worm*IT files of the module are exactly those four
+    assertThat(classesEndingIn(root, "IT").stream().filter(n -> n.startsWith("Worm")).toList())
+        .containsExactlyElementsOf(FOUR);
+    // each is tagged worm, so that the group filter of the job and the exclusion elsewhere agree
+    for (String name : FOUR) {
+      Path file;
+      try (Stream<Path> files = Files.walk(root)) {
+        file =
+            files
+                .filter(p -> p.getFileName().toString().equals(name + ".java"))
+                .findFirst()
+                .orElseThrow();
+      }
+      assertThat(Files.readString(file, UTF_8))
+          .as("%s carries the tag worm", name)
+          .contains("@Tag(\"worm\")");
+    }
+    // no unit test (a class named ...Test, fake-backed or not) matches the pattern
+    assertThat(selectedBy(WORM_PATTERN, classesEndingIn(root, "Test"))).isEmpty();
+    // the probe is selected by its own job step and never by this pattern
+    assertThat(selectedBy(WORM_PATTERN, List.of("S3ServiceProbeIT"))).isEmpty();
+  }
+
+  @Test
+  void theSelectionHasTeeth() {
+    // a pattern that is too narrow, too wide or misspelt is seen
+    List<String> names = new ArrayList<>(FOUR);
+    names.add("WormEvidenceStoreContractTest");
+    names.add("S3ServiceProbeIT");
+    assertThat(selectedBy("Worm*IT", names)).containsExactlyElementsOf(FOUR);
+    assertThat(selectedBy("Worm*", names)).contains("WormEvidenceStoreContractTest");
+    assertThat(selectedBy("*IT", names)).contains("S3ServiceProbeIT");
+    assertThat(selectedBy("Wor*IT", List.of("NoWormIT"))).isEmpty();
+  }
+}
