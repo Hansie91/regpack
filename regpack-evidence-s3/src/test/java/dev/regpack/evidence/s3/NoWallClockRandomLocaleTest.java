@@ -13,8 +13,8 @@ import org.junit.jupiter.api.Test;
 /**
  * Determinism rules (Convention 8 of P0, Convention 4 of P3b1): the main code of the S3 module uses
  * no wall clock, randomness, default locale, default zone or default charset, and no sleep. Time
- * comes from the caller, waits are latches. T3 step 2 adds {@code S3Client.class} to the classes
- * asserted to exist.
+ * comes from the caller, waits are latches. The signer and the client are asserted to exist, so
+ * that the scan is not vacuous.
  */
 class NoWallClockRandomLocaleTest {
   @Test
@@ -22,6 +22,7 @@ class NoWallClockRandomLocaleTest {
     Path classes = Path.of(System.getProperty("regpack.classes.dir"));
     assertThat(Files.isDirectory(classes)).isTrue();
     assertThat(classes.resolve("dev/regpack/evidence/s3/client/SigV4.class")).exists();
+    assertThat(classes.resolve("dev/regpack/evidence/s3/client/S3Client.class")).exists();
     assertThat(ForbiddenCallScan.scan(classes, EnumSet.allOf(RuleSet.class))).isEmpty();
   }
 }

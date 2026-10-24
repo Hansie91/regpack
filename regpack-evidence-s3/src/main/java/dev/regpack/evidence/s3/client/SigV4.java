@@ -35,9 +35,9 @@ public final class SigV4 {
   private static final String HMAC = "HmacSHA256";
   private static final DateTimeFormatter AMZ_DATE =
       DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'", Locale.ROOT).withZone(ZoneOffset.UTC);
-  private static final Pattern METHOD = Pattern.compile("[A-Z]{1,16}");
-  private static final Pattern HEADER_NAME = Pattern.compile("[a-z0-9][a-z0-9-]*");
-  private static final Pattern SHA256_HEX = Pattern.compile("[0-9a-f]{64}");
+  static final Pattern METHOD = Pattern.compile("[A-Z]{1,16}");
+  static final Pattern HEADER_NAME = Pattern.compile("[a-z0-9][a-z0-9-]*");
+  static final Pattern SHA256_HEX = Pattern.compile("[0-9a-f]{64}");
   private static final Pattern ENCODED_PATH = Pattern.compile("/([A-Za-z0-9._~/-]|%[0-9A-F]{2})*");
   private static final Pattern SCOPE_PART = Pattern.compile("[A-Za-z0-9._-]{1,64}");
   private static final String HEX_UPPER = "0123456789ABCDEF";
@@ -196,18 +196,30 @@ public final class SigV4 {
     return out.toString();
   }
 
-  private static String canonicalQuery(List<Param> query) {
-    List<String[]> encoded = new ArrayList<>(query.size());
+  /** One query parameter, percent-encoded. */
+  record EncodedParam(String name, String value) {}
+
+  /**
+   * The parameters percent-encoded and sorted by encoded name, then encoded value. The canonical
+   * query and the query on the wire are both written from this one list.
+   */
+  static List<EncodedParam> sortedEncodedQuery(List<Param> query) {
+    List<EncodedParam> encoded = new ArrayList<>(query.size());
     for (Param p : query) {
-      encoded.add(new String[] {encodeQueryComponent(p.name()), encodeQueryComponent(p.value())});
+      encoded.add(
+          new EncodedParam(encodeQueryComponent(p.name()), encodeQueryComponent(p.value())));
     }
-    encoded.sort(Comparator.<String[], String>comparing(e -> e[0]).thenComparing(e -> e[1]));
+    encoded.sort(Comparator.comparing(EncodedParam::name).thenComparing(EncodedParam::value));
+    return encoded;
+  }
+
+  private static String canonicalQuery(List<Param> query) {
     StringBuilder out = new StringBuilder();
-    for (String[] e : encoded) {
+    for (EncodedParam e : sortedEncodedQuery(query)) {
       if (out.length() > 0) {
         out.append('&');
       }
-      out.append(e[0]).append('=').append(e[1]);
+      out.append(e.name()).append('=').append(e.value());
     }
     return out.toString();
   }
