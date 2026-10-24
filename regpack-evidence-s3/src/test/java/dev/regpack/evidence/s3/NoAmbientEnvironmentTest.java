@@ -15,16 +15,17 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Review focus EF20 (the CP-4 lesson of P3a): no test of this module reads the process environment
- * or the working directory, except the named helpers of the allow-list (empty now; T4 adds {@code
- * S3TestService.java}). The two patterns are built from two pieces so that this file does not match
- * itself.
+ * or the working directory, except the named helper of the allow-list ({@code S3TestService.java},
+ * the one class that reads the {@code REGPACK_S3_*} variables). The two patterns are built from two
+ * pieces so that this file does not match itself.
  */
 class NoAmbientEnvironmentTest {
   private static final String ENVIRONMENT_READ = "get" + "env(";
   private static final String WORKING_DIRECTORY = "\"user" + ".dir\"";
 
   /** Relative names of the test sources that may read the environment: one named helper. */
-  private static final Set<String> ALLOW_LIST = Set.of();
+  private static final Set<String> ALLOW_LIST =
+      Set.of("dev/regpack/evidence/s3/S3TestService.java");
 
   /** Test sources below {@code dir} that contain one of the patterns, as relative names. */
   static List<String> offenders(Path dir, Set<String> allowed) throws IOException {
@@ -52,8 +53,14 @@ class NoAmbientEnvironmentTest {
   }
 
   @Test
-  void theAllowListIsEmptyUntilATaskNamesAHelper() {
-    assertThat(ALLOW_LIST).isEmpty();
+  void theAllowListIsExactlyTheS3TestServiceAndItExists() {
+    Path sources =
+        Path.of(System.getProperty("regpack.repo.root"))
+            .resolve("regpack-evidence-s3/src/test/java");
+    assertThat(ALLOW_LIST).containsExactly("dev/regpack/evidence/s3/S3TestService.java");
+    for (String name : ALLOW_LIST) {
+      assertThat(sources.resolve(name)).as("allow-listed helper " + name).exists();
+    }
   }
 
   @Test
