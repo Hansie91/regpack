@@ -10,6 +10,8 @@ import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -23,6 +25,12 @@ import org.junit.jupiter.api.Test;
 class ServiceTestSelectionTest {
   /** The pattern of the job step (the {@code -Dit.test} value), matched against the class name. */
   private static final String WORM_PATTERN = "Worm*IT";
+
+  /** The pattern of the PostgreSQL step of the job (the {@code -Dit.test} value). */
+  private static final String PG_WORM_PATTERN = "PgWorm*IT";
+
+  private static final Pattern EXCLUDED_GROUPS =
+      Pattern.compile("<excludedGroups>([^<]*)</excludedGroups>");
 
   private static final List<String> FOUR =
       List.of(
@@ -100,6 +108,48 @@ class ServiceTestSelectionTest {
     assertThat(selectedBy(WORM_PATTERN, classesEndingIn(root, "Test"))).isEmpty();
     // the probe is selected by its own job step and never by this pattern
     assertThat(selectedBy(WORM_PATTERN, List.of("S3ServiceProbeIT"))).isEmpty();
+  }
+
+  /**
+   * T11: the second step of the job {@code evidence-worm} selects the PostgreSQL-plus-S3 classes of
+   * {@code regpack-postgres} with {@code -Dit.test='PgWorm*IT'}; the job {@code ledger-pg} runs the
+   * whole module and must not run them (they need the S3 service), which is the {@code worm} group
+   * in the {@code excludedGroups} property of that module.
+   */
+  @Test
+  void thePgWormPatternSelectsTheTwoPostgresClassesAndTheLedgerJobExcludesThem()
+      throws IOException {
+    Path repo = Path.of(System.getProperty("regpack.repo.root"));
+    Path root = repo.resolve("regpack-postgres/src/test/java");
+    List<String> all = allClasses(root);
+    List<String> two = List.of("PgWormSealScenarioIT", "PgWormVerifyIT");
+
+    assertThat(selectedBy(PG_WORM_PATTERN, all)).containsExactlyElementsOf(two);
+    assertThat(classesEndingIn(root, "IT").stream().filter(n -> n.startsWith("PgWorm")).toList())
+        .containsExactlyElementsOf(two);
+    assertThat(selectedBy(PG_WORM_PATTERN, classesEndingIn(root, "Test"))).isEmpty();
+    for (String name : two) {
+      Path file;
+      try (Stream<Path> files = Files.walk(root)) {
+        file =
+            files
+                .filter(p -> p.getFileName().toString().equals(name + ".java"))
+                .findFirst()
+                .orElseThrow();
+      }
+      assertThat(Files.readString(file, UTF_8))
+          .as("%s carries the tag worm", name)
+          .contains("@Tag(\"worm\")");
+    }
+    // the module's own run (job ledger-pg, the build jobs) leaves the group out
+    String pom = Files.readString(repo.resolve("regpack-postgres/pom.xml"), UTF_8);
+    Matcher excluded = EXCLUDED_GROUPS.matcher(pom);
+    assertThat(excluded.find()).as("excludedGroups of regpack-postgres").isTrue();
+    assertThat(List.of(excluded.group(1).split(",")))
+        .contains("worm", "mutant", "capacity", "durability");
+    // the selections of the two service classes do not overlap
+    assertThat(selectedBy(WORM_PATTERN, two)).isEmpty();
+    assertThat(selectedBy(PG_WORM_PATTERN, FOUR)).isEmpty();
   }
 
   @Test
