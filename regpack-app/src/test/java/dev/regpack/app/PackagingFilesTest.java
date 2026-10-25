@@ -1,6 +1,7 @@
 package dev.regpack.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.charset.CharacterCodingException;
@@ -10,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Static checks of the packaging files under {@code packaging/}; no service is installed. */
 class PackagingFilesTest {
@@ -201,6 +203,7 @@ class PackagingFilesTest {
             "ledger-pg",
             "ledger-capacity",
             "ledger-durability",
+            "evidence-worm",
             "smoke-linux",
             "smoke-windows",
             "smoke-kubernetes");
@@ -1566,6 +1569,503 @@ class PackagingFilesTest {
 
     assertThat(c.cases.size()).as("copies").isGreaterThanOrEqualTo(70);
     assertEveryCopyIsReported(c, ci, script);
+  }
+
+  /**
+   * P3b2 T11, AP-3 and AP-6: the job evidence-worm (version 2) is the approved text: one
+   * digest-pinned S3-compatible service container and one digest-pinned PostgreSQL container, both
+   * published on the loopback only, throwaway credentials as literals, both services required, the
+   * install, the wait for the S3 port, the two test steps (the {@code Worm*IT} classes of the S3
+   * module and the {@code PgWorm*IT} classes of the PostgreSQL module), the traceability step in
+   * {@code --realstore worm} mode, the annotation step and the upload, and nothing that skips,
+   * ignores or tolerates a failure.
+   */
+  @Test
+  void wormJobIsTheApprovedTextAndSound() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    assertThat(CiWormJob.problems(ci)).isEmpty();
+    assertThat(CiWormJob.jobText(ci)).isEqualTo(CiWormJob.text());
+    List<String> job = jobLines(ci, "evidence-worm");
+    assertThat(job)
+        .contains("        image: " + CiWormJob.IMAGE, "        image: " + CiWormJob.PG_IMAGE);
+    assertThat(job.stream().filter(l -> l.strip().startsWith("image:"))).hasSize(2);
+    // the PostgreSQL image is that of the job ledger-pg (AP-6)
+    assertThat(jobLines(ci, "ledger-pg")).contains("        image: " + CiWormJob.PG_IMAGE);
+    assertThat(job.stream().filter(l -> l.strip().startsWith("- 127.0.0.1:")))
+        .containsExactly("          - 127.0.0.1:8000:8000", "          - 127.0.0.1:5432:5432");
+    assertThat(job)
+        .contains(
+            "      REGPACK_S3_ENDPOINT: http://127.0.0.1:8000",
+            "      REGPACK_S3_REQUIRED: 'true'",
+            "      REGPACK_PG_URL: jdbc:postgresql://127.0.0.1:5432/postgres?user=postgres",
+            "      REGPACK_PG_REQUIRED: 'true'");
+    // checkout and setup-java are those of the other real-store jobs, with the same SHAs
+    assertThat(java.util.Collections.indexOfSubList(job, CiDurabilityJob.CHECKOUT)).isNotNegative();
+    assertThat(java.util.Collections.indexOfSubList(job, CiDurabilityJob.SETUP_JAVA))
+        .isNotNegative();
+    // the PostgreSQL step runs after a failed S3 step, but not after a cancellation
+    assertThat(java.util.Collections.indexOfSubList(job, CiWormJob.PG_TESTS)).isNotNegative();
+    assertThat(CiWormJob.PG_TESTS).contains("        if: ${{ !cancelled() }}");
+    // the traceability gate runs in worm mode over both modules
+    assertThat(String.join("\n", CiWormJob.TRACEABILITY))
+        .contains("--scan regpack-evidence-s3/target")
+        .contains("--scan regpack-postgres/target")
+        .contains("--realstore worm");
+    // the upload of the distribution stays unique and the reports have a name of their own
+    assertThat(ci).containsOnlyOnce("name: regpack-dist\n          path: |");
+    assertThat(job).contains("          name: evidence-worm-reports");
+  }
+
+  /** The text of the job is pinned by its SHA-256 (the hash the owner approves with the text). */
+  @Test
+  void theApprovedTextOfTheWormJobIsHeldByHash() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    assertThat(CiWormJob.APPROVED_SHA256).matches("[0-9a-f]{64}");
+    assertThat(CiWormJob.sha256(CiWormJob.text())).isEqualTo(CiWormJob.APPROVED_SHA256);
+    assertThat(CiWormJob.sha256(CiWormJob.jobText(ci))).isEqualTo(CiWormJob.APPROVED_SHA256);
+    // one character of the text changes the hash
+    assertThat(
+            CiWormJob.sha256(
+                CiWormJob.jobText(ci).replace("timeout-minutes: 40", "timeout-minutes: 41")))
+        .isNotEqualTo(CiWormJob.APPROVED_SHA256);
+    assertThat(CiWormJob.sha256(CiWormJob.jobText(ci).replace("9.5.0@", "9.5.1@")))
+        .isNotEqualTo(CiWormJob.APPROVED_SHA256);
+    // the image references are a name, a tag and a full digest
+    assertThat(CiWormJob.IMAGE).matches("[a-z0-9./-]+:[0-9A-Za-z._-]+@sha256:[0-9a-f]{64}");
+    assertThat(CiWormJob.PG_IMAGE).matches("[a-z0-9./-]+:[0-9A-Za-z._-]+@sha256:[0-9a-f]{64}");
+  }
+
+  private static final String RECORDED_V2_PIN = "approved-job-v2-sha256: ";
+
+  /**
+   * The hash that {@code docs/evidence/p3b2-decisions.md} records as approved by the owner for the
+   * job text (version 2): the value of the one line that starts with {@code approved-job-v2-sha256:
+   * }. Nothing else of the file is read into the result.
+   */
+  private static String recordedWormJobHash(Path decisions) throws IOException {
+    List<String> lines =
+        Files.readAllLines(decisions, StandardCharsets.UTF_8).stream()
+            .filter(line -> line.startsWith(RECORDED_V2_PIN))
+            .toList();
+    assertThat(lines).as("lines of %s that record the approved job hash", decisions).hasSize(1);
+    return lines.get(0).substring(RECORDED_V2_PIN.length()).strip();
+  }
+
+  /**
+   * The pin of the job text in {@link CiWormJob} is the hash the owner approved (AP-3: a yes covers
+   * only the text shown), as the decisions record holds it. A change of the job that recomputes the
+   * pin here is then also a change of the record, which exists only after a new approval.
+   */
+  @Test
+  void theWormJobPinIsTheHashTheDecisionsRecordHoldsAsApproved(@TempDir Path temp)
+      throws IOException {
+    Path decisions = repoRoot().resolve("docs/evidence/p3b2-decisions.md");
+    assertThat(recordedWormJobHash(decisions)).isEqualTo(CiWormJob.APPROVED_SHA256);
+
+    // teeth: a record with another hash on that line is told apart from the pin
+    String other = "0".repeat(64);
+    Path changed = temp.resolve("changed.md");
+    Files.writeString(
+        changed,
+        RECORDED_V2_PIN + other + "\nthe other lines are not read\n",
+        StandardCharsets.UTF_8);
+    assertThat(recordedWormJobHash(changed))
+        .isEqualTo(other)
+        .isNotEqualTo(CiWormJob.APPROVED_SHA256);
+    // a record without the line, or with it twice, is not a record of the approved hash
+    Path missing = temp.resolve("missing.md");
+    Files.writeString(
+        missing,
+        "approved-job-v1-sha256: " + CiWormJob.APPROVED_SHA256 + "\n",
+        StandardCharsets.UTF_8);
+    assertThatThrownBy(() -> recordedWormJobHash(missing)).isInstanceOf(AssertionError.class);
+    Path twice = temp.resolve("twice.md");
+    Files.writeString(
+        twice,
+        (RECORDED_V2_PIN + CiWormJob.APPROVED_SHA256 + "\n").repeat(2),
+        StandardCharsets.UTF_8);
+    assertThatThrownBy(() -> recordedWormJobHash(twice)).isInstanceOf(AssertionError.class);
+  }
+
+  /** One way of neutering the worm job: the workflow and the fragment a problem must name. */
+  private record WormCase(String ci, String problem) {}
+
+  /** The checker has teeth: each edit of the kinds listed below is reported, by its own rule. */
+  @Test
+  void theWormJobCheckerReportsEachWayOfNeuteringTheJob() throws IOException {
+    String ci = asciiLfText(repoRoot().resolve(".github/workflows/ci.yml"));
+    assertThat(CiWormJob.problems(ci)).isEmpty();
+    String s3 = CiWormJob.S3_RUN + "\n";
+    String s3Step = String.join("\n", CiWormJob.S3_TESTS) + "\n";
+    String pg = CiWormJob.PG_RUN + "\n";
+    String pgStep = String.join("\n", CiWormJob.PG_TESTS) + "\n";
+    String wait = String.join("\n", CiWormJob.WAIT) + "\n";
+    String traceability = String.join("\n", CiWormJob.TRACEABILITY) + "\n";
+    String annotate = String.join("\n", CiWormJob.ANNOTATE) + "\n";
+    String upload = String.join("\n", CiWormJob.UPLOAD) + "\n";
+    String accessKey = "      REGPACK_S3_ACCESS_KEY: REGPACKCIACCESSKEY1\n";
+    java.util.Map<String, WormCase> broken = new java.util.LinkedHashMap<>();
+    // the rules by name
+    broken.put(
+        "a secret",
+        new WormCase(
+            inWormJob(ci, accessKey, "      REGPACK_S3_ACCESS_KEY: ${{ secrets.S3_KEY }}\n"),
+            "reads a secret or the token"));
+    broken.put(
+        "the token",
+        new WormCase(
+            inWormJob(
+                ci,
+                "    env:\n      REGPACK_PG_URL",
+                "    env:\n      GITHUB_TOKEN: x\n      REGPACK_PG_URL"),
+            "reads a secret or the token"));
+    broken.put(
+        "a password",
+        new WormCase(
+            inWormJob(ci, accessKey, accessKey + "      S3_PASSWORD: x\n"), "names a password"));
+    broken.put(
+        "continue-on-error on the S3 step",
+        new WormCase(
+            inWormJob(ci, s3, s3 + "        continue-on-error: true\n"),
+            "a failure may be tolerated"));
+    broken.put(
+        "continue-on-error on the PostgreSQL step",
+        new WormCase(
+            inWormJob(ci, pg, pg + "        continue-on-error: true\n"),
+            "a failure may be tolerated"));
+    broken.put(
+        "continue-on-error on the job",
+        new WormCase(
+            inWormJob(
+                ci,
+                "    timeout-minutes: 40\n",
+                "    timeout-minutes: 40\n    continue-on-error: true\n"),
+            "a failure may be tolerated"));
+    broken.put(
+        "a job-level condition",
+        new WormCase(
+            inWormJob(ci, RUNS_ON_LINE, "    if: false\n" + RUNS_ON_LINE),
+            "the job may be skipped"));
+    broken.put(
+        "a step condition other than always",
+        new WormCase(inWormJob(ci, s3, "        if: false\n" + s3), "a step may be skipped"));
+    broken.put(
+        "a swallowed failure",
+        new WormCase(inWormJob(ci, "exit 1\n", "exit 1 || true\n"), "a failure is swallowed"));
+    broken.put(
+        "a docker verb",
+        new WormCase(
+            inWormJob(ci, "            sleep 2\n", "            docker ps\n"), "a docker command"));
+    broken.put(
+        "sudo",
+        new WormCase(
+            inWormJob(ci, "            sleep 2\n", "            sudo sleep 2\n"),
+            "sudo in the job"));
+    broken.put(
+        "a privileged container",
+        new WormCase(
+            inWormJob(
+                ci,
+                "          - 127.0.0.1:8000:8000\n",
+                "          - 127.0.0.1:8000:8000\n        options: --privileged\n"),
+            "a privileged container"));
+    broken.put(
+        "an S3 image without a digest",
+        new WormCase(
+            inWormJob(ci, "@sha256:" + CiWormJob.IMAGE.split("@sha256:")[1], ""),
+            "an image without a digest"));
+    broken.put(
+        "a PostgreSQL image without a digest",
+        new WormCase(
+            inWormJob(ci, "@sha256:" + CiWormJob.PG_IMAGE.split("@sha256:")[1], ""),
+            "an image without a digest"));
+    broken.put(
+        "a published S3 port on all interfaces",
+        new WormCase(
+            inWormJob(ci, "- 127.0.0.1:8000:8000", "- 8000:8000"),
+            "a port not published on 127.0.0.1 only"));
+    broken.put(
+        "a published PostgreSQL port on all interfaces",
+        new WormCase(
+            inWormJob(ci, "- 127.0.0.1:5432:5432", "- 5432:5432"),
+            "a port not published on 127.0.0.1 only"));
+    broken.put(
+        "a second port on all interfaces",
+        new WormCase(
+            inWormJob(
+                ci,
+                "          - 127.0.0.1:8000:8000\n",
+                "          - 127.0.0.1:8000:8000\n          - 9000:9000\n"),
+            "a port not published on 127.0.0.1 only"));
+    broken.put(
+        "another runner",
+        new WormCase(
+            inWormJob(ci, "runs-on: ubuntu-24.04", "runs-on: ubuntu-latest"),
+            "does not run on ubuntu-24.04"));
+    broken.put(
+        "the S3 service is not required",
+        new WormCase(
+            inWormJob(ci, "REGPACK_S3_REQUIRED: 'true'", "REGPACK_S3_REQUIRED: 'false'"),
+            "a missing service does not fail the job"));
+    broken.put(
+        "the PostgreSQL server is not required",
+        new WormCase(
+            inWormJob(ci, "REGPACK_PG_REQUIRED: 'true'", "REGPACK_PG_REQUIRED: 'false'"),
+            "a missing server does not fail the job"));
+    broken.put(
+        "tests skipped",
+        new WormCase(
+            inWormJob(ci, "-Dgroups=worm", "-Dgroups=worm -DskipITs"),
+            "a flag skips or ignores tests"));
+    broken.put(
+        "test failures ignored",
+        new WormCase(
+            inWormJob(ci, "-Dgroups=worm", "-Dgroups=worm -Dmaven.test.failure.ignore=true"),
+            "a flag skips or ignores tests"));
+    broken.put(
+        "a Maven property outside the approved set",
+        new WormCase(
+            inWormJob(ci, "-Dgroups=worm", "-Dgroups=worm -Dverbose=true"),
+            "a Maven property outside the approved set"));
+    broken.put(
+        "a changed S3 test selection",
+        new WormCase(
+            inWormJob(ci, "-Dit.test='Worm*IT'", "-Dit.test=NoSuchIT"),
+            "the S3 test step does not run exactly"));
+    broken.put(
+        "a changed PostgreSQL test selection",
+        new WormCase(
+            inWormJob(ci, "-Dit.test='PgWorm*IT'", "-Dit.test='PgWorm*'"),
+            "the PostgreSQL test step does not run exactly"));
+    broken.put(
+        "no S3 test step",
+        new WormCase(
+            inWormJob(ci, s3Step, ""),
+            "expected exactly one step 'P-WORM tests against the S3 service'"));
+    broken.put(
+        "no PostgreSQL test step",
+        new WormCase(
+            inWormJob(ci, pgStep, ""),
+            "expected exactly one step 'P-WORM tests with the PostgreSQL ledger'"));
+    broken.put(
+        "a second S3 test step",
+        new WormCase(inWormJob(ci, s3Step, s3Step + s3Step), "expected exactly one S3 test step"));
+    broken.put(
+        "a second PostgreSQL test step",
+        new WormCase(
+            inWormJob(ci, pgStep, pgStep + pgStep), "expected exactly one PostgreSQL test step"));
+    broken.put(
+        "a third verify line",
+        new WormCase(
+            inWormJob(ci, pg, pg + "      - run: ./mvnw verify -pl regpack-evidence-s3\n"),
+            "expected exactly three Maven lines"));
+    broken.put(
+        "an option in MAVEN_ARGS",
+        new WormCase(
+            ci.replace("MAVEN_ARGS: -B -ntp --strict-checksums", "MAVEN_ARGS: -B -ntp -fn"),
+            "MAVEN_ARGS"));
+    broken.put(
+        "another module verified in the S3 step",
+        new WormCase(
+            inWormJob(ci, "verify -pl regpack-evidence-s3", "verify -pl regpack-engine"),
+            "the S3 test step does not run exactly"));
+    broken.put(
+        "another module verified in the PostgreSQL step",
+        new WormCase(
+            inWormJob(ci, "verify -pl regpack-postgres", "verify -pl regpack-engine"),
+            "the PostgreSQL test step does not run exactly"));
+    broken.put(
+        "no -am on the install",
+        new WormCase(
+            inWormJob(
+                ci,
+                "install -pl regpack-evidence-s3,regpack-postgres -am",
+                "install -pl regpack-evidence-s3,regpack-postgres"),
+            "a Maven line " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "the install leaves out the PostgreSQL module",
+        new WormCase(
+            inWormJob(
+                ci,
+                "install -pl regpack-evidence-s3,regpack-postgres -am",
+                "install -pl regpack-evidence-s3 -am"),
+            "a Maven line " + CiWormJob.NOT_APPROVED));
+    // the conditions of the steps
+    broken.put(
+        "the PostgreSQL step without a condition",
+        new WormCase(
+            inWormJob(ci, CiWormJob.NOT_CANCELLED + "\n", ""),
+            "does not run when an earlier step fails"));
+    broken.put(
+        "the PostgreSQL step with always",
+        new WormCase(
+            inWormJob(ci, CiWormJob.NOT_CANCELLED + "\n", CiWormJob.ALWAYS + "\n"),
+            "does not run when an earlier step fails"));
+    broken.put(
+        "the PostgreSQL step with a false condition",
+        new WormCase(
+            inWormJob(ci, CiWormJob.NOT_CANCELLED + "\n", "        if: false\n"),
+            "a step may be skipped"));
+    broken.put(
+        "the S3 step with a condition",
+        new WormCase(
+            inWormJob(ci, s3, CiWormJob.NOT_CANCELLED + "\n" + s3),
+            "has a condition that is not approved for it"));
+    // the wait for the service
+    broken.put(
+        "no wait step",
+        new WormCase(
+            inWormJob(ci, wait, ""), "expected exactly one step 'Wait for the S3 service'"));
+    broken.put(
+        "a wait step of one attempt",
+        new WormCase(
+            inWormJob(ci, "seq 1 40", "seq 1 1"),
+            "the step 'Wait for the S3 service' " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "a wait step that always succeeds",
+        new WormCase(
+            inWormJob(ci, "          exit 1\n", "          exit 0\n"),
+            "the step 'Wait for the S3 service' " + CiWormJob.NOT_APPROVED));
+    // the traceability gate
+    broken.put(
+        "no traceability step",
+        new WormCase(
+            inWormJob(ci, traceability, ""),
+            "expected exactly one step 'Real-store traceability (P-WORM)'"));
+    broken.put(
+        "traceability without if always",
+        new WormCase(
+            inWormJob(ci, traceability, traceability.replace("        if: always()\n", "")),
+            "does not run when an earlier step fails"));
+    broken.put(
+        "traceability in another mode",
+        new WormCase(
+            inWormJob(ci, "--realstore worm", "--realstore all"),
+            "the step 'Real-store traceability (P-WORM)' " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "traceability without the PostgreSQL scan",
+        new WormCase(
+            inWormJob(ci, " --scan regpack-postgres/target --realstore worm", " --realstore worm"),
+            "the step 'Real-store traceability (P-WORM)' " + CiWormJob.NOT_APPROVED));
+    // the net under a failing run
+    broken.put(
+        "no annotation step",
+        new WormCase(inWormJob(ci, annotate, ""), "expected exactly one step 'Test tallies"));
+    broken.put(
+        "annotation without if always",
+        new WormCase(
+            inWormJob(ci, annotate, annotate.replace("        if: always()\n", "")),
+            "does not run when an earlier step fails"));
+    broken.put(
+        "annotation without the PostgreSQL scan",
+        new WormCase(
+            inWormJob(ci, annotate, annotate.replace(" --scan regpack-postgres/target", "")),
+            "the step 'Test tallies and failure annotations' " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "upload without if always",
+        new WormCase(
+            inWormJob(ci, upload, upload.replace("        if: always()\n", "")),
+            "does not run when an earlier step fails"));
+    broken.put(
+        "upload without the PostgreSQL reports",
+        new WormCase(
+            inWormJob(ci, "            regpack-postgres/target/failsafe-reports/TEST-*.xml\n", ""),
+            "the step 'Upload P-WORM test reports' " + CiWormJob.NOT_APPROVED));
+    // the text
+    broken.put(
+        "a step added",
+        new WormCase(
+            inWormJob(ci, upload, upload + "      - run: echo done\n"),
+            "a step outside the approved text"));
+    broken.put(
+        "a step moved before the install",
+        new WormCase(
+            inWormJob(
+                inWormJob(ci, wait, ""),
+                CiWormJob.INSTALL_LINE + "\n",
+                wait + CiWormJob.INSTALL_LINE + "\n"),
+            "runs before the step"));
+    broken.put(
+        "the PostgreSQL step before the S3 step",
+        new WormCase(
+            inWormJob(inWormJob(ci, pgStep, ""), s3Step, pgStep + s3Step), "runs before the step"));
+    broken.put(
+        "an unpinned action",
+        new WormCase(
+            inWormJob(
+                ci,
+                "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                "actions/checkout@v7"),
+            "expected exactly one step 'uses: actions/checkout"));
+    broken.put(
+        "another image tag with the same digest",
+        new WormCase(
+            inWormJob(ci, ":9.5.0@", ":9.5.1@"), "the services block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "another image digest",
+        new WormCase(
+            inWormJob(ci, "@sha256:652d", "@sha256:652e"),
+            "the services block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "another PostgreSQL image digest",
+        new WormCase(
+            inWormJob(ci, "@sha256:74935e", "@sha256:74935f"),
+            "the services block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "another service credential",
+        new WormCase(
+            inWormJob(
+                ci, "SCALITY_ACCESS_KEY_ID: REGPACKCIACCESSKEY1", "SCALITY_ACCESS_KEY_ID: OTHER"),
+            "the services block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "another endpoint",
+        new WormCase(
+            inWormJob(ci, "http://127.0.0.1:8000\n", "http://10.0.0.1:8000\n"),
+            "the env block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "another PostgreSQL user",
+        new WormCase(
+            inWormJob(ci, "?user=postgres\n", "?user=other\n"),
+            "the env block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "a one minute timeout",
+        new WormCase(
+            inWormJob(ci, "timeout-minutes: 40", "timeout-minutes: 1"),
+            "the header block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "a changed name",
+        new WormCase(
+            inWormJob(ci, "name: evidence P-WORM (S3", "name: evidence (S3"),
+            "the header block " + CiWormJob.NOT_APPROVED));
+    broken.put(
+        "a changed text that no other rule reads",
+        new WormCase(
+            inWormJob(
+                ci, "          if-no-files-found: warn\n", "          if-no-files-found: ignore\n"),
+            "the step 'Upload P-WORM test reports' " + CiWormJob.NOT_APPROVED));
+    assertThat(broken.size()).as("copies").isGreaterThanOrEqualTo(50);
+    for (java.util.Map.Entry<String, WormCase> copy : broken.entrySet()) {
+      assertThat(copy.getValue().ci()).as(copy.getKey()).isNotEqualTo(ci);
+      assertThat(CiWormJob.problems(copy.getValue().ci()))
+          .as(copy.getKey())
+          .anyMatch(p -> p.contains(copy.getValue().problem()));
+    }
+    // an edit of one character in a value that no rule reads is still found: the blocks are given
+    // word for word
+    assertThat(CiWormJob.problems(inWormJob(ci, "us-east-1", "us-west-1")))
+        .as("a region")
+        .isNotEmpty();
+  }
+
+  private static final String RUNS_ON_LINE = "    runs-on: ubuntu-24.04\n";
+
+  /** The workflow with the first {@code from} inside job evidence-worm replaced by {@code to}. */
+  private static String inWormJob(String ci, String from, String to) {
+    int job = ci.indexOf("\n  evidence-worm:\n");
+    assertThat(job).as("job evidence-worm").isNotNegative();
+    int at = ci.indexOf(from, job);
+    assertThat(at).as("text in job evidence-worm: " + from).isNotNegative();
+    return ci.substring(0, at) + to + ci.substring(at + from.length());
   }
 
   @Test

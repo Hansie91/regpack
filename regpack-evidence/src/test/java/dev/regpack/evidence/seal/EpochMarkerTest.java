@@ -256,6 +256,53 @@ class EpochMarkerTest {
             });
   }
 
+  /**
+   * A store whose {@code list} answers at most {@code cap} keys per call, however large the limit
+   * (a short page while keys remain), or, when {@code ignoreAfter} is set, answers from the start
+   * again whatever the {@code after} key is.
+   */
+  static EvidenceStore storeThatListsAtMost(EvidenceStore delegate, int cap, boolean ignoreAfter) {
+    return (EvidenceStore)
+        Proxy.newProxyInstance(
+            EvidenceStore.class.getClassLoader(),
+            new Class<?>[] {EvidenceStore.class},
+            (proxy, method, args) -> {
+              try {
+                if (method.getName().equals("list")) {
+                  Optional<?> after = ignoreAfter ? Optional.empty() : (Optional<?>) args[1];
+                  return method.invoke(delegate, args[0], after, Math.min(cap, (Integer) args[2]));
+                }
+                return method.invoke(delegate, args);
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
+  }
+
+  @Test
+  void aStoreThatAnswersInShortPagesIsReadToTheEnd() {
+    for (long epoch = 1; epoch <= 5; epoch++) {
+      marker.declare(epoch);
+    }
+    EpochMarker reader = new EpochMarker(storeThatListsAtMost(store, 3, false), FIVE_YEARS, clock);
+
+    // the old loop stopped at the first page that was shorter than 1,000 and answered 3
+    assertThat(reader.current()).isEqualTo(5);
+  }
+
+  @Test
+  void aListingThatDoesNotAdvanceFailsInsteadOfSpinning() {
+    marker.declare(1);
+    marker.declare(2);
+    EpochMarker reader =
+        new EpochMarker(storeThatListsAtMost(store, 1_000, true), FIVE_YEARS, clock);
+
+    assertThatThrownBy(reader::current)
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("evidence listing does not advance")
+        .hasMessageContaining("control/epoch/");
+  }
+
   @Test
   void aMarkerThatIsListedButGoneWhenItIsReadIsUnreadable() {
     marker.declare(5);

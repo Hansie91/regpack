@@ -188,7 +188,7 @@ class GatesTest {
 
     var bogus = run(append(base, "--realstore", "sometimes"));
     assertThat(bogus.rc()).isEqualTo(2);
-    assertThat(bogus.err()).contains("[--realstore all|skip|only|standby]");
+    assertThat(bogus.err()).contains("[--realstore all|skip|only|standby|worm]");
 
     // the mode reads the standby lines only: a passing one closes a due I1 row
     Path reports = repo.resolve("target/failsafe-reports");
@@ -216,6 +216,49 @@ class GatesTest {
         .containsExactly(
             "traceability: INFO REALSTORE_DEFERRED:I1",
             "traceability: OK rows=24 closed=0 open=24 deferred=1");
+  }
+
+  @Test
+  void wormModeIsParsedAndTheUsageNamesIt() throws IOException {
+    String file = table(true);
+    String[] base = {"traceability", "--file", file, "--root", repo.toString(), "--scan", "."};
+    var worm = run(append(base, "--realstore", "worm"));
+    assertThat(worm.rc()).isZero();
+    assertThat(worm.out().strip()).isEqualTo("traceability: OK rows=24 closed=0 open=24");
+
+    var bogus = run(append(base, "--realstore", "sometimes"));
+    assertThat(bogus.rc()).isEqualTo(2);
+    assertThat(bogus.err()).contains("[--realstore all|skip|only|standby|worm]");
+
+    // the mode reads the REALWORM lines only: a passing one closes a due I1 row
+    Path reports = repo.resolve("target/failsafe-reports");
+    Files.createDirectories(reports);
+    Files.writeString(
+        reports.resolve("TEST-a.B.xml"),
+        "<testsuite><testcase classname=\"a.B\" name=\"up\"/></testsuite>",
+        StandardCharsets.UTF_8);
+    StringBuilder md = new StringBuilder("exited_plans: P3\n\n");
+    for (int i = 1; i <= 24; i++) {
+      String id = i <= 14 ? "R" + i : "I" + (i - 14);
+      if (id.equals("I1")) {
+        md.append("| I1 | P3 | TEST | a.B#up | REALWORM | BUILD | n |\n");
+      } else {
+        md.append("| ").append(id).append(" | P9 | NONE | - | NA | NA | n |\n");
+      }
+    }
+    Files.writeString(repo.resolve("traceability.md"), md.toString(), StandardCharsets.UTF_8);
+    var closed = run(append(base, "--realstore", "worm"));
+    assertThat(closed.rc()).isZero();
+    assertThat(closed.out().strip()).isEqualTo("traceability: OK rows=24 closed=1 open=23");
+    // the build jobs (skip) do not read the line; the ledger job (only) does not either
+    var skip = run(append(base, "--realstore", "skip"));
+    assertThat(skip.out().lines().toList())
+        .containsExactly(
+            "traceability: INFO REALSTORE_DEFERRED:I1",
+            "traceability: OK rows=24 closed=0 open=24 deferred=1");
+    var only = run(append(base, "--realstore", "only"));
+    assertThat(only.rc()).isEqualTo(1);
+    assertThat(only.out()).contains("traceability: PROBLEM ROW_WITHOUT_EVIDENCE:I1");
   }
 
   @Test

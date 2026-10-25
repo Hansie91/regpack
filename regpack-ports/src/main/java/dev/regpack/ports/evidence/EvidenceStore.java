@@ -173,8 +173,11 @@ public interface EvidenceStore {
   Optional<StoredObject> get(EvidenceKey key);
 
   /**
-   * Keys that start with {@code prefix} and sort after {@code after}, in UTF-16 code-unit order, at
-   * most {@code limit}.
+   * Keys that start with {@code prefix} and sort after {@code after}, in UTF-16 code-unit order.
+   * The answer holds the first {@code min(limit, n)} such keys, {@code n} being the number of keys
+   * that match: a full page while keys remain, so an answer shorter than {@code limit} means that
+   * no key remains. An adapter that cannot fill a page from one request issues more requests; it
+   * never answers short while keys remain.
    */
   List<EvidenceKey> list(String prefix, Optional<EvidenceKey> after, int limit);
 

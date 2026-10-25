@@ -34,7 +34,8 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
     CASE_FOLDED_KEYS,
     LIST_IGNORES_AFTER,
     SILENT_MISSING_KEY,
-    ACCEPT_ANY_RETAIN_UNTIL
+    ACCEPT_ANY_RETAIN_UNTIL,
+    SHORT_PAGES
   }
 
   private final Clock clock;
@@ -120,9 +121,11 @@ public final class InMemoryEvidenceStore implements EvidenceStore {
       throw new IllegalArgumentException("limit must not be negative");
     }
     List<EvidenceKey> result = new ArrayList<>();
+    // test double only: the deliberate flaw SHORT_PAGES answers at most max(1, limit / 2) keys
+    int cap = flaw == Flaw.SHORT_PAGES ? Math.min(limit, Math.max(1, limit / 2)) : limit;
     synchronized (lock) {
       for (var entry : objects.tailMap(prefix, true).entrySet()) {
-        if (result.size() >= limit || !entry.getKey().startsWith(prefix)) {
+        if (result.size() >= cap || !entry.getKey().startsWith(prefix)) {
           break;
         }
         // test double only: deliberate flaw for ContractSuiteTeethTest

@@ -10,6 +10,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -738,6 +741,450 @@ class TraceabilityCheckTest {
     assertThat(skip.closed()).isEqualTo(1);
   }
 
+  // ---------------------------------------------------------------- REALWORM (P3b2, T6)
+
+  private static String realWorm(String id, String ref) {
+    return line(id, "P3", ref, "REALWORM");
+  }
+
+  @Test
+  void realWormLinesAreIgnoredInSkipOnlyAndStandbyModes() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    // a REALWORM line that cites a missing test is not looked up in SKIP, ONLY or STANDBY
+    // and the passing line of the mode's own label closes the row
+    Map<TraceabilityCheck.Mode, String> own =
+        Map.of(
+            TraceabilityCheck.Mode.SKIP, realFiles("I1", "a.B#it"),
+            TraceabilityCheck.Mode.ONLY, realStore("I1", "a.B#it"),
+            TraceabilityCheck.Mode.STANDBY, realStandby("I1", "a.B#it"));
+    for (var entry : own.entrySet()) {
+      var result =
+          check(
+              new Table().exited("P3").set("I1", realWorm("I1", "x.Y#nowhere"), entry.getValue()),
+              entry.getKey());
+      assertThat(result.problems()).as(entry.getKey().name()).isEmpty();
+      assertThat(result.deferred()).as(entry.getKey().name()).isEmpty();
+      assertThat(result.closed()).as(entry.getKey().name()).isEqualTo(1);
+    }
+    // SKIP defers a due row whose only non-interim line is a REALWORM line
+    for (String id : List.of("I1", "I2", "I9", "I10")) {
+      var deferred =
+          check(
+              new Table().exited("P3").set(id, realWorm(id, "x.Y#nowhere"), inMemory(id, "a.B#it")),
+              TraceabilityCheck.Mode.SKIP);
+      assertThat(deferred.problems()).as(id).isEmpty();
+      assertThat(deferred.deferred()).as(id).containsExactly("REALSTORE_DEFERRED:" + id);
+      assertThat(deferred.closed()).as(id).isZero();
+    }
+    // ONLY needs a REALSTORE line for I1, STANDBY has no REALSTANDBY line: a REALWORM line is
+    // neither
+    var only =
+        check(
+            new Table().exited("P3").set("I1", realWorm("I1", "a.B#it")),
+            TraceabilityCheck.Mode.ONLY);
+    assertThat(only.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I1");
+    var standby =
+        check(
+            new Table().exited("P3").set("I1", realWorm("I1", "a.B#it")),
+            TraceabilityCheck.Mode.STANDBY);
+    assertThat(standby.problems()).isEmpty();
+    assertThat(standby.closed()).isZero();
+  }
+
+  @Test
+  void realWormLinesAreEvaluatedOnlyInAllAndWormModes() throws IOException {
+    report(
+        "<testcase classname=\"a.B\" name=\"worm()\"/>"
+            + "<testcase classname=\"a.B\" name=\"bad\"><failure/></testcase>");
+    // WORM does not look at the other labels
+    var passed =
+        check(
+            new Table()
+                .exited("P3")
+                .set(
+                    "I1",
+                    realWorm("I1", "a.B#worm"),
+                    realStore("I1", "x.Y#nowhere"),
+                    realFiles("I1", "x.Y#nowhere"),
+                    realStandby("I1", "x.Y#nowhere"),
+                    inMemory("I1", "x.Y#nowhere")),
+            TraceabilityCheck.Mode.WORM);
+    assertThat(passed.problems()).isEmpty();
+    assertThat(passed.closed()).isEqualTo(1);
+    assertThat(passed.deferred()).isEmpty();
+
+    var failed =
+        check(
+            new Table().exited("P3").set("I1", realWorm("I1", "a.B#bad")),
+            TraceabilityCheck.Mode.WORM);
+    assertThat(failed.problems()).contains("NOT_PASSING:I1:a.B#bad", "ROW_WITHOUT_EVIDENCE:I1");
+    var missing =
+        check(
+            new Table().exited("P3").set("I10", realWorm("I10", "a.B#gone")),
+            TraceabilityCheck.Mode.WORM);
+    assertThat(missing.problems())
+        .contains("ARTEFACT_MISSING:I10:a.B#gone", "ROW_WITHOUT_EVIDENCE:I10");
+
+    // mode ALL evaluates the line as well, and a passing one closes the row
+    var all = check(new Table().exited("P3").set("I1", realWorm("I1", "a.B#gone")));
+    assertThat(all.problems()).contains("ARTEFACT_MISSING:I1:a.B#gone");
+    var allPassed = check(new Table().exited("P3").set("I1", realWorm("I1", "a.B#worm")));
+    assertThat(allPassed.problems()).isEmpty();
+    assertThat(allPassed.closed()).isEqualTo(1);
+  }
+
+  @Test
+  void aDueI1OrI10RowWithoutAPassedRealWormLineIsAProblemInWormMode() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    for (String id : List.of("I1", "I10")) {
+      var none =
+          check(
+              new Table().exited("P3").set(id, Table.line(id, "P3", "NONE", "-", "NA", "NA")),
+              TraceabilityCheck.Mode.WORM);
+      assertThat(none.problems()).as(id + " none").containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+      // the other labels do not stand in for it
+      var others =
+          check(
+              new Table()
+                  .exited("P3")
+                  .set(
+                      id,
+                      realStore(id, "a.B#it"),
+                      realFiles(id, "a.B#it"),
+                      realStandby(id, "a.B#it"),
+                      inMemory(id, "a.B#it")),
+              TraceabilityCheck.Mode.WORM);
+      assertThat(others.problems())
+          .as(id + " others")
+          .containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+      assertThat(others.closed()).as(id + " others").isZero();
+      var passed =
+          check(
+              new Table().exited("P3").set(id, realWorm(id, "a.B#it")),
+              TraceabilityCheck.Mode.WORM);
+      assertThat(passed.problems()).as(id + " passed").isEmpty();
+      assertThat(passed.closed()).as(id + " passed").isEqualTo(1);
+    }
+  }
+
+  @Test
+  void aRowThatIsNotDueIsNeverAProblemInWormMode() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    for (String id : List.of("I1", "I10")) {
+      var empty =
+          check(
+              new Table().exited("none").set(id, Table.line(id, "P3", "NONE", "-", "NA", "NA")),
+              TraceabilityCheck.Mode.WORM);
+      assertThat(empty.problems()).as(id + " empty").isEmpty();
+      assertThat(empty.open()).as(id + " empty").isEqualTo(24);
+      var withLine =
+          check(
+              new Table().exited("none").set(id, realWorm(id, "a.B#it")),
+              TraceabilityCheck.Mode.WORM);
+      assertThat(withLine.problems()).as(id + " line").isEmpty();
+      assertThat(withLine.closed()).as(id + " line").isZero();
+      assertThat(withLine.open()).as(id + " line").isEqualTo(24);
+    }
+  }
+
+  @Test
+  void realWormCountsOnlyForI1AndI10() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    for (String id : List.of("I1", "I10")) {
+      for (TraceabilityCheck.Mode mode :
+          List.of(TraceabilityCheck.Mode.ALL, TraceabilityCheck.Mode.WORM)) {
+        var result =
+            check(
+                new Table().exited("P3,P4").set(id, line(id, "P3,P4", "a.B#it", "REALWORM")), mode);
+        assertThat(result.problems()).as(id + " " + mode).isEmpty();
+        assertThat(result.closed()).as(id + " " + mode).isEqualTo(1);
+      }
+    }
+    // an ordinary row and the other real-store rows: the line never counts; WORM leaves a due row
+    // open, ALL reports it
+    for (String id : List.of("R4", "R12", "I2", "I9")) {
+      var all = check(new Table().exited("P3,P4").set(id, line(id, "P3,P4", "a.B#it", "REALWORM")));
+      assertThat(all.problems()).as(id + " all").containsExactly("ROW_WITHOUT_EVIDENCE:" + id);
+      assertThat(all.closed()).as(id + " all").isZero();
+      var worm =
+          check(
+              new Table().exited("P3,P4").set(id, line(id, "P3,P4", "a.B#it", "REALWORM")),
+              TraceabilityCheck.Mode.WORM);
+      assertThat(worm.problems()).as(id + " worm").isEmpty();
+      assertThat(worm.closed()).as(id + " worm").isZero();
+      assertThat(worm.open()).as(id + " worm").isEqualTo(24);
+    }
+  }
+
+  @Test
+  void anI2RowWithOnlyARealWormLineStaysInterim() throws IOException {
+    report("<testcase classname=\"a.B\" name=\"it()\"/>");
+    String worm = realWorm("I2", "a.B#it");
+    var notDue = check(new Table().set("I2", worm).exited("none"), TraceabilityCheck.Mode.SKIP);
+    assertThat(notDue.problems()).isEmpty();
+    assertThat(notDue.open()).isEqualTo(24);
+    assertThat(notDue.closed()).isZero();
+    var due = check(new Table().exited("P3").set("I2", worm));
+    assertThat(due.problems()).containsExactly("ROW_WITHOUT_EVIDENCE:I2");
+    assertThat(due.closed()).isZero();
+    // the build jobs defer it, the worm job leaves it open
+    var skip = check(new Table().exited("P3").set("I2", worm), TraceabilityCheck.Mode.SKIP);
+    assertThat(skip.problems()).isEmpty();
+    assertThat(skip.deferred()).containsExactly("REALSTORE_DEFERRED:I2");
+    var wormMode = check(new Table().exited("P3").set("I2", worm), TraceabilityCheck.Mode.WORM);
+    assertThat(wormMode.problems()).isEmpty();
+    assertThat(wormMode.closed()).isZero();
+    assertThat(wormMode.open()).isEqualTo(24);
+  }
+
+  @Test
+  void aSkippedTestNeverCountsForRealWorm() throws IOException {
+    report(
+        "<testcase classname=\"a.B\" name=\"it()\"><skipped message=\"no service\"/></testcase>");
+    for (TraceabilityCheck.Mode mode :
+        List.of(TraceabilityCheck.Mode.ALL, TraceabilityCheck.Mode.WORM)) {
+      for (String id : List.of("I1", "I10")) {
+        var result = check(new Table().exited("P3").set(id, realWorm(id, "a.B#it")), mode);
+        assertThat(result.problems())
+            .as(id + " " + mode)
+            .contains("NOT_PASSING:" + id + ":a.B#it", "ROW_WITHOUT_EVIDENCE:" + id);
+        assertThat(result.closed()).as(id + " " + mode).isZero();
+      }
+    }
+  }
+
+  @Test
+  void realWormLineOfAFakeBackedClassIsAProblem() throws IOException {
+    String fake = "dev.regpack.evidence.s3.WormEvidenceStoreContractTest";
+    report(
+        "<testcase classname=\""
+            + fake
+            + "\" name=\"it()\"/><testcase classname=\"a.B\" name=\"it()\"/>");
+    // the fake is never REALWORM evidence, even when the test passes and in every mode
+    for (TraceabilityCheck.Mode mode : TraceabilityCheck.Mode.values()) {
+      var result = check(new Table().exited("P3").set("I1", realWorm("I1", fake + "#it")), mode);
+      assertThat(result.problems())
+          .as(mode.name())
+          .contains("REALWORM_FAKE_BACKED:I1:" + fake + "#it");
+    }
+    var worm =
+        check(
+            new Table().exited("P3").set("I1", realWorm("I1", fake + "#it")),
+            TraceabilityCheck.Mode.WORM);
+    assertThat(worm.closed()).isZero();
+    // a class that does not end in Test is not flagged by the table check
+    var integration =
+        check(
+            new Table().exited("P3").set("I1", realWorm("I1", "a.B#it")),
+            TraceabilityCheck.Mode.WORM);
+    assertThat(integration.problems()).isEmpty();
+  }
+
+  /** The repository root: the nearest directory above the working directory with the table. */
+  private static Path repositoryRoot() {
+    Path dir = Path.of("").toAbsolutePath();
+    while (dir != null && !Files.isRegularFile(dir.resolve("docs/traceability.md"))) {
+      dir = dir.getParent();
+    }
+    assertThat(dir).as("repository root with docs/traceability.md").isNotNull();
+    return dir;
+  }
+
+  private static Optional<Path> sourceOf(Path root, String qualifiedName) throws IOException {
+    String suffix = "/" + qualifiedName.replace('.', '/') + ".java";
+    try (var files = Files.walk(root)) {
+      return files
+          .filter(Files::isRegularFile)
+          .filter(
+              p -> {
+                String s = root.relativize(p).toString().replace('\\', '/');
+                return !s.startsWith(".git/")
+                    && !s.contains("/target/")
+                    && !s.contains("node_modules/")
+                    && ("/" + s).endsWith(suffix);
+              })
+          .findFirst();
+    }
+  }
+
+  private static boolean declaresMethod(Path root, Path file, String method, int depth)
+      throws IOException {
+    String text = Files.readString(file, StandardCharsets.UTF_8);
+    if (Pattern.compile("\\bvoid\\s+" + Pattern.quote(method) + "\\s*\\(").matcher(text).find()) {
+      return true;
+    }
+    if (depth == 0) {
+      return false;
+    }
+    Path module = root.resolve(root.relativize(file).getName(0));
+    List<Path> places =
+        List.of(
+            module.resolve("src/test/java"),
+            module.resolve("src/main/java"),
+            root.resolve("regpack-testkit/src/main/java"));
+    for (String supertype : supertypesOf(text)) {
+      String name = supertype + ".java";
+      for (Path place : places) {
+        if (!Files.isDirectory(place)) {
+          continue;
+        }
+        try (var files = Files.walk(place)) {
+          Optional<Path> found =
+              files.filter(p -> p.getFileName().toString().equals(name)).findFirst();
+          if (found.isPresent() && declaresMethod(root, found.get(), method, depth - 1)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The simple names after {@code extends} and {@code implements} in the header of the first class
+   * or interface of a source (type arguments dropped), so that a method that comes from a shared
+   * contract interface, as the P-WORM suites inherit theirs, is found as well as one from a base
+   * class.
+   */
+  private static List<String> supertypesOf(String text) {
+    // a declaration starts its line (after modifiers), so the words of a comment do not match
+    Matcher header =
+        Pattern.compile(
+                "^[ \\t]*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\\s+)*"
+                    + "(?:class|interface)\\s+\\w+([^{;]*)\\{",
+                Pattern.MULTILINE)
+            .matcher(text);
+    List<String> names = new ArrayList<>();
+    if (!header.find()) {
+      return names;
+    }
+    String clause = header.group(1);
+    String previous;
+    do {
+      previous = clause;
+      clause = clause.replaceAll("<[^<>]*>", "");
+    } while (!clause.equals(previous));
+    Matcher parts =
+        Pattern.compile(
+                "\\b(extends|implements|permits)\\s+(.*?)(?=\\b(?:extends|implements|permits)\\b|$)",
+                Pattern.DOTALL)
+            .matcher(clause);
+    while (parts.find()) {
+      if (parts.group(1).equals("permits")) {
+        continue;
+      }
+      for (String piece : parts.group(2).split(",")) {
+        String simple = piece.strip();
+        simple = simple.substring(simple.lastIndexOf('.') + 1);
+        if (!simple.isEmpty()) {
+          names.add(simple);
+        }
+      }
+    }
+    return names;
+  }
+
+  /** The problems of the REALWORM lines of a table with respect to the sources under the root. */
+  private static List<String> realWormSourceProblems(String markdown, Path root)
+      throws IOException {
+    List<String> problems = new ArrayList<>();
+    for (String raw : markdown.split("\\R")) {
+      String text = raw.strip();
+      if (!text.startsWith("|")) {
+        continue;
+      }
+      String[] cells = text.substring(1).split("\\|", -1);
+      if (cells.length < 5
+          || !cells[4].strip().equals("REALWORM")
+          || !cells[2].strip().equals("TEST")) {
+        continue;
+      }
+      String ref = cells[3].strip();
+      int hash = ref.indexOf('#');
+      String type = hash < 0 ? ref : ref.substring(0, hash);
+      String method = hash < 0 ? "" : ref.substring(hash + 1).replaceAll("\\(\\)$", "");
+      if (!type.substring(type.lastIndexOf('.') + 1).endsWith("IT")) {
+        problems.add("NOT_AN_IT:" + ref);
+      }
+      Optional<Path> source = sourceOf(root, type);
+      if (source.isEmpty()) {
+        problems.add("NO_SOURCE:" + ref);
+        continue;
+      }
+      if (!Files.readString(source.get(), StandardCharsets.UTF_8).contains("@Tag(\"worm\")")) {
+        problems.add("NO_WORM_TAG:" + ref);
+      }
+      if (!declaresMethod(root, source.get(), method, 10)) {
+        problems.add("NO_METHOD:" + ref);
+      }
+    }
+    return problems;
+  }
+
+  @Test
+  void everyRealWormLineNamesATestMethodThatExistsInTheSources() throws IOException {
+    // the helper has teeth: each fault of a synthetic table is found, a sound line is not
+    write(
+        "regpack-x/src/test/java/a/GoodIT.java",
+        "package a;\n@Tag(\"worm\")\nclass GoodIT extends BaseContract { @Test void own() {} }\n");
+    write(
+        "regpack-x/src/test/java/a/BaseContract.java",
+        "package a;\nabstract class BaseContract { @Test void inherited() {} }\n");
+    write(
+        "regpack-x/src/test/java/a/UntaggedIT.java",
+        "package a;\nclass UntaggedIT { @Test void own() {} }\n");
+    write(
+        "regpack-x/src/test/java/a/FakeTest.java",
+        "package a;\n@Tag(\"worm\")\nclass FakeTest { @Test void own() {} }\n");
+    write(
+        "regpack-y/src/test/java/a/OtherIT.java",
+        "package a;\n@Tag(\"worm\")\nclass OtherIT extends BaseContract { }\n");
+    // a method that comes from an interface, directly or through an abstract base (the shape of
+    // the P-WORM suites: an abstract class implements the shared contracts of regpack-testkit)
+    write(
+        "regpack-x/src/test/java/a/Shape.java",
+        "package a;\ninterface Shape { default void fromInterface() {} }\n");
+    write(
+        "regpack-x/src/test/java/a/Other.java",
+        "package a;\ninterface Other<T> extends Shape { default void fromOther() {} }\n");
+    write(
+        "regpack-x/src/test/java/a/AbstractViaInterface.java",
+        "package a;\nabstract class AbstractViaInterface implements Comparable<String>, Other<String>"
+            + " { }\n");
+    write(
+        "regpack-x/src/test/java/a/ViaInterfaceIT.java",
+        "package a;\n@Tag(\"worm\")\nclass ViaInterfaceIT extends AbstractViaInterface { }\n");
+    Table fixture =
+        new Table()
+            .exited("P3")
+            .set(
+                "I1",
+                realWorm("I1", "a.GoodIT#own"),
+                realWorm("I1", "a.GoodIT#inherited"),
+                realWorm("I1", "a.GoodIT#missing"),
+                realWorm("I1", "a.UntaggedIT#own"),
+                realWorm("I1", "a.FakeTest#own"),
+                realWorm("I1", "a.NoSuchIT#own"),
+                realWorm("I1", "a.OtherIT#inherited"),
+                realWorm("I1", "a.ViaInterfaceIT#fromOther"),
+                realWorm("I1", "a.ViaInterfaceIT#fromInterface"),
+                realWorm("I1", "a.ViaInterfaceIT#missingInTheInterfaces"),
+                realStore("I1", "a.NoSuchClass#ignored"));
+    assertThat(realWormSourceProblems(fixture.render(), repo))
+        .containsExactly(
+            "NO_METHOD:a.GoodIT#missing",
+            "NO_WORM_TAG:a.UntaggedIT#own",
+            "NOT_AN_IT:a.FakeTest#own",
+            "NO_SOURCE:a.NoSuchIT#own",
+            "NO_METHOD:a.OtherIT#inherited",
+            "NO_METHOD:a.ViaInterfaceIT#missingInTheInterfaces");
+
+    // the real table: vacuous until the REALWORM lines of T10 and T11 exist
+    Path root = repositoryRoot();
+    String table = Files.readString(root.resolve("docs/traceability.md"), StandardCharsets.UTF_8);
+    assertThat(realWormSourceProblems(table, root)).isEmpty();
+  }
+
   @Test
   void planPatternAcceptsP3aToP3d() {
     String line = Table.line("R1", "P3a,P3d", "NONE", "-", "NA", "NA");
@@ -768,12 +1215,14 @@ class TraceabilityCheckTest {
                 "I1",
                 realFiles("I1", "a.B#files"),
                 realStandby("I1", "a.B#standby"),
+                realWorm("I1", "a.B#worm"),
                 realStore("I1", "a.B#it"));
     var allLabels = TraceabilityCheck.check(labels.render(), repo, List.of(repo));
     assertThat(allLabels.problems())
         .contains(
             "ARTEFACT_MISSING:I1:a.B#files",
             "ARTEFACT_MISSING:I1:a.B#standby",
+            "ARTEFACT_MISSING:I1:a.B#worm",
             "ARTEFACT_MISSING:I1:a.B#it");
     assertThat(allLabels).isEqualTo(check(labels, TraceabilityCheck.Mode.ALL));
     var fourArguments = new TraceabilityCheck.Result(List.of("p"), 1, 2, 3);
