@@ -1,6 +1,7 @@
 package dev.regpack.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.charset.CharacterCodingException;
@@ -10,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Static checks of the packaging files under {@code packaging/}; no service is installed. */
 class PackagingFilesTest {
@@ -1631,6 +1633,58 @@ class PackagingFilesTest {
     // the image references are a name, a tag and a full digest
     assertThat(CiWormJob.IMAGE).matches("[a-z0-9./-]+:[0-9A-Za-z._-]+@sha256:[0-9a-f]{64}");
     assertThat(CiWormJob.PG_IMAGE).matches("[a-z0-9./-]+:[0-9A-Za-z._-]+@sha256:[0-9a-f]{64}");
+  }
+
+  private static final String RECORDED_V2_PIN = "approved-job-v2-sha256: ";
+
+  /**
+   * The hash that {@code docs/evidence/p3b2-decisions.md} records as approved by the owner for the
+   * job text (version 2): the value of the one line that starts with {@code approved-job-v2-sha256:
+   * }. Nothing else of the file is read into the result.
+   */
+  private static String recordedWormJobHash(Path decisions) throws IOException {
+    List<String> lines =
+        Files.readAllLines(decisions, StandardCharsets.UTF_8).stream()
+            .filter(line -> line.startsWith(RECORDED_V2_PIN))
+            .toList();
+    assertThat(lines).as("lines of %s that record the approved job hash", decisions).hasSize(1);
+    return lines.get(0).substring(RECORDED_V2_PIN.length()).strip();
+  }
+
+  /**
+   * The pin of the job text in {@link CiWormJob} is the hash the owner approved (AP-3: a yes covers
+   * only the text shown), as the decisions record holds it. A change of the job that recomputes the
+   * pin here is then also a change of the record, which exists only after a new approval.
+   */
+  @Test
+  void theWormJobPinIsTheHashTheDecisionsRecordHoldsAsApproved(@TempDir Path temp)
+      throws IOException {
+    Path decisions = repoRoot().resolve("docs/evidence/p3b2-decisions.md");
+    assertThat(recordedWormJobHash(decisions)).isEqualTo(CiWormJob.APPROVED_SHA256);
+
+    // teeth: a record with another hash on that line is told apart from the pin
+    String other = "0".repeat(64);
+    Path changed = temp.resolve("changed.md");
+    Files.writeString(
+        changed,
+        RECORDED_V2_PIN + other + "\nthe other lines are not read\n",
+        StandardCharsets.UTF_8);
+    assertThat(recordedWormJobHash(changed))
+        .isEqualTo(other)
+        .isNotEqualTo(CiWormJob.APPROVED_SHA256);
+    // a record without the line, or with it twice, is not a record of the approved hash
+    Path missing = temp.resolve("missing.md");
+    Files.writeString(
+        missing,
+        "approved-job-v1-sha256: " + CiWormJob.APPROVED_SHA256 + "\n",
+        StandardCharsets.UTF_8);
+    assertThatThrownBy(() -> recordedWormJobHash(missing)).isInstanceOf(AssertionError.class);
+    Path twice = temp.resolve("twice.md");
+    Files.writeString(
+        twice,
+        (RECORDED_V2_PIN + CiWormJob.APPROVED_SHA256 + "\n").repeat(2),
+        StandardCharsets.UTF_8);
+    assertThatThrownBy(() -> recordedWormJobHash(twice)).isInstanceOf(AssertionError.class);
   }
 
   /** One way of neutering the worm job: the workflow and the fragment a problem must name. */

@@ -16,6 +16,7 @@ import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
+import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -64,11 +65,16 @@ class WormSealScenariosTest extends AbstractWormSealTest {
   }
 
   /**
-   * An end-to-end check of the adapter's paging for the caller that fails open on a short page: the
-   * fake lists two entries per page, the marker of the highest epoch lies behind five full pages of
-   * the listing, and the send of a token of that epoch is cleared only if {@code
-   * EpochMarker.current()} found it (a stale lower epoch would be {@code EPOCH_MARKER_DIFFERS}).
-   * The teeth for the caller itself are those of {@code EpochMarkerTest} (T5).
+   * Shows that the caller finds the highest epoch marker over a store whose service pages: the fake
+   * lists two entries per page, the marker of the highest epoch lies behind five full pages of the
+   * listing, and the send of a token of that epoch is cleared only if {@code EpochMarker.current()}
+   * found it (a stale lower epoch would be {@code EPOCH_MARKER_DIFFERS}). {@code
+   * EpochMarker.current()} reads to an empty page, so this does not show the adapter's own paging:
+   * that the adapter answers a full page over short service pages is shown by the explicit check
+   * below (the adapter's {@code list} of the epoch markers returns the ten keys asked for under the
+   * fault) and by {@code listFollowsTheMarkersUntilThePageIsFull} and {@code
+   * aKeyWhoseEntriesSpanPagesIsCountedOnce}. The teeth for the caller itself are those of {@code
+   * EpochMarkerTest} (T5).
    */
   @Test
   void aMarkerBehindTheAdaptersPagingIsFound() {
@@ -87,6 +93,8 @@ class WormSealScenariosTest extends AbstractWormSealTest {
     for (long epoch = 1; epoch <= 12; epoch++) {
       marker.declare(epoch);
     }
+    // the adapter's own paging: ten keys asked for, ten answered, over pages of two entries
+    assertThat(evidence().list("control/epoch/", Optional.empty(), 10)).hasSize(10);
     int before = backend().server().requestLines().size();
 
     assertThat(marker.current()).isEqualTo(12);

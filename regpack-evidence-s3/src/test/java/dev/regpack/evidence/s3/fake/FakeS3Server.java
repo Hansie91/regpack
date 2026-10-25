@@ -27,6 +27,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -228,6 +229,7 @@ public final class FakeS3Server implements AutoCloseable {
   private final Set<Fault> faults = EnumSet.noneOf(Fault.class);
   private final List<String> lines = new ArrayList<>();
   private final Map<String, byte[]> olderOnNextPut = new HashMap<>();
+  private final Set<String> rankedOldestOnNextPut = new HashSet<>();
   private long versionCounter;
 
   private FakeS3Server(HttpServer http, ExecutorService executor, Credentials credentials) {
@@ -347,6 +349,19 @@ public final class FakeS3Server implements AutoCloseable {
     synchronized (lock) {
       requireBucket(bucket);
       olderOnNextPut.put(bucket + "/" + key, bytes.clone());
+    }
+  }
+
+  /**
+   * The next PUT to that key is stored as the OLDEST version of the key, below the versions that
+   * are already there, as when the service ranks an upload first although it finished later (the
+   * rank is the server's, probe P13; the fake otherwise ranks by the order in which its lock admits
+   * the PUTs, so that it never shows this). Used up by that PUT.
+   */
+  public void rankNextPutBelowExisting(String bucket, String key) {
+    synchronized (lock) {
+      requireBucket(bucket);
+      rankedOldestOnNextPut.add(bucket + "/" + key);
     }
   }
 
@@ -750,7 +765,7 @@ public final class FakeS3Server implements AutoCloseable {
             metaOf(r),
             mode,
             until);
-    store(b, key, v, false);
+    store(b, key, v, rankedOldestOnNextPut.remove(bucketNameOf(b) + "/" + key));
     Version foreign = null;
     byte[] foreignBytes = olderOnNextPut.remove(bucketNameOf(b) + "/" + key);
     if (foreignBytes != null) {

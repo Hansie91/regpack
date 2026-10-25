@@ -413,6 +413,30 @@ class FakeS3ServerTest {
         .containsEntry(UNTIL_HEADER, UNTIL);
   }
 
+  @Test
+  void rankNextPutBelowExistingStoresThePutAsTheOldestVersionOnce() {
+    String bucket = bucket();
+    String first = client.putObject(bucket, "r/k", bytes("first"), Map.of()).orElseThrow();
+    server.rankNextPutBelowExisting(bucket, "r/k");
+    String ranked = client.putObject(bucket, "r/k", bytes("ranked"), Map.of()).orElseThrow();
+    // the PUT finished later and is listed as the oldest; the version that was there stays newest
+    assertThat(exactKey(bucket, "r/k"))
+        .extracting(VersionEntry::versionId)
+        .containsExactly(first, ranked);
+    assertThat(exactKey(bucket, "r/k"))
+        .extracting(VersionEntry::latest)
+        .containsExactly(true, false);
+    // the hook is used up by the PUT that met it, and applies to that key only
+    String other = client.putObject(bucket, "r/other", bytes("o"), Map.of()).orElseThrow();
+    String third = client.putObject(bucket, "r/k", bytes("third"), Map.of()).orElseThrow();
+    assertThat(exactKey(bucket, "r/k"))
+        .extracting(VersionEntry::versionId)
+        .containsExactly(third, first, ranked);
+    assertThat(exactKey(bucket, "r/other"))
+        .extracting(VersionEntry::versionId)
+        .containsExactly(other);
+  }
+
   // ---- properties of the fake
 
   @Test

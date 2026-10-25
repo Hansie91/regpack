@@ -85,8 +85,9 @@ interface S3BehaviourContract {
 
   /**
    * P7: a DELETE without a version id adds a delete marker (204, marker header) even under lock; a
-   * GET of the key then answers 404 {@code NoSuchKey}; the versions stay readable by id. Where the
-   * marker sits in the list is not asserted: the probe record cut that part.
+   * GET of the key then answers 404 {@code NoSuchKey}; the versions stay readable by id; and the
+   * marker is the first entry of the key's list and the latest one (the flag {@code mkFirst} of the
+   * probe record, CP-1), which is where the adapter looks for it.
    */
   @Test
   default void aDeleteWithoutAVersionAddsAMarkerEvenUnderLock() {
@@ -107,6 +108,8 @@ interface S3BehaviourContract {
     List<VersionEntry> entries = exactKey(bucket, "dm/k");
     assertThat(entries).hasSize(3);
     assertThat(entries.stream().filter(VersionEntry::deleteMarker)).hasSize(1);
+    assertThat(entries.get(0).deleteMarker()).as("the marker is the first entry").isTrue();
+    assertThat(entries.get(0).latest()).as("the marker is the latest entry").isTrue();
     assertThat(entries.stream().filter(e -> !e.deleteMarker()))
         .extracting(VersionEntry::versionId)
         .containsExactlyInAnyOrder(one, two);
@@ -338,7 +341,10 @@ interface S3BehaviourContract {
     assertThat(after.entries().get(0).key()).isEqualTo("lv/k10");
   }
 
-  /** P8: a key hidden by a delete marker stays in the version listing: marker and version. */
+  /**
+   * P8: a key hidden by a delete marker stays in the version listing: marker and version, the
+   * marker first and latest.
+   */
   @Test
   default void aKeyHiddenByAMarkerStaysInTheVersionListing() {
     String bucket = newBucket();
@@ -349,6 +355,8 @@ interface S3BehaviourContract {
     List<VersionEntry> entries = exactKey(bucket, "hk/k");
     assertThat(entries).hasSize(2);
     assertThat(entries.stream().filter(VersionEntry::deleteMarker)).hasSize(1);
+    assertThat(entries.get(0).deleteMarker()).as("the marker is the first entry").isTrue();
+    assertThat(entries.get(0).latest()).as("the marker is the latest entry").isTrue();
     assertThat(entries.stream().filter(e -> !e.deleteMarker()))
         .extracting(VersionEntry::versionId)
         .containsExactly(version);

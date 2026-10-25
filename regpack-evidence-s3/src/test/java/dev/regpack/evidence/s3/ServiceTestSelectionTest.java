@@ -20,7 +20,9 @@ import org.junit.jupiter.api.Test;
  * {@code evidence-worm} selects the real-service classes of this module with {@code
  * -Dit.test='Worm*IT'}; a pattern that matched nothing, matched a fake-backed {@code *Test} class
  * or missed a class would only show at the checkpoint. The integration tests themselves skip here
- * (no service), so this unit test is what shows locally that the selection is the four classes.
+ * (no service), so this unit test is what shows locally that the selection is the five classes. The
+ * method name still says four: it was four until {@code WormVersionsIT} was added, and the plan
+ * cites the name.
  */
 class ServiceTestSelectionTest {
   /** The pattern of the job step (the {@code -Dit.test} value), matched against the class name. */
@@ -32,12 +34,13 @@ class ServiceTestSelectionTest {
   private static final Pattern EXCLUDED_GROUPS =
       Pattern.compile("<excludedGroups>([^<]*)</excludedGroups>");
 
-  private static final List<String> FOUR =
+  private static final List<String> FIVE =
       List.of(
           "WormEvidenceStoreContractIT",
           "WormSealScenariosIT",
           "WormServiceBehaviourIT",
-          "WormVerifyIT");
+          "WormVerifyIT",
+          "WormVersionsIT");
 
   private static Path testSources() {
     return Path.of(System.getProperty("regpack.repo.root"))
@@ -85,13 +88,13 @@ class ServiceTestSelectionTest {
     Path root = testSources();
     List<String> all = allClasses(root);
 
-    // the pattern selects exactly the four service classes, among every class of the module
-    assertThat(selectedBy(WORM_PATTERN, all)).containsExactlyElementsOf(FOUR);
-    // the Worm*IT files of the module are exactly those four
+    // the pattern selects exactly the five service classes, among every class of the module
+    assertThat(selectedBy(WORM_PATTERN, all)).containsExactlyElementsOf(FIVE);
+    // the Worm*IT files of the module are exactly those five
     assertThat(classesEndingIn(root, "IT").stream().filter(n -> n.startsWith("Worm")).toList())
-        .containsExactlyElementsOf(FOUR);
+        .containsExactlyElementsOf(FIVE);
     // each is tagged worm, so that the group filter of the job and the exclusion elsewhere agree
-    for (String name : FOUR) {
+    for (String name : FIVE) {
       Path file;
       try (Stream<Path> files = Files.walk(root)) {
         file =
@@ -149,16 +152,16 @@ class ServiceTestSelectionTest {
         .contains("worm", "mutant", "capacity", "durability");
     // the selections of the two service classes do not overlap
     assertThat(selectedBy(WORM_PATTERN, two)).isEmpty();
-    assertThat(selectedBy(PG_WORM_PATTERN, FOUR)).isEmpty();
+    assertThat(selectedBy(PG_WORM_PATTERN, FIVE)).isEmpty();
   }
 
   @Test
   void theSelectionHasTeeth() {
     // a pattern that is too narrow, too wide or misspelt is seen
-    List<String> names = new ArrayList<>(FOUR);
+    List<String> names = new ArrayList<>(FIVE);
     names.add("WormEvidenceStoreContractTest");
     names.add("S3ServiceProbeIT");
-    assertThat(selectedBy("Worm*IT", names)).containsExactlyElementsOf(FOUR);
+    assertThat(selectedBy("Worm*IT", names)).containsExactlyElementsOf(FIVE);
     assertThat(selectedBy("Worm*", names)).contains("WormEvidenceStoreContractTest");
     assertThat(selectedBy("*IT", names)).contains("S3ServiceProbeIT");
     assertThat(selectedBy("Wor*IT", List.of("NoWormIT"))).isEmpty();

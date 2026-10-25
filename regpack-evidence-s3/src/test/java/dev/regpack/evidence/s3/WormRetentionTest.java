@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -217,6 +218,84 @@ class WormRetentionTest {
     mark = f.mark();
     f.store.get(plain);
     assertThat(f.kindsSince(mark)).containsExactly("versions", "GET");
+  }
+
+  /** A raw version that is a well-formed object of the adapter, with a lock of the given mode. */
+  private void putRawObjectLockedAs(String mode, Instant until) {
+    byte[] bytes = utf8("hello");
+    Map<String, String> headers = new TreeMap<>();
+    headers.put("x-amz-meta-regpack-sha256", Sha256.of(bytes).hex());
+    headers.put("x-amz-meta-regpack-written-at", "2040-03-01T00:00:00Z");
+    headers.put("x-amz-meta-regpack-retain-until", until.toString());
+    headers.put("x-amz-meta-regpack-class", base64url("landing"));
+    headers.put("x-amz-meta-regpack-media-type", base64url("text/plain"));
+    headers.put(LOCK_MODE, mode);
+    headers.put(LOCK_DATE, until.toString());
+    f.raw().putObject(f.bucket, K.path(), bytes, headers);
+  }
+
+  @Test
+  void anExtensionSendsTheLockModeTheVersionAlreadyHasNotTheModeOfTheConfiguration() {
+    // the store is configured for governance; the version was locked in compliance mode
+    putRawObjectLockedAs("COMPLIANCE", Y2045);
+    assertThat(retainUntilOf(K)).isEqualTo(Y2045);
+    int mark = f.mark();
+    f.store.extendRetention(K, Y2046);
+    assertThat(putsSince(mark)).containsExactly("retention", "tagging");
+    // a governance request over a compliance lock would have been refused, or would have changed
+    // the mode; the mode is the one the version had
+    assertThat(headOfOldest(K)).containsEntry(LOCK_MODE, "COMPLIANCE");
+    assertThat(lockOf(K)).isEqualTo(Y2046);
+    assertThat(retainUntilOf(K)).isEqualTo(Y2046);
+  }
+
+  @Test
+  void aTagOfAnotherWriterIsKeptWhenTheRetentionTagIsWritten() {
+    putAt(K, "hello", Y2045);
+    f.raw().putTags(f.bucket, K.path(), oldestVersionId(K), Map.of("owner", "operations"));
+    f.store.extendRetention(K, Y2046);
+    assertThat(tagsOf(K))
+        .containsOnly(Map.entry("owner", "operations"), Map.entry(TAG, Y2046.toString()));
+    assertThat(retainUntilOf(K)).isEqualTo(Y2046);
+  }
+
+  @Test
+  void theRetentionTagIsReplacedByASecondExtensionAndNotAdded() {
+    putAt(K, "hello", Y2045);
+    f.store.extendRetention(K, Y2046);
+    Instant later = Y2046.plusSeconds(3_600);
+    f.store.extendRetention(K, later);
+    assertThat(tagsOf(K)).containsExactly(Map.entry(TAG, later.toString()));
+    assertThat(lockOf(K)).isEqualTo(later);
+    assertThat(retainUntilOf(K)).isEqualTo(later);
+  }
+
+  @Test
+  void theWritePathReadsTheTagsWhateverTheCountHeaderOfTheGetSays() {
+    putAt(K, "hello", Y2045);
+    f.raw().putTags(f.bucket, K.path(), oldestVersionId(K), Map.of("owner", "operations"));
+    JdkTransport real = new JdkTransport(Duration.ofSeconds(10));
+    S3Transport withoutCount =
+        request -> {
+          S3Response answer = real.send(request);
+          if (answer.headers().containsKey("x-amz-tagging-count")) {
+            Map<String, String> headers = new HashMap<>(answer.headers());
+            headers.remove("x-amz-tagging-count");
+            return new S3Response(answer.status(), headers, answer.body());
+          }
+          return answer;
+        };
+    WormEvidenceStore blind = f.openOn(withoutCount);
+    // the read path does trust the header, so this store does not read the tags on a get ...
+    int mark = f.mark();
+    blind.get(K);
+    assertThat(f.kindsSince(mark)).containsExactly("versions", "GET");
+    // ... but the write path reads them, so that it neither drops nor misreads a tag
+    mark = f.mark();
+    blind.extendRetention(K, Y2046);
+    assertThat(f.kindsSince(mark)).containsExactly("versions", "GET", "GET", "PUT", "PUT");
+    assertThat(tagsOf(K))
+        .containsOnly(Map.entry("owner", "operations"), Map.entry(TAG, Y2046.toString()));
   }
 
   @Test
