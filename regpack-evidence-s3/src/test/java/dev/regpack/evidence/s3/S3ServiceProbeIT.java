@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -425,7 +426,7 @@ class S3ServiceProbeIT {
     try (ExecutorService pool = Executors.newFixedThreadPool(8)) {
       List<Future<Optional<String>>> puts = new ArrayList<>();
       for (int i = 0; i < total; i++) {
-        String key = String.format("p8/k%04d", i);
+        String key = String.format(Locale.ROOT, "p8/k%04d", i);
         puts.add(pool.submit(() -> client.putObject(bucket, key, bytes("x"), Map.of())));
       }
       for (Future<Optional<String>> put : puts) {

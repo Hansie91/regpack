@@ -22,28 +22,34 @@ import java.util.regex.Pattern;
 
 /**
  * A small S3 client: path-style requests signed with {@link SigV4}, sent through an {@link
- * S3Transport}. It knows the calls the evidence store needs and nothing else; it retries nothing,
- * decides nothing about durability or retention, and never sends the governance-bypass header or a
- * delete request (the raw {@link #send} takes whatever method and headers its caller names, which
- * is how the tests and the probe reach those).
+ * S3Transport}. It knows the calls the evidence store needs and nothing else; it issues no retry of
+ * its own (the JDK HttpClient under {@link JdkTransport} may retry an idempotent request once when
+ * the connection is closed before any byte of the answer: recollection of the JDK behaviour, not
+ * pinned by a test), decides nothing about durability or retention, and never sends the
+ * governance-bypass header or a delete request (the raw {@link #send} takes whatever method and
+ * headers its caller names, which is how the tests and the probe reach those).
  *
  * <p>Every call ends in its documented success or in an {@link S3Exception}: an answer with any
  * other status (every 3xx, 4xx and 5xx, and a 2xx the call does not expect), an answer that cannot
- * be read, or an {@link IOException} of the transport. The one absence is a 404 for an object or a
- * version in {@link #get} and {@link #head}. Two things are not an {@link S3Exception}: an argument
- * the client refuses is an {@link IllegalArgumentException} (or a {@link NullPointerException}),
- * and a {@link RuntimeException} thrown by a custom transport is passed on, not wrapped; a caller
- * that must turn every failure into its own exception catches both. Operation names, which appear
- * in the messages, are the S3 API names: {@code createBucket}, {@code getBucketVersioning}, {@code
- * getObjectLockConfiguration}, {@code putObject}, {@code headObject}, {@code getObject}, {@code
- * listObjectVersions}, {@code putObjectRetention}, {@code putObjectLegalHold}, {@code
- * getObjectTagging}, {@code putObjectTagging}; the raw {@link #send} names itself by its method.
+ * be read, or an {@link IOException} of the transport (a status outside 100 to 599 is one, from
+ * {@link JdkTransport}: status 0, code {@code ProtocolException}). The one absence is a 404 for an
+ * object or a version in {@link #get} and {@link #head}. Two things are not an {@link S3Exception}:
+ * an argument the client refuses is an {@link IllegalArgumentException} (or a {@link
+ * NullPointerException}), and a {@link RuntimeException} thrown by a custom transport is passed on,
+ * not wrapped; a caller that must turn every failure into its own exception catches both. Operation
+ * names, which appear in the messages, are the S3 API names: {@code createBucket}, {@code
+ * getBucketVersioning}, {@code getObjectLockConfiguration}, {@code putObject}, {@code headObject},
+ * {@code getObject}, {@code listObjectVersions}, {@code putObjectRetention}, {@code
+ * putObjectLegalHold}, {@code getObjectTagging}, {@code putObjectTagging}; the raw {@link #send}
+ * names itself by its method.
  *
  * <p>Each request carries {@code x-amz-content-sha256} (the SHA-256 of the body, or the value the
  * caller of the raw {@link #send} gives), and every header of the request is signed. The calls that
  * take a body of their own, {@link #putObject} and the three that send XML, add a {@code
- * Content-MD5}: a transport checksum that S3 asks of them, not a security control. Immutable and
- * thread-safe.
+ * Content-MD5}: a transport checksum, not a security control. AWS S3 asks for it on these XML
+ * bodies (recollection of the AWS documentation, not checked here); Scality CloudServer 9.5.0 did
+ * not require it (probe results P5, a retention extension accepted without it, and P11 of
+ * docs/evidence/p3b2-probe.md). Immutable and thread-safe.
  */
 public final class S3Client {
   private static final String SERVICE = "s3";
@@ -129,6 +135,9 @@ public final class S3Client {
           "endpoint must be scheme://host[:port] with http or https");
     }
     int port = endpoint.getPort();
+    if (port != -1 && (port < 1 || port > 65535)) {
+      throw new IllegalArgumentException("the endpoint port must be 1 to 65535");
+    }
     boolean defaultPort = port == -1 || (scheme.equals("https") ? port == 443 : port == 80);
     this.hostHeader = defaultPort ? endpoint.getHost() : endpoint.getHost() + ":" + port;
     this.origin = scheme + "://" + endpoint.getHost() + (port == -1 ? "" : ":" + port);

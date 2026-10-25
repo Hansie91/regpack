@@ -8,6 +8,7 @@ import dev.regpack.evidence.s3.client.ScriptedHttpServer.Recorded;
 import dev.regpack.evidence.s3.client.ScriptedHttpServer.Reply;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.net.ProtocolException;
 import java.net.URI;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
@@ -66,6 +67,28 @@ class JdkTransportTest {
       // the server records on its own thread: wait for the record instead of racing it
       assertThat(silent.awaitRequests(1, Duration.ofSeconds(10))).isTrue();
       assertThat(silent.requests()).hasSize(1);
+    }
+  }
+
+  @Test
+  void aStatusOutsideTheHttpRangeIsAProtocolExceptionThatNamesNeitherHostNorBody()
+      throws Exception {
+    for (int status : new int[] {600, 999}) {
+      try (ScriptedHttpServer odd = ScriptedHttpServer.start()) {
+        odd.reply(Reply.of(status, "MARKER-BODY"));
+        assertThatThrownBy(
+                () ->
+                    new JdkTransport(LONG)
+                        .send(request("GET", odd.endpoint(), "/b/k", Map.of(), new byte[0])))
+            .as("status " + status)
+            .isInstanceOf(ProtocolException.class)
+            .satisfies(
+                e ->
+                    assertThat(String.valueOf(e.getMessage()))
+                        .doesNotContain("MARKER")
+                        .doesNotContain("127.0.0.1"));
+        assertThat(odd.requests()).hasSize(1);
+      }
     }
   }
 

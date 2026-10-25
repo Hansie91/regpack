@@ -2,6 +2,7 @@ package dev.regpack.evidence.s3.client;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.net.ProtocolException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -24,7 +25,11 @@ import java.util.concurrent.TimeoutException;
  * timeout ends when the response headers arrive, so a body that stalls after them is cut off here
  * instead; the deadline is an {@link HttpTimeoutException}), and the platform's default TLS
  * settings and proxy selection (no custom {@code SSLContext}, trust manager or proxy selector). An
- * interrupt restores the flag and surfaces as an {@link InterruptedIOException}. No retries.
+ * interrupt restores the flag and surfaces as an {@link InterruptedIOException}. A status outside
+ * 100 to 599 (the JDK parser accepts any three digits) is a {@link ProtocolException}, not an
+ * answer. The module issues no retry of its own; the JDK HttpClient may retry an idempotent request
+ * once when the connection is closed before any byte of the answer (recollection of the JDK
+ * behaviour, not pinned by a test).
  */
 public final class JdkTransport implements S3Transport {
   private final Duration timeout;
@@ -76,6 +81,12 @@ public final class JdkTransport implements S3Transport {
       } catch (ExecutionException e) {
         throw failure(e.getCause());
       }
+      int status = response.statusCode();
+      if (status < 100 || status > 599) {
+        // a status no HTTP service sends is a failed exchange, not an answer; the text names
+        // nothing
+        throw new ProtocolException("status outside 100 to 599");
+      }
       Map<String, String> headers = new TreeMap<>();
       response
           .headers()
@@ -83,7 +94,7 @@ public final class JdkTransport implements S3Transport {
           .forEach(
               (name, values) ->
                   headers.put(name.toLowerCase(Locale.ROOT), String.join(", ", values)));
-      return new S3Response(response.statusCode(), headers, response.body());
+      return new S3Response(status, headers, response.body());
     }
   }
 

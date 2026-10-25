@@ -141,6 +141,33 @@ class WormConfigTest {
   }
 
   @Test
+  void aPortOutsideOneToSixtyFiveThousandFiveHundredThirtyFiveIsRefusedWithoutEcho() {
+    for (String endpoint :
+        List.of(
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1:80800",
+            "https://s3.example.com:0",
+            "https://s3.example.com:65536",
+            "https://s3.example.com:99999",
+            "http://127.0.0.1:abc",
+            "http://127.0.0.1:-1")) {
+      assertThatThrownBy(() -> governance(endpoint))
+          .as(endpoint)
+          .isInstanceOf(IllegalArgumentException.class)
+          .satisfies(
+              e -> {
+                assertThat(e.getMessage()).doesNotContain("127.0.0.1");
+                assertThat(e.getMessage()).doesNotContain("s3.example.com");
+                assertThat(e.getMessage()).doesNotContain("99999");
+              });
+    }
+    assertThat(governance("http://127.0.0.1:1").endpoint().getPort()).isEqualTo(1);
+    assertThat(governance("https://s3.example.com:65535").endpoint().getPort()).isEqualTo(65535);
+  }
+
+  @Test
   void anEndpointWithoutAHostIsRefused() {
     assertThatThrownBy(() -> governance("https:///nohost"))
         .isInstanceOf(IllegalArgumentException.class);

@@ -72,8 +72,9 @@ final class S3TestService {
    * The pure decision of the harness: the settings of the service described by {@code env} when it
    * answers (any HTTP status counts as an answer; the probe and the tests sign their own requests);
    * otherwise a failure naming {@code REGPACK_S3_REQUIRED} when {@code required} is set, and a skip
-   * by assumption when it is not. It reads no environment variable and keeps no state, so it can be
-   * tested without a service.
+   * by assumption when it is not. An endpoint that is not plain http on a loopback host is an
+   * IllegalStateException in both cases, before any request. It reads no environment variable and
+   * keeps no state, so it can be tested without a service.
    */
   static S3Settings requireOrAbort(Map<String, String> env, boolean required) {
     for (String name :
@@ -96,6 +97,15 @@ final class S3TestService {
         endpoint.getScheme() == null ? "" : endpoint.getScheme().toLowerCase(Locale.ROOT);
     if (!(scheme.equals("http") || scheme.equals("https")) || endpoint.getHost() == null) {
       return unavailable(ENDPOINT_VARIABLE + " is not an http or https URI", required);
+    }
+    // The service tests create buckets whose objects stay locked for years and send the
+    // governance-bypass header: they run against a local test service only, never against a
+    // shared or a real one, and a wrong endpoint is a failure, not a skip.
+    if (!scheme.equals("http") || !isLoopbackHost(endpoint.getHost())) {
+      throw new IllegalStateException(
+          ENDPOINT_VARIABLE
+              + " is not a loopback http endpoint: the service tests create locked buckets and"
+              + " send the governance-bypass header, so they run against a local service only");
     }
     String silence = silence(endpoint);
     if (silence != null) {
@@ -128,6 +138,25 @@ final class S3TestService {
           + e.getClass().getSimpleName()
           + ")";
     }
+  }
+
+  /** The literal rule of {@code WormConfig} for plain http: 127.0.0.0/8, [::1] or localhost. */
+  private static boolean isLoopbackHost(String host) {
+    String h = host.toLowerCase(Locale.ROOT);
+    if (h.equals("localhost") || h.equals("[::1]")) {
+      return true;
+    }
+    String[] octets = h.split("[.]", -1);
+    if (octets.length != 4) {
+      return false;
+    }
+    for (int i = 0; i < octets.length; i++) {
+      String octet = octets[i];
+      if (!octet.matches("0|[1-9][0-9]{0,2}") || Integer.parseInt(octet) > 255) {
+        return false;
+      }
+    }
+    return octets[0].equals("127");
   }
 
   private static S3Settings unavailable(String reason, boolean required) {

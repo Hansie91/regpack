@@ -186,6 +186,10 @@ public record WormConfig(
         || !(path == null || path.isEmpty())) {
       throw new IllegalArgumentException("the endpoint must be scheme://host[:port] only");
     }
+    int port = endpoint.getPort();
+    if (port != -1 && (port < 1 || port > 65535)) {
+      throw new IllegalArgumentException("the endpoint port must be 1 to 65535");
+    }
     if (scheme.equals("http") && !isLoopbackHost(host)) {
       throw new IllegalArgumentException(
           "plain http is accepted only for a loopback address; use https");

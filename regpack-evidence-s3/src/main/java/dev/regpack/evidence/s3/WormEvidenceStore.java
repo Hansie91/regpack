@@ -115,8 +115,10 @@ import java.util.regex.Pattern;
  * the S3 code only: a transport failure, a timeout, an interrupt (the flag is restored), any status
  * the call does not expect, an unparsable answer, a missing version id, a listing that does not end
  * or does not advance. The one absence is a version list of the exact key, read to its end, that
- * holds no data version. No retries. This class issues no delete request and sends no bypass
- * header.
+ * holds no data version. The module issues no retry of its own; the JDK HttpClient may retry an
+ * idempotent request once when the connection is closed before any byte of the answer (recollection
+ * of the JDK behaviour, not pinned by a test). This class issues no delete request and sends no
+ * bypass header.
  */
 public final class WormEvidenceStore implements EvidenceStore {
   private static final String PROFILE = "P-WORM";

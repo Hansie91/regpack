@@ -647,6 +647,60 @@ class S3ClientTest {
   }
 
   @Test
+  void aStatusOutsideTheHttpRangeIsAnS3ExceptionWithStatusZeroAndNoLeak() {
+    for (int status : new int[] {600, 999}) {
+      server.reply(Reply.of(status, "MARKER-BODY").with("X-Marker", "MARKER-HEADER"));
+      assertThatThrownBy(() -> client.versioningEnabled("bucket1"))
+          .as("status " + status)
+          .isInstanceOfSatisfying(
+              S3Exception.class,
+              e -> {
+                assertThat(e.getMessage())
+                    .isEqualTo("S3 getBucketVersioning status=0 code=ProtocolException");
+                assertThat(e.status()).isZero();
+                assertThat(e.getCause()).isNull();
+                assertThat(e.getSuppressed()).isEmpty();
+              });
+    }
+    // the raw call maps it the same way
+    server.reply(700, "");
+    assertThatThrownBy(
+            () -> client.send("GET", "bucket1", Optional.of("k"), List.of(), Map.of(), new byte[0]))
+        .isInstanceOfSatisfying(
+            S3Exception.class,
+            e -> assertThat(e.getMessage()).isEqualTo("S3 GET status=0 code=ProtocolException"));
+    assertThat(server.requests()).hasSize(3);
+  }
+
+  @Test
+  void anEndpointPortOutsideOneToSixtyFiveThousandFiveHundredThirtyFiveIsRefused() {
+    for (String endpoint :
+        new String[] {
+          "http://s3.example.test:0",
+          "http://s3.example.test:65536",
+          "http://s3.example.test:99999",
+          "https://s3.example.test:0",
+          "http://s3.example.test:-5",
+          "http://s3.example.test:80800"
+        }) {
+      assertThatThrownBy(
+              () ->
+                  newClient(
+                      URI.create(endpoint), request -> new S3Response(200, Map.of(), NO_BODY)))
+          .as(endpoint)
+          .isInstanceOf(IllegalArgumentException.class)
+          .satisfies(
+              e ->
+                  assertThat(String.valueOf(e.getMessage()))
+                      .doesNotContain("example")
+                      .doesNotContain("99999"));
+    }
+    // the edges are fine
+    newClient(URI.create("http://s3.example.test:1"), request -> null);
+    newClient(URI.create("http://s3.example.test:65535"), request -> null);
+  }
+
+  @Test
   void requestAndResponseToStringHoldNoHeaderValueAndNoBody() {
     S3Request request =
         new S3Request(

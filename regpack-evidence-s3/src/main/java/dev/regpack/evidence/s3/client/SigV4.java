@@ -38,7 +38,6 @@ public final class SigV4 {
   static final Pattern METHOD = Pattern.compile("[A-Z]{1,16}");
   static final Pattern HEADER_NAME = Pattern.compile("[a-z0-9][a-z0-9-]*");
   static final Pattern SHA256_HEX = Pattern.compile("[0-9a-f]{64}");
-  private static final Pattern ENCODED_PATH = Pattern.compile("/([A-Za-z0-9._~/-]|%[0-9A-F]{2})*");
   private static final Pattern SCOPE_PART = Pattern.compile("[A-Za-z0-9._-]{1,64}");
   private static final String HEX_UPPER = "0123456789ABCDEF";
 
@@ -56,7 +55,9 @@ public final class SigV4 {
 
     @Override
     public String toString() {
-      return "Credentials[accessKeyId=" + accessKeyId + ", secret=***]";
+      // neither the secret nor the key id: an id in a log or an annotation is a lead for an
+      // attacker
+      return "Credentials[***]";
     }
   }
 
@@ -175,7 +176,7 @@ public final class SigV4 {
     if (!METHOD.matcher(method).matches()) {
       throw new IllegalArgumentException("method must be upper-case letters");
     }
-    if (!ENCODED_PATH.matcher(encodedPath).matches()) {
+    if (!isEncodedPath(encodedPath)) {
       throw new IllegalArgumentException("path must start with '/' and be percent-encoded");
     }
     if (!SHA256_HEX.matcher(payloadSha256Hex).matches()) {
@@ -194,6 +195,44 @@ public final class SigV4 {
     out.append('\n').append(String.join(";", headers.keySet())).append('\n');
     out.append(payloadSha256Hex);
     return out.toString();
+  }
+
+  /**
+   * One linear scan, so that a long path cannot overflow the stack (a regex with an alternation
+   * under a star recurses once per character): a slash first, then only unreserved characters,
+   * slashes and percent triplets with upper-case hex digits.
+   */
+  private static boolean isEncodedPath(String path) {
+    int n = path.length();
+    if (n == 0 || path.charAt(0) != '/') {
+      return false;
+    }
+    int i = 1;
+    while (i < n) {
+      char c = path.charAt(i);
+      if (c == '%') {
+        if (i + 2 >= n || !isUpperHex(path.charAt(i + 1)) || !isUpperHex(path.charAt(i + 2))) {
+          return false;
+        }
+        i += 3;
+      } else if ((c >= 'A' && c <= 'Z')
+          || (c >= 'a' && c <= 'z')
+          || (c >= '0' && c <= '9')
+          || c == '.'
+          || c == '_'
+          || c == '~'
+          || c == '/'
+          || c == '-') {
+        i++;
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean isUpperHex(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
   }
 
   /** One query parameter, percent-encoded. */

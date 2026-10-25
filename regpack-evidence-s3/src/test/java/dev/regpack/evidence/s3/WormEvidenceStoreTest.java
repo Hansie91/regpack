@@ -21,7 +21,13 @@ import dev.regpack.ports.evidence.EvidenceStore.Retention;
 import dev.regpack.ports.evidence.EvidenceStore.RetentionClass;
 import dev.regpack.ports.evidence.EvidenceStore.StoredObject;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InterruptedIOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URI;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.time.Instant;
@@ -291,6 +297,72 @@ class WormEvidenceStoreTest {
         .isInstanceOf(EvidenceUnavailableException.class)
         .hasMessage("S3 listObjectVersions status=200 code=unparsable");
     // the service is untouched by every one of them
+    assertThat(f.store.list("", Optional.empty(), 10)).isEmpty();
+  }
+
+  /** Answers every connection with this status line and an empty body, until the socket closes. */
+  private static void answerEveryConnection(ServerSocket server, int status) {
+    try {
+      while (true) {
+        try (Socket client = server.accept()) {
+          InputStream in = client.getInputStream();
+          int run = 0;
+          while (run < 4) {
+            int b = in.read();
+            if (b < 0) {
+              break;
+            }
+            run = (b == '\r' || b == '\n') ? run + 1 : 0;
+          }
+          client
+              .getOutputStream()
+              .write(
+                  ("HTTP/1.1 " + status + " Odd\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                      .getBytes(UTF_8));
+        }
+      }
+    } catch (IOException e) {
+      // the server socket was closed, or a client went away: nothing to do
+    }
+  }
+
+  @Test
+  void aStatusOutsideTheHttpRangeIsUnavailableWithOperationAndCodeOnly() throws Exception {
+    for (int status : new int[] {600, 999}) {
+      try (ServerSocket odd = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        Thread.ofVirtual().start(() -> answerEveryConnection(odd, status));
+        WormEvidenceStore store =
+            WormEvidenceStore.open(
+                WormConfig.governance(
+                    URI.create("http://127.0.0.1:" + odd.getLocalPort()),
+                    FakeWormBackend.REGION,
+                    f.bucket,
+                    new Credentials(FakeWormBackend.KEY_ID, FakeWormBackend.SECRET),
+                    new Durability(true, 1)),
+                f.dataClock,
+                f.backend.signingClock(),
+                new JdkTransport(Duration.ofSeconds(10)));
+        String expected = "S3 listObjectVersions status=0 code=ProtocolException";
+
+        assertThatThrownBy(() -> store.get(K))
+            .as("get " + status)
+            .isInstanceOf(EvidenceUnavailableException.class)
+            .hasMessage(expected);
+        assertThatThrownBy(() -> store.put(f.request(K, "hello")))
+            .as("put " + status)
+            .isInstanceOf(EvidenceUnavailableException.class)
+            .hasMessage(expected);
+        assertThatThrownBy(() -> store.list("landing/", Optional.empty(), 10))
+            .as("list " + status)
+            .isInstanceOf(EvidenceUnavailableException.class)
+            .hasMessage(expected);
+        assertThatThrownBy(store::grade)
+            .as("grade " + status)
+            .isInstanceOf(EvidenceUnavailableException.class)
+            .hasMessage("S3 getBucketVersioning status=0 code=ProtocolException");
+      }
+    }
+    // the real service was never touched
     assertThat(f.store.list("", Optional.empty(), 10)).isEmpty();
   }
 

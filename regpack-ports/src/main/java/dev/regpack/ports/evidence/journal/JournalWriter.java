@@ -116,6 +116,11 @@ public final class JournalWriter {
    * The next free ordinal of a class (a) subject: the highest stored ordinal plus one, or 1 when
    * there is none. The ordinal is the caller's to supply (D-E7); this reads the tier and does not
    * reserve anything.
+   *
+   * @throws EvidenceIntegrityException the listing does not advance (a non-empty page that does not
+   *     start after the previous page), or it holds a key that is not a class (a) journal key under
+   *     the subject
+   * @throws EvidenceUnavailableException the tier cannot be read
    */
   public long nextOrdinal(
       JournalScope scope, long restoreEpoch, JournalType type, String subjectId) {

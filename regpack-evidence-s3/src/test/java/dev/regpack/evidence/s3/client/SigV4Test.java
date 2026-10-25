@@ -350,10 +350,60 @@ class SigV4Test {
   void credentialsToStringHidesTheSecret() {
     Credentials c = new Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY");
 
-    assertThat(c.toString()).isEqualTo("Credentials[accessKeyId=AKIDEXAMPLE, secret=***]");
-    assertThat(c.toString()).doesNotContain("wJalr");
+    assertThat(c.toString()).isEqualTo("Credentials[***]");
+    assertThat(c.toString()).doesNotContain("wJalr").doesNotContain("AKID");
     assertThat(c.accessKeyId()).isEqualTo("AKIDEXAMPLE");
     assertThat(c.secretAccessKey()).startsWith("wJalr");
+  }
+
+  private static Map<String, String> signPath(String path) {
+    return SigV4.sign(
+        S3_CREDENTIALS,
+        "r",
+        "s3",
+        S3_DATE,
+        "GET",
+        S3_HOST,
+        path,
+        List.of(),
+        Map.of(),
+        EMPTY_SHA256);
+  }
+
+  @Test
+  void aVeryLongPathIsCheckedWithoutRecursion() throws Exception {
+    String plain = "/" + "a".repeat(5_000);
+    String encoded = "/" + "%2B".repeat(5_000);
+    assertThat(signPath(plain)).containsKey("authorization");
+    assertThat(signPath(encoded)).containsKey("authorization");
+    // the same on a thread with a small stack: the check must not use the stack per character
+    Throwable[] failure = new Throwable[1];
+    Thread small =
+        new Thread(
+            null,
+            () -> {
+              try {
+                signPath("/" + "-".repeat(512));
+                signPath("/" + "%3D".repeat(512));
+                signPath(plain);
+                signPath(encoded);
+              } catch (Throwable t) {
+                failure[0] = t;
+              }
+            },
+            "small-stack",
+            128 * 1024);
+    small.start();
+    small.join();
+    assertThat(failure[0]).isNull();
+    // a long path with one bad piece at the end is still refused
+    assertThatThrownBy(() -> signPath(plain + "%2b")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> signPath(encoded + "%2")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> signPath(encoded + "%G0"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> signPath(plain + "%")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> signPath(plain + " ")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> signPath(plain + "?x")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

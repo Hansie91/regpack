@@ -18,6 +18,7 @@ import java.util.Base64;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -298,7 +299,7 @@ interface S3BehaviourContract {
     String bucket = newBucket();
     List<String> keys = new ArrayList<>();
     for (int i = 0; i < 25; i++) {
-      String key = String.format("lv/k%02d", i);
+      String key = String.format(Locale.ROOT, "lv/k%02d", i);
       keys.add(key);
       put(bucket, key, "v" + i, Map.of());
     }

@@ -106,6 +106,51 @@ class PgWormSupportTest {
   }
 
   @Test
+  void anEndpointThatIsNotPlainHttpOnLoopbackIsRefusedBeforeAnyRequest() {
+    for (String remote :
+        new String[] {
+          "http://s3.example.test:9000",
+          "http://10.0.0.5:9000",
+          "http://192.168.1.2",
+          "http://128.0.0.1:8000",
+          "http://127.0.0.1.example.test:8000",
+          "http://localhost.example.test",
+          "http://[2001:db8::1]:9000",
+          "https://s3.amazonaws.com",
+          "https://127.0.0.1:8000",
+          "https://localhost:8000"
+        }) {
+      Map<String, String> env = env(remote);
+      for (boolean required : new boolean[] {true, false}) {
+        assertThatThrownBy(() -> PgWormSupport.requireOrAbort(env, required))
+            .as(remote + " required=" + required)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("REGPACK_S3_ENDPOINT is not a loopback http endpoint")
+            .hasMessageNotContaining("example")
+            .hasMessageNotContaining("amazonaws")
+            .hasMessageNotContaining("10.0.0.5")
+            .hasMessageNotContaining(SECRET)
+            .hasMessageNotContaining(KEY_ID);
+      }
+    }
+  }
+
+  @Test
+  void loopbackHttpEndpointsPassTheGuardAndReachTheAnswerCheck() throws IOException {
+    int port;
+    try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+      port = socket.getLocalPort();
+    }
+    for (String host : new String[] {"127.0.0.1", "127.1.2.3", "localhost", "LOCALHOST", "[::1]"}) {
+      Map<String, String> env = env("http://" + host + ":" + port);
+      assertThatThrownBy(() -> PgWormSupport.requireOrAbort(env, true))
+          .as(host)
+          .isInstanceOf(AssertionFailedError.class)
+          .hasMessageContaining("does not answer");
+    }
+  }
+
+  @Test
   void noMessageRepeatsTheSecret() throws IOException {
     String endpoint = refusedEndpoint();
     Map<String, String> refused = env(endpoint);

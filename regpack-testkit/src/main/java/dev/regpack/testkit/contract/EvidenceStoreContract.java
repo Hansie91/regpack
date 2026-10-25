@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -582,7 +583,7 @@ public interface EvidenceStoreContract {
   default void listReturnsFullPagesWhileKeysRemain() {
     List<EvidenceKey> keys = new ArrayList<>();
     for (int i = 1; i <= 25; i++) {
-      EvidenceKey key = EvidenceKey.of("full", String.format("k%02d", i));
+      EvidenceKey key = EvidenceKey.of("full", String.format(Locale.ROOT, "k%02d", i));
       keys.add(key);
       store().put(request(key, "v" + i, "text/plain", fiveYears()));
     }
