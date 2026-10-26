@@ -4,6 +4,7 @@ import dev.regpack.ports.security.KeyPurpose;
 import dev.regpack.ports.security.KeyRef;
 import dev.regpack.ports.security.Kms;
 import dev.regpack.ports.security.KmsAccessDeniedException;
+import dev.regpack.ports.security.KmsKeyDestroyedException;
 import dev.regpack.ports.security.KmsSignature;
 import dev.regpack.ports.security.WrappedKey;
 import java.security.GeneralSecurityException;
@@ -43,13 +44,16 @@ public final class InMemoryKms {
     }
   }
 
-  private sealed interface Material permits Signing, Hmac, Envelope {}
+  private sealed interface Material permits Signing, Hmac, Envelope, Destroyed {}
 
   private record Signing(KeyPair pair) implements Material {}
 
   private record Hmac(SecretKey key) implements Material {}
 
   private record Envelope(SecretKey key) implements Material {}
+
+  /** The tombstone of a destroyed KEK: no key material, the id stays taken. */
+  private record Destroyed() implements Material {}
 
   private record Entry(KeyPurpose purpose, Material material, Set<WorkloadIdentity> allowed) {}
 
@@ -74,9 +78,11 @@ public final class InMemoryKms {
     return this;
   }
 
-  /** Creates an HmacSHA256 key from {@code material}; the purpose must be TRN_HMAC. */
+  /**
+   * Creates an HmacSHA256 key from {@code material}; the purpose must be TRN_HMAC or INDEX_HMAC.
+   */
   public InMemoryKms createHmacKey(KeyRef key, byte[] material, Set<WorkloadIdentity> allowed) {
-    requirePurpose(key, KeyPurpose.TRN_HMAC);
+    requirePurpose(key, KeyPurpose.TRN_HMAC, KeyPurpose.INDEX_HMAC);
     register(key, new Hmac(new SecretKeySpec(material, "HmacSHA256")), allowed);
     return this;
   }
@@ -91,6 +97,28 @@ public final class InMemoryKms {
     } catch (GeneralSecurityException e) {
       throw new IllegalStateException("AES unavailable", e);
     }
+    return this;
+  }
+
+  /**
+   * Destroys an ENVELOPE_KEK: the key material is dropped and a tombstone keeps the id, so every
+   * later {@code wrap} or {@code unwrap} throws {@link KmsKeyDestroyedException} (before the
+   * identity is checked) and {@link #createKek} refuses the id. Destroying a destroyed KEK does
+   * nothing. This is an administrative path, not a method of the {@link Kms} port, and a fake: it
+   * models neither a pending-deletion window nor replicas or backups of the key.
+   *
+   * @throws IllegalArgumentException if the id is unknown or names a key that is not a KEK
+   */
+  public InMemoryKms destroy(KeyRef kek) {
+    Objects.requireNonNull(kek, "kek");
+    if (kek.purpose() != KeyPurpose.ENVELOPE_KEK) {
+      throw new IllegalArgumentException("only an ENVELOPE_KEK can be destroyed");
+    }
+    Entry entry = keys.get(kek.keyId());
+    if (entry == null || entry.purpose() != KeyPurpose.ENVELOPE_KEK) {
+      throw new IllegalArgumentException("unknown KEK: " + kek.keyId());
+    }
+    keys.replace(kek.keyId(), entry, new Entry(entry.purpose(), new Destroyed(), Set.of()));
     return this;
   }
 
@@ -120,11 +148,17 @@ public final class InMemoryKms {
       this.identity = identity;
     }
 
-    /** Existing key (else IAE); requested purpose matches the stored one and fits (else denied). */
+    /**
+     * Existing key (else IAE), not destroyed (else {@link KmsKeyDestroyedException}, before any
+     * other check); requested purpose matches the stored one and fits (else denied).
+     */
     private Entry lookup(KeyRef key, KeyPurpose... accepted) {
       Entry entry = keys.get(key.keyId());
       if (entry == null) {
         throw new IllegalArgumentException("unknown key: " + key.keyId());
+      }
+      if (entry.material() instanceof Destroyed) {
+        throw new KmsKeyDestroyedException();
       }
       if (entry.purpose() != key.purpose() || !Arrays.asList(accepted).contains(entry.purpose())) {
         throw new KmsAccessDeniedException(
@@ -176,7 +210,7 @@ public final class InMemoryKms {
 
     @Override
     public byte[] hmac(KeyRef key, byte[] message) {
-      Entry entry = authorised(key, KeyPurpose.TRN_HMAC);
+      Entry entry = authorised(key, KeyPurpose.TRN_HMAC, KeyPurpose.INDEX_HMAC);
       try {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(((Hmac) entry.material()).key());
