@@ -450,7 +450,7 @@ class SpikeWorkflowTest {
             l ->
                 l.strip()
                     .equals(
-                        "branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**', 'p3b/**', 'p3b2/**']"));
+                        "branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**', 'p3b/**', 'p3b2/**', 'p3c/**']"));
     List<String> pullRequest = block(ci(), "  pull_request:");
     assertThat(pullRequest).anyMatch(l -> l.strip().equals("branches: [main]"));
   }
