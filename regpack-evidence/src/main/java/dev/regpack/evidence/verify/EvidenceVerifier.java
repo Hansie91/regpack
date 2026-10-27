@@ -2,6 +2,7 @@ package dev.regpack.evidence.verify;
 
 import dev.regpack.evidence.seal.SealedKeys;
 import dev.regpack.model.Sha256;
+import dev.regpack.ports.crypto.DataShreddedException;
 import dev.regpack.ports.evidence.EvidenceIntegrityException;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
@@ -61,6 +62,15 @@ import java.util.function.Function;
  *       and are not compared.) A missing attempt row or manifest row is an ORPHAN or MISSING and
  *       never an INTENT_MISMATCH (after a restore the evidence tier is ahead of the database).
  * </ul>
+ *
+ * <p>Crypto-shredding (P3c1, the AT-14 half): over an encrypted tier the store hands out plaintext
+ * and its SHA-256, so the checks above are made on the plaintext, as the manifest rows record it.
+ * An object whose KEK was destroyed ({@link DataShreddedException}) cannot be read, and that is
+ * neither an outage nor a damaged object: it is counted in {@link Report#objectsShredded()} and its
+ * hash is not judged (an object with a manifest row raises no finding; an object without one is an
+ * ORPHAN with the detail {@code sha256 unknown}, never a HASH_MISMATCH or MISSING). {@code verify}
+ * cannot tell destruction at expiry from destruction before it, or from a header rewritten to name
+ * a destroyed KEK; a wrong manifest row of a shredded object is not found.
  *
  * <p>An outage ({@link dev.regpack.ports.evidence.EvidenceUnavailableException}, or a {@link
  * dev.regpack.ports.ledger.LedgerException}) aborts the run: an object that cannot be served is not
@@ -129,16 +139,24 @@ public final class EvidenceVerifier {
   }
 
   /**
-   * The result of one run: the findings, the number of keys of the listing that were walked and the
-   * number of manifest rows that were walked. Both counts include the keys that a prefix selects
-   * and the epoch markers.
+   * The result of one run: the findings, the number of keys of the listing that were walked, the
+   * number of manifest rows that were walked, and the number of listed objects that could not be
+   * read because their KEK was destroyed (crypto-shredding; they are counted in {@code
+   * objectsChecked} too). The first two counts include the keys that a prefix selects and the epoch
+   * markers.
    */
-  public record Report(List<Finding> findings, long objectsChecked, long manifestRowsChecked) {
+  public record Report(
+      List<Finding> findings, long objectsChecked, long manifestRowsChecked, long objectsShredded) {
     public Report {
       findings = List.copyOf(findings);
-      if (objectsChecked < 0 || manifestRowsChecked < 0) {
+      if (objectsChecked < 0 || manifestRowsChecked < 0 || objectsShredded < 0) {
         throw new IllegalArgumentException("the counts must not be negative");
       }
+    }
+
+    /** A report of a run that met no shredded object. */
+    public Report(List<Finding> findings, long objectsChecked, long manifestRowsChecked) {
+      this(findings, objectsChecked, manifestRowsChecked, 0);
     }
 
     public boolean clean() {
@@ -169,7 +187,7 @@ public final class EvidenceVerifier {
 
   // ---------------------------------------------------------------------------------------------
 
-  private sealed interface Read permits Present, Damaged, Absent {}
+  private sealed interface Read permits Present, Damaged, Absent, Shredded {}
 
   /** The object was read and its bytes are the bytes that its hash names. */
   private record Present(byte[] bytes, Sha256 sha256) implements Read {}
@@ -180,12 +198,16 @@ public final class EvidenceVerifier {
   /** The store has no such object. */
   private record Absent() implements Read {}
 
+  /** The KEK of the object was destroyed: its bytes cannot be read, and that is not a fault. */
+  private record Shredded() implements Read {}
+
   /** One run: the two cursors, the findings and the state of the class (b) group in progress. */
   private final class Walk {
     private final String prefix;
     private final List<Finding> findings = new ArrayList<>();
     private long objectsChecked;
     private long manifestRowsChecked;
+    private long objectsShredded;
     private String group = "";
     private boolean groupJudged;
     private long expectedSeq;
@@ -239,7 +261,7 @@ public final class EvidenceVerifier {
           Comparator.comparing(Finding::key)
               .thenComparing(Finding::kind)
               .thenComparing(Finding::detail));
-      return new Report(findings, objectsChecked, manifestRowsChecked);
+      return new Report(findings, objectsChecked, manifestRowsChecked, objectsShredded);
     }
 
     private void add(Kind kind, String key, String detail) {
@@ -275,6 +297,11 @@ public final class EvidenceVerifier {
         case Absent _ -> {
           // gone between the listing and the read, and the ledger never knew it: nothing to say
         }
+        case Shredded _ -> {
+          // no manifest row and no readable bytes: an orphan whose hash cannot be known
+          objectsShredded++;
+          add(Kind.ORPHAN, key.path(), HASH_UNKNOWN);
+        }
         case Present p -> {
           Optional<JournalKey.ClassA> intent = deliveryIntentKey(key);
           Optional<DeliveryLedger.Attempt> attempt = intent.flatMap(this::attemptOf);
@@ -299,6 +326,10 @@ public final class EvidenceVerifier {
       switch (read) {
         case Damaged _ -> add(Kind.HASH_MISMATCH, key.path(), STORE_INTEGRITY);
         case Absent _ -> add(Kind.MISSING, key.path(), ABSENT);
+        case Shredded _ -> {
+          // the object is there and its KEK is gone: counted, and its hash is not judged
+          objectsShredded++;
+        }
         case Present p -> {
           ManifestLedger.ObjectEntry entry = row.entry();
           if (!p.sha256().equals(entry.sha256()) || p.bytes().length != entry.sizeBytes()) {
@@ -311,9 +342,9 @@ public final class EvidenceVerifier {
     }
 
     /**
-     * Reads the object. An integrity alarm of the store (also a corruption) is {@link Damaged}; an
-     * outage is not caught. The hash is computed from the bytes: a store that answers with another
-     * hash than its own bytes has is damaged as well.
+     * Reads the object. An integrity alarm of the store (also a corruption) is {@link Damaged}; a
+     * destroyed KEK is {@link Shredded}; an outage is not caught. The hash is computed from the
+     * bytes: a store that answers with another hash than its own bytes has is damaged as well.
      */
     private Read read(EvidenceKey key) {
       try {
@@ -326,6 +357,8 @@ public final class EvidenceVerifier {
         return actual.equals(stored.get().sha256()) ? new Present(bytes, actual) : new Damaged();
       } catch (EvidenceIntegrityException e) {
         return new Damaged();
+      } catch (DataShreddedException e) {
+        return new Shredded();
       }
     }
 

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import dev.regpack.evidence.crypto.EncryptedFixtures;
 import dev.regpack.evidence.seal.DurableSeal;
 import dev.regpack.evidence.seal.EpochMarker;
 import dev.regpack.evidence.seal.SealedKeys;
@@ -1598,6 +1599,10 @@ class EvidenceVerifierTest {
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> new Report(List.of(), 0, -1))
         .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new Report(List.of(), 0, 0, -1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(new Report(List.of(), 3, 2).objectsShredded()).isZero();
+    assertThat(new Report(List.of(), 3, 2, 1)).isNotEqualTo(new Report(List.of(), 3, 2));
     assertThatThrownBy(() -> new Finding(null, "k", "d")).isInstanceOf(NullPointerException.class);
     assertThatThrownBy(() -> new Finding(Kind.ORPHAN, null, "d"))
         .isInstanceOf(NullPointerException.class);
@@ -1612,5 +1617,144 @@ class EvidenceVerifierTest {
         .isInstanceOf(NullPointerException.class);
     assertThatThrownBy(() -> new EvidenceVerifier(evidence, ledger).verify(null))
         .isInstanceOf(NullPointerException.class);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // crypto-shredding (P3c1 T6, the AT-14 half): a destroyed KEK is counted and not judged
+
+  /** The encrypted tier of one test: sealed objects of three years under one KEK per year. */
+  private static final class EncryptedTier {
+    final ManualClock clock = new ManualClock(Instant.parse("2026-06-01T00:00:00Z"));
+    final InMemoryLedgerStore ledger = new InMemoryLedgerStore(clock);
+    final InMemoryEvidenceStore raw = new InMemoryEvidenceStore(clock);
+    final EncryptedFixtures fixtures = EncryptedFixtures.create();
+    final EvidenceStore store = fixtures.encryptPerYear(raw, clock);
+    final EvidenceVerifier verifier = new EvidenceVerifier(store, ledger);
+
+    /** Puts {@code text} as a sealed file at {@code at}; the key is that of its plaintext hash. */
+    EvidenceKey put(String at, String text) {
+      clock.set(Instant.parse(at));
+      byte[] bytes = text.getBytes(UTF_8);
+      EvidenceKey key = SealedKeys.of(Sha256.of(bytes));
+      store.put(
+          new EvidenceStore.PutRequest(
+              key,
+              bytes,
+              "application/xml",
+              RETENTION.retentionFor(DurableSeal.SEALED_RETENTION_CLASS, clock.now())));
+      return key;
+    }
+
+    /** The same, and a manifest row that names the plaintext with {@code rowHash}. */
+    EvidenceKey putWithRow(String at, String text, Sha256 rowHash) {
+      EvidenceKey key = put(at, text);
+      ledger.recordObjects(
+          List.of(
+              new ObjectEntry(key, ObjectClass.SEALED_FILE, rowHash, text.getBytes(UTF_8).length)),
+          Provenance.WRITTEN,
+          Optional.empty());
+      return key;
+    }
+
+    /** The same, with the true hash in the row. */
+    EvidenceKey putWithRow(String at, String text) {
+      return putWithRow(at, text, Sha256.ofUtf8(text));
+    }
+  }
+
+  @Test
+  void aShreddedObjectIsCountedAndVerifyStaysClean() {
+    EncryptedTier tier = new EncryptedTier();
+    tier.putWithRow("2026-06-01T00:00:00Z", "sealed in 2026");
+    tier.putWithRow("2027-06-01T00:00:00Z", "sealed in 2027");
+    tier.putWithRow("2028-06-01T00:00:00Z", "sealed in 2028");
+    EvidenceKey orphan = tier.put("2027-09-01T00:00:00Z", "an orphan of 2027");
+    Finding unreadOrphan = new Finding(Kind.ORPHAN, orphan.path(), "sha256 unknown");
+    // before the destruction the orphan is hashed through the decorator: its plaintext hash
+    assertThat(tier.verifier.verify(""))
+        .isEqualTo(
+            new Report(
+                List.of(
+                    new Finding(
+                        Kind.ORPHAN,
+                        orphan.path(),
+                        "sha256=" + Sha256.ofUtf8("an orphan of 2027").hex())),
+                4,
+                3));
+
+    tier.fixtures.destroy("kek-2027");
+    Report report = tier.verifier.verify("");
+
+    // the shredded object of the manifest is not judged; the shredded orphan cannot be hashed
+    assertThat(report.findings()).containsExactly(unreadOrphan);
+    assertThat(report.objectsShredded()).isEqualTo(2);
+    assertThat(report.objectsChecked()).isEqualTo(4);
+    assertThat(report.manifestRowsChecked()).isEqualTo(3);
+
+    // the objects of the other years are still judged against their rows: two wrong rows, found
+    EvidenceKey wrongIn2026 =
+        tier.putWithRow("2026-07-01T00:00:00Z", "another of 2026", Sha256.ofUtf8("not it"));
+    EvidenceKey wrongIn2028 =
+        tier.putWithRow("2028-07-01T00:00:00Z", "another of 2028", Sha256.ofUtf8("not it"));
+    Report again = tier.verifier.verify("");
+
+    assertThat(again.findings())
+        .containsExactlyInAnyOrder(
+            unreadOrphan,
+            new Finding(Kind.HASH_MISMATCH, wrongIn2026.path(), EvidenceVerifier.MANIFEST_HASH),
+            new Finding(Kind.HASH_MISMATCH, wrongIn2028.path(), EvidenceVerifier.MANIFEST_HASH));
+    assertThat(again.objectsShredded()).isEqualTo(2);
+    assertThat(again.objectsChecked()).isEqualTo(6);
+    assertThat(again.manifestRowsChecked()).isEqualTo(5);
+  }
+
+  @Test
+  void aPlainObjectUnderAnEncryptedKeyIsStoreIntegrityAndNeverShredded() {
+    EncryptedTier tier = new EncryptedTier();
+    byte[] plain = "written behind the decorator".getBytes(UTF_8);
+    EvidenceKey key = SealedKeys.of(Sha256.of(plain));
+    // a writer that bypassed the decorator: the bytes are the plaintext, and the row is right
+    tier.raw.put(
+        new EvidenceStore.PutRequest(
+            key,
+            plain,
+            "application/xml",
+            RETENTION.retentionFor(DurableSeal.SEALED_RETENTION_CLASS, tier.clock.now())));
+    tier.ledger.recordObjects(
+        List.of(new ObjectEntry(key, ObjectClass.SEALED_FILE, Sha256.of(plain), plain.length)),
+        Provenance.WRITTEN,
+        Optional.empty());
+
+    Report report = tier.verifier.verify("");
+
+    assertThat(report.findings())
+        .containsExactly(
+            new Finding(Kind.HASH_MISMATCH, key.path(), EvidenceVerifier.STORE_INTEGRITY));
+    assertThat(report.objectsShredded()).isZero();
+  }
+
+  @Test
+  void aWrongRowOfAShreddedObjectIsNotFoundAndAnOutageOfTheKeyServiceStillAbortsTheRun() {
+    EncryptedTier tier = new EncryptedTier();
+    EvidenceKey key =
+        tier.putWithRow("2027-06-01T00:00:00Z", "sealed in 2027", Sha256.ofUtf8("no"));
+    // before the destruction the wrong row is a finding
+    assertThat(tier.verifier.verify("sealed/").findings())
+        .containsExactly(
+            new Finding(Kind.HASH_MISMATCH, key.path(), EvidenceVerifier.MANIFEST_HASH));
+    tier.fixtures.destroy("kek-2027");
+
+    Report report = tier.verifier.verify("sealed/");
+
+    // after it the object is not judged: neither missing, nor a mismatch, nor an outage
+    assertThat(report.clean()).isTrue();
+    assertThat(report).isEqualTo(new Report(List.of(), 1, 1, 1));
+    // a key service that is down is not shredded data: the run is aborted, as for any outage
+    ScriptedStore down = new ScriptedStore(tier.store);
+    down.getFailures.put(
+        key.path(),
+        () -> new EvidenceUnavailableException("the key service could not serve this request"));
+    assertThatThrownBy(() -> new EvidenceVerifier(down, tier.ledger).verify(""))
+        .isInstanceOf(EvidenceUnavailableException.class);
   }
 }
