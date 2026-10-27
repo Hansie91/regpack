@@ -18,6 +18,7 @@ import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.model.json.Json;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.crypto.Envelope;
+import dev.regpack.ports.crypto.SubjectHash;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DuplicateKeyException;
@@ -26,6 +27,7 @@ import dev.regpack.ports.ledger.LeaseLedger;
 import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.ports.ledger.ManifestConflictException;
 import dev.regpack.ports.ledger.RetentionLedger;
+import dev.regpack.ports.ledger.SubjectIndexLedger;
 import dev.regpack.ports.ledger.TrnConflictException;
 import dev.regpack.ports.ledger.WithdrawalRequiredException;
 import java.time.Duration;
@@ -45,12 +47,13 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * In-memory {@link LedgerStore}. Every public method is {@code synchronized} on one lock and
  * validates its input before it mutates anything, so a rejected call leaves no trace.
  */
-public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger {
+public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, SubjectIndexLedger {
   private record SourceEvent(EventIdentity eventIdentity, String sourceId) {}
 
   /** The spec 10 {@code ingest_event_version_key}: (event identity, source, source version). */
@@ -69,6 +72,10 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger {
       return byRegime != 0 ? byRegime : anchor.compareTo(other.anchor);
     }
   }
+
+  /** The order of the references of one hash: the kind by its code, then the text by code unit. */
+  private static final Comparator<SubjectRef> SUBJECT_REF_ORDER =
+      Comparator.comparing(SubjectRef::kind).thenComparing(SubjectRef::ref);
 
   /** The order of the expiry list: (retain-until, artifact text, regime id text, anchor). */
   private static final Comparator<RetentionRow> EXPIRY_ORDER =
@@ -193,7 +200,9 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger {
     /** The expiry list also names the rows that are held. */
     RETENTION_HOLD_IGNORED_IN_EXPIRED,
     /** A new row of a held artifact is stored unheld. */
-    RETENTION_NEW_ROW_UNHELD
+    RETENTION_NEW_ROW_UNHELD,
+    /** Removing a reference deletes every row of each hash that names it. */
+    SUBJECT_REMOVE_REMOVES_ALL
   }
 
   /** Constant stand-in for the day under IDEMPOTENCY_KEY_IGNORES_DAY. */
@@ -244,6 +253,13 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger {
    * insertion.
    */
   private final TreeMap<String, TreeMap<RetentionSlot, RetentionRow>> retention = new TreeMap<>();
+
+  /**
+   * The data-subject index: the references of each keyed hash, ordered by (kind code, reference
+   * text); String order is the UTF-16 code-unit order and never a collation. The map is keyed by
+   * the {@link SubjectHash} value, which compares its hash with {@code MessageDigest.isEqual}.
+   */
+  private final Map<SubjectHash, TreeSet<SubjectRef>> subjectIndex = new HashMap<>();
 
   private Status durability = new Status(false, 0, "in-memory ledger");
 
@@ -1371,6 +1387,63 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger {
     }
     due.sort(EXPIRY_ORDER);
     return List.copyOf(due.subList(0, Math.min(max, due.size())));
+  }
+
+  @Override
+  public void indexSubjects(List<SubjectEntry> entries) {
+    // List.copyOf refuses a null list or element before anything is stored
+    List<SubjectEntry> copy = List.copyOf(Objects.requireNonNull(entries, "entries"));
+    synchronized (lock) {
+      for (SubjectEntry entry : copy) {
+        subjectIndex
+            .computeIfAbsent(entry.hash(), hash -> new TreeSet<>(SUBJECT_REF_ORDER))
+            .add(entry.ref());
+      }
+    }
+  }
+
+  @Override
+  public List<SubjectRef> subjectRefs(SubjectHash hash, Optional<SubjectRef> after, int limit) {
+    Objects.requireNonNull(hash, "hash");
+    Objects.requireNonNull(after, "after");
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    int max = Math.min(limit, MAX_REFS_PER_CALL);
+    List<SubjectRef> refs = new ArrayList<>();
+    synchronized (lock) {
+      TreeSet<SubjectRef> stored = subjectIndex.get(hash);
+      if (stored != null && max > 0) {
+        for (SubjectRef ref : after.isPresent() ? stored.tailSet(after.get(), false) : stored) {
+          refs.add(ref);
+          if (refs.size() == max) {
+            break;
+          }
+        }
+      }
+    }
+    return List.copyOf(refs);
+  }
+
+  @Override
+  public int removeSubjectRefs(SubjectRef ref) {
+    Objects.requireNonNull(ref, "ref");
+    int removed = 0;
+    synchronized (lock) {
+      for (var each : subjectIndex.values()) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest
+        if (flaw == Flaw.SUBJECT_REMOVE_REMOVES_ALL) {
+          if (each.contains(ref)) {
+            removed += each.size();
+            each.clear();
+          }
+        } else if (each.remove(ref)) {
+          removed++;
+        }
+      }
+      subjectIndex.values().removeIf(TreeSet::isEmpty);
+    }
+    return removed;
   }
 
   @Override

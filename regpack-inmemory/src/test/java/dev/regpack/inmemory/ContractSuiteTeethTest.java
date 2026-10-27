@@ -37,6 +37,7 @@ import dev.regpack.inmemory.mutants.ShortPagesEvidenceContractTest;
 import dev.regpack.inmemory.mutants.ShortenRetentionEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SilentMissingKeyEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SubjectNotRegimeScopedLedgerContractTest;
+import dev.regpack.inmemory.mutants.SubjectRemoveRemovesAllLedgerContractTest;
 import dev.regpack.inmemory.mutants.SuppressAgainstAnyVersionLedgerContractTest;
 import dev.regpack.inmemory.mutants.TakeoverTouchesOtherEndpointsLedgerContractTest;
 import dev.regpack.inmemory.mutants.TrnNotUniquePerLeiLedgerContractTest;
@@ -233,6 +234,10 @@ class ContractSuiteTeethTest {
             "expiredRetentionListsOnlyDueUnheldRowsInOrder"));
     expected.put(
         RetentionNewRowUnheldLedgerContractTest.class, Set.of("aClaimRecordedAfterAHoldIsHeldToo"));
+
+    // P3c1 T10: the data-subject index (KF15, KF20)
+    expected.put(
+        SubjectRemoveRemovesAllLedgerContractTest.class, Set.of("removeDeletesOnlyTheNamedRef"));
 
     List<String> misses = new ArrayList<>();
     Set<String> usedExceptions = new TreeSet<>();
