@@ -131,8 +131,8 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
   /**
    * The sealer with the retention registrar (SEAL-1) over the PostgreSQL ledger and P-SEALED: the
    * policy of 1,826 days, a gate that asks nothing and a {@link RetentionEngine} for {@code
-   * regime}. NOT RUN LOCALLY: the class skips without {@code REGPACK_PG_URL}; the first run is
-   * CP-1.
+   * regime}. The class skips without {@code REGPACK_PG_URL}; it ran green on a local PostgreSQL
+   * 18.6 before CP-1 (record AP-8), and the CI run stays the authoritative one.
    */
   @Override
   public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {

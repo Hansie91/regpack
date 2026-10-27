@@ -29,8 +29,9 @@ import org.junit.jupiter.api.Test;
  * PgRetention.ARTIFACT_LOCK_SQL}, so that the test pins the purpose and the key text independently
  * of the production constant.
  *
- * <p>NOT RUN LOCALLY (no server on the development machine): first run at CP-1. Real-store test:
- * skipped without {@code REGPACK_PG_URL}, a failure with {@code REGPACK_PG_REQUIRED=true}.
+ * <p>Real-store test: skipped without {@code REGPACK_PG_URL}, a failure with {@code
+ * REGPACK_PG_REQUIRED=true}. It ran green on a local PostgreSQL 18.6 before CP-1 (record AP-8); the
+ * CI run stays the authoritative one.
  */
 class PgRetentionIT extends AbstractPgStoreTest {
   private static final Instant UNTIL = Instant.parse("2030-01-01T00:00:00Z");

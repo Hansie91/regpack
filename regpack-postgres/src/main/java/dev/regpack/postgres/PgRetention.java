@@ -84,11 +84,17 @@ import javax.sql.DataSource;
  * artifact of a call until the commit. Advisory and ordinary locks share one pool of {@code
  * max_locks_per_transaction} times ({@code max_connections} plus {@code max_prepared_transactions})
  * entries, 64 times 100 by default (manual: Server Configuration, Lock Management; Explicit
- * Locking, Advisory Locks). The port makes a call all or nothing, so the adapter cannot split one,
- * and a bulk caller chunks its claims (note P4-3). A call that meets the limit fails with SQLSTATE
- * 53200, which comes out as the ledger exception of any statement failure, after a rollback, with
- * nothing written. {@code RetentionLedgerContract#theLimitIsCappedAtOneThousand} (1,100 distinct
- * artifacts in one call) is the first call of that size on a server (CP-1).
+ * Locking, Advisory Locks). That figure is the nominal one and a lower bound: the table is sized
+ * with the background processes as well, and on a local PostgreSQL 18.6 with the defaults a call of
+ * 14,250 distinct artifacts succeeded and one of 14,600 failed; the edge moves with the locks of
+ * other sessions. The port makes a call all or nothing, so the adapter cannot split one, and a bulk
+ * caller chunks its claims (note P4-3, for example 500 distinct artifacts per call). A call that
+ * meets the limit fails with SQLSTATE 53200, which comes out as the ledger exception of any
+ * statement failure, after a rollback, with nothing written. While such a call holds its locks,
+ * other units that need an advisory lock (ingest, partition creation, the migrator, other retention
+ * writers) can fail with 53200 too, and plain reads do not. {@code
+ * RetentionLedgerContract#theLimitIsCappedAtOneThousand} (1,100 distinct artifacts in one call) is
+ * the largest call that the contract makes.
  *
  * <p><b>A call that writes nothing still waits for the standby (I1).</b> There is no such call:
  * {@link #recordRetention} writes a row version for every claim (a conflict updates the date
