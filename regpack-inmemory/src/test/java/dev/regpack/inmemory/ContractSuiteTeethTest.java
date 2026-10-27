@@ -29,6 +29,10 @@ import dev.regpack.inmemory.mutants.OverwriteOnDuplicateEvidenceContractTest;
 import dev.regpack.inmemory.mutants.OverwriteOnDuplicateJournalContractTest;
 import dev.regpack.inmemory.mutants.PageUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.RedeliveryReingestsLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionExpiredListsControlLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionHoldIgnoredInExpiredLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionNewRowUnheldLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionShortensLedgerContractTest;
 import dev.regpack.inmemory.mutants.ShortPagesEvidenceContractTest;
 import dev.regpack.inmemory.mutants.ShortenRetentionEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SilentMissingKeyEvidenceContractTest;
@@ -211,6 +215,24 @@ class ContractSuiteTeethTest {
     expected.put(
         EnvelopeRequirementIgnoredEnvelopeBodiesTest.class,
         Set.of("aPlainBodyIsRefusedWhenEnvelopesAreRequired"));
+
+    // P3c1 T8: the retention rows (KF11, KF13, KF20)
+    expected.put(
+        RetentionShortensLedgerContractTest.class,
+        Set.of(
+            "aLaterRetainUntilReplacesAndAnEarlierOneIsIgnored",
+            "twoRegimesGiveTwoRowsAndOneRegimeTwiceGivesOne"));
+    expected.put(
+        RetentionExpiredListsControlLedgerContractTest.class,
+        Set.of("expiredRetentionNeverListsControlKeys"));
+    expected.put(
+        RetentionHoldIgnoredInExpiredLedgerContractTest.class,
+        Set.of(
+            "aHoldAppliesToEveryRowOfTheArtifact",
+            "aClaimRecordedAfterAHoldIsHeldToo",
+            "expiredRetentionListsOnlyDueUnheldRowsInOrder"));
+    expected.put(
+        RetentionNewRowUnheldLedgerContractTest.class, Set.of("aClaimRecordedAfterAHoldIsHeldToo"));
 
     List<String> misses = new ArrayList<>();
     Set<String> usedExceptions = new TreeSet<>();
