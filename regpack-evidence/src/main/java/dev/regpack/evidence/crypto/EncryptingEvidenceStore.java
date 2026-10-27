@@ -43,9 +43,10 @@ import java.util.function.Predicate;
  *       know) are an {@link EvidenceCorruptionException}. There is never a fallback to the stored
  *       bytes as plaintext, so a store that was written to behind the decorator cannot downgrade.
  *   <li>A KEK that was destroyed is {@link dev.regpack.ports.crypto.DataShreddedException} on a
- *       read or a repeated put: neither an outage nor a corruption alarm, the object stays listed
- *       and its retention record stays readable. A new object cannot be sealed into a destroyed
- *       KEK: that is an outage.
+ *       read or a repeated put: neither an outage nor a corruption alarm, the object stays listed;
+ *       its retention can still be extended and its legal hold set through this decorator, but it
+ *       cannot be read through it (read the inner store). A new object cannot be sealed into a
+ *       destroyed KEK: that is an outage.
  *   <li>A failure of the key service ({@link KeyUnavailableException}) is an {@link
  *       EvidenceUnavailableException} with a fixed message and no cause; nothing is stored. A fault
  *       of the host (the {@code Entropy} or the {@code Clock}) is not the key service's and passes
@@ -55,8 +56,9 @@ import java.util.function.Predicate;
  * <p>Alarms of the inner store ({@link EvidenceCorruptionException}, an outage, an integrity alarm
  * for other bytes) are rethrown as they are. {@code list}, {@code extendRetention}, {@code
  * setLegalHold}, {@code grade} and {@code durability} pass through. The messages of the exceptions
- * made here are fixed texts: no key, KEK id, evidence key path or plaintext. Thread-safe when the
- * inner store and the cipher are.
+ * made here are fixed texts: no key, KEK id, evidence key path or plaintext. The media type, the
+ * retention class and the retention that {@code get} returns are the inner store's metadata and are
+ * not authenticated by the envelope. Thread-safe when the inner store and the cipher are.
  *
  * <p>Every reader and writer of the encrypted namespaces must use a decorated store, and nothing
  * outside the wiring may touch the raw store; a reader of the raw store sees envelopes.
@@ -180,16 +182,20 @@ public final class EncryptingEvidenceStore implements EvidenceStore {
 
   /**
    * A put of a key that holds an object: the same plaintext puts the stored envelope again with the
-   * first put's media type and retention (the inner store keeps its first write either way) and is
-   * {@code ALREADY_PRESENT_IDENTICAL}; other plaintext is an integrity alarm.
+   * request's media type and retention, which the inner store validates like any put and then
+   * ignores for a key that holds an object (the first put's values stay), and is {@code
+   * ALREADY_PRESENT_IDENTICAL}; other plaintext is an integrity alarm.
    */
   private PutOutcome putAgain(PutRequest request, StoredObject stored) {
     byte[] plaintext = open(request.key(), stored.bytes());
     if (!sameBytes(plaintext, request.bytes())) {
       throw new EvidenceIntegrityException(OTHER_BYTES);
     }
+    // the inner store checks the request's media type and retain-until as for any put and then
+    // keeps the first put's values (EvidenceStore.put); its outcome is not looked at: the key holds
+    // an object, so it can only acknowledge (or complete a missing second copy)
     inner.put(
-        new PutRequest(request.key(), stored.bytes(), stored.mediaType(), stored.retention()));
+        new PutRequest(request.key(), stored.bytes(), request.mediaType(), request.retention()));
     return PutOutcome.ALREADY_PRESENT_IDENTICAL;
   }
 

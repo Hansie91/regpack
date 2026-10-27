@@ -9,6 +9,10 @@ import java.util.Objects;
  * production default: the writers take a policy at construction, and production wiring passes
  * Legal's classes and periods (gate G8). The class names in use are {@code journal} (journal
  * objects), {@code sealed} (sealed files) and {@code epoch} (the restore-epoch marker).
+ *
+ * <p>A policy is a pure function of its two arguments: a writer may ask it twice for one write (the
+ * put and the registration of the same retention, SEAL-1) and expects equal answers. The class name
+ * it returns is 1 to 100 characters of A-Z a-z 0-9 . _ - (the retention rows refuse others).
  */
 @FunctionalInterface
 public interface RetentionPolicy {

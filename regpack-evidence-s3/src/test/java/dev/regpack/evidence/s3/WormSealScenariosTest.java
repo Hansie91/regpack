@@ -21,11 +21,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * T9: the 24 seal-and-send scenarios of {@code SealScenarioContract} (I1, first-byte limb) on an
- * in-memory ledger and P-WORM on the in-JVM fake S3 service, and the two methods of {@link
- * AbstractWormSealTest}. The fake is a stand-in: the run that counts as evidence for P-WORM is the
- * one against the real service ({@code WormSealScenariosIT}, job {@code evidence-worm}). The one
- * method of this class needs a fault switch of the fake and so has no twin there.
+ * T9: the 25 seal-and-send scenarios of {@code SealScenarioContract} (the 24 of P3b and, since P3c1
+ * T9, the SEAL-1 scenario; I1, first-byte limb) on an in-memory ledger and P-WORM on the in-JVM
+ * fake S3 service, and the two methods of {@link AbstractWormSealTest}. The fake is a stand-in: the
+ * run that counts as evidence for P-WORM is the one against the real service ({@code
+ * WormSealScenariosIT}, job {@code evidence-worm}). The one method of this class needs a fault
+ * switch of the fake and so has no twin there.
  */
 class WormSealScenariosTest extends AbstractWormSealTest {
   private FakeWormBackend backend;

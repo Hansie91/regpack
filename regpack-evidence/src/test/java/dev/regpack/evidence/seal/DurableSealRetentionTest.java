@@ -3,8 +3,11 @@ package dev.regpack.evidence.seal;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.regpack.evidence.retention.RetentionEngine;
+import dev.regpack.evidence.retention.RetentionVerifier;
 import dev.regpack.inmemory.InMemoryEvidenceStore;
 import dev.regpack.inmemory.InMemoryLedgerStore;
+import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
@@ -12,6 +15,7 @@ import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import dev.regpack.ports.evidence.seal.RetentionRegistrar;
 import dev.regpack.ports.evidence.seal.Sealing.SealOutcome;
+import dev.regpack.ports.evidence.seal.Sealing.SealRequest;
 import dev.regpack.ports.evidence.seal.Sealing.SealStatus;
 import dev.regpack.ports.ledger.DeliveryLedger.AttemptId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
@@ -19,6 +23,7 @@ import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerException;
+import dev.regpack.ports.ledger.RetentionLedger.RetentionRow;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
@@ -40,12 +45,15 @@ class DurableSealRetentionTest {
   private static final RetentionPolicy FIVE_YEARS = RetentionPolicy.fixedDays(1826);
   private static final EndpointKey EP = LedgerFixtures.endpoint("RETAIN2");
   private static final byte[] BYTES = SealScenarioContract.reportOf("BK-R1");
+  private static final String REGISTRAR_OUTAGE_DETAIL =
+      "the evidence store could not extend the retention of the sealed bytes;"
+          + " the delivery stays queued and a retention row may have been recorded";
 
   private ManualClock clock;
   private InMemoryLedgerStore ledger;
   private InMemoryEvidenceStore store;
   private final List<String> events = new ArrayList<>();
-  private EvidenceStore traced;
+  private TracingStore traced;
 
   @BeforeEach
   void setUp() {
@@ -161,7 +169,9 @@ class DurableSealRetentionTest {
 
     assertThat(outcome.status()).isEqualTo(SealStatus.EVIDENCE_UNAVAILABLE);
     assertThat(outcome.attempt()).isEmpty();
-    assertThat(outcome.detail()).isNotBlank().doesNotContain("secret-detail");
+    assertThat(outcome.detail())
+        .as("a fixed text that keeps nothing of the exception's own")
+        .isEqualTo(REGISTRAR_OUTAGE_DETAIL);
     assertThat(ledger.delivery(delivery).orElseThrow().state()).isEqualTo(DeliveryState.QUEUED);
     assertThat(ledger.attempt(new AttemptId(1))).as("no attempt row").isEmpty();
     assertThat(ledger.manifestRows("", Optional.empty(), 100)).as("no manifest row").isEmpty();
@@ -173,6 +183,45 @@ class DurableSealRetentionTest {
     down[0] = false;
     assertThat(seal(sealer, token, delivery).status()).isEqualTo(SealStatus.SEALED);
     assertThat(ledger.delivery(delivery).orElseThrow().state()).isEqualTo(DeliveryState.SENDING);
+  }
+
+  @Test
+  void anOutageBetweenTheRowAndTheExtensionFailsTheSealAndTheRetryRepairsIt() {
+    LeaseToken token = lease();
+    DeliveryId first = queued();
+    DeliveryId second = SealScenarioContract.queued(ledger, EP, "BK-R2");
+    DurableSeal sealer = sealer(new RetentionEngine(ledger, traced, new Regime("mifir.eu.rts22")));
+    assertThat(seal(sealer, token, first).status()).isEqualTo(SealStatus.SEALED);
+    clock.advance(Duration.ofDays(30));
+    Instant later = clock.now().plus(Duration.ofDays(1826));
+    Instant firstDate = START.plus(Duration.ofDays(1826));
+    SealRequest again = SealScenarioContract.request(EP, token, second, "BK-R2", BYTES);
+
+    // the engine records the row of the later seal and then fails to extend the store
+    traced.failNextExtend = true;
+    SealOutcome failed = sealer.seal(again);
+
+    assertThat(failed.status()).isEqualTo(SealStatus.EVIDENCE_UNAVAILABLE);
+    assertThat(failed.detail())
+        .isEqualTo(REGISTRAR_OUTAGE_DETAIL)
+        .doesNotContain("ledger is unchanged");
+    assertThat(ledger.delivery(second).orElseThrow().state()).isEqualTo(DeliveryState.QUEUED);
+    List<RetentionRow> rows = ledger.retentionRows("sealed/", Optional.empty(), 10);
+    assertThat(rows).as("a retention row was written before the failure").hasSize(1);
+    assertThat(rows.get(0).claim().retainUntil()).contains(later);
+    assertThat(store.get(sealedKey()).orElseThrow().retention().retainUntil())
+        .as("the store was not extended")
+        .isEqualTo(firstDate);
+    assertThat(new RetentionVerifier(store, ledger).verify(""))
+        .as("the lag is what the verifier finds")
+        .extracting(RetentionVerifier.Finding::kind)
+        .containsExactly(RetentionVerifier.Kind.RETAIN_UNTIL_SHORTER);
+
+    // the retry of the same request seals and repairs the store; the row stays one
+    assertThat(sealer.seal(again).status()).isEqualTo(SealStatus.SEALED);
+    assertThat(ledger.retentionRows("sealed/", Optional.empty(), 10)).hasSize(1);
+    assertThat(store.get(sealedKey()).orElseThrow().retention().retainUntil()).isEqualTo(later);
+    assertThat(new RetentionVerifier(store, ledger).verify("")).isEmpty();
   }
 
   @Test
@@ -267,8 +316,6 @@ class DurableSealRetentionTest {
         .as("two puts and no extension of the retention")
         .allMatch(event -> event.startsWith("put:"))
         .hasSize(2);
-    assertThat(RetentionRegistrar.NONE).isNotNull();
-    RetentionRegistrar.NONE.sealedObject(sealedKey(), FIVE_YEARS.retentionFor("sealed", START));
   }
 
   @Test
@@ -290,6 +337,7 @@ class DurableSealRetentionTest {
   private static final class TracingStore implements EvidenceStore {
     private final EvidenceStore delegate;
     private final List<String> events;
+    boolean failNextExtend;
 
     TracingStore(EvidenceStore delegate, List<String> events) {
       this.delegate = delegate;
@@ -326,6 +374,10 @@ class DurableSealRetentionTest {
     @Override
     public void extendRetention(EvidenceKey key, Instant newRetainUntil) {
       events.add("extend:" + key.path());
+      if (failNextExtend) {
+        failNextExtend = false;
+        throw new EvidenceUnavailableException("down");
+      }
       delegate.extendRetention(key, newRetainUntil);
     }
 

@@ -12,6 +12,7 @@ import dev.regpack.ports.ledger.SubjectIndexLedger.SubjectRef;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -21,8 +22,9 @@ import org.junit.jupiter.api.Test;
  * nothing, listed by hash in the order (kind, reference) with strict paging, deleted by reference.
  * The port is reached by a cast of {@link #ledger()} until {@code LedgerStore} extends it.
  *
- * <p>Every order below is a hand-written literal in byte order, never the order an adapter happens
- * to hold the rows in: on PostgreSQL a column with the default collation would fail it (D6).
+ * <p>Every order below is a hand-written literal in code point order (the order of the UTF-8
+ * bytes), never the order an adapter happens to hold the rows in: on PostgreSQL a column with the
+ * default collation would fail it (D6).
  */
 public interface SubjectIndexLedgerContract {
   /** A fresh, empty ledger for each test. */
@@ -44,6 +46,11 @@ public interface SubjectIndexLedgerContract {
 
   private static SubjectRef object(String ref) {
     return new SubjectRef(RefKind.EVIDENCE_OBJECT, ref);
+  }
+
+  /** An object reference {@code r/} followed by one code point, built without a source escape. */
+  private static SubjectRef objectEndingIn(int codePoint) {
+    return object("r/" + Character.toString(codePoint));
   }
 
   private static SubjectEntry entry(int hash, SubjectRef ref) {
@@ -111,7 +118,7 @@ public interface SubjectIndexLedgerContract {
     List<SubjectEntry> descending = new ArrayList<>();
     List<SubjectRef> ascending = new ArrayList<>();
     for (int i = 0; i < 2_500; i++) {
-      SubjectRef ref = object(String.format("walk/%06d", i));
+      SubjectRef ref = object(String.format(Locale.ROOT, "walk/%06d", i));
       ascending.add(ref);
       descending.add(0, entry(1, ref));
     }
@@ -182,6 +189,48 @@ public interface SubjectIndexLedgerContract {
     // the kind comes first: after the last report version the objects follow, whatever the text
     assertThat(index().subjectRefs(hash(1), Optional.of(report("zzz")), 2))
         .containsExactly(object("r/A"), object("r/B"));
+  }
+
+  /**
+   * Beyond the alphabet of an evidence key the order of UTF-16 code units and the order of code
+   * points (the UTF-8 bytes, and {@code COLLATE "C"} in a UTF8 database) differ: a supplementary
+   * character comes after U+E000 to U+FFFF by code point and before it by code unit. The index
+   * orders by code point whatever the adapter holds. No noncharacter is used, so the test also runs
+   * on a server.
+   */
+  @Test
+  default void refsBeyondTheKeyAlphabetAreOrderedByCodePointNotByUtf16Unit() {
+    List<SubjectRef> expected =
+        List.of(
+            object("r/z"),
+            objectEndingIn(0x00E9),
+            objectEndingIn(0x0800),
+            objectEndingIn(0xE000),
+            objectEndingIn(0xFFFD),
+            objectEndingIn(0x1F600),
+            objectEndingIn(0x20000));
+    List<SubjectEntry> reversed = new ArrayList<>();
+    for (int i = expected.size() - 1; i >= 0; i--) {
+      reversed.add(entry(1, expected.get(i)));
+    }
+    index().indexSubjects(reversed);
+
+    assertThat(refsOf(1)).containsExactlyElementsOf(expected);
+    assertThat(flatten(walk(1, 1))).containsExactlyElementsOf(expected);
+    assertThat(flatten(walk(1, 3))).containsExactlyElementsOf(expected);
+    // the bound is a character below the supplementary ones
+    assertThat(index().subjectRefs(hash(1), Optional.of(objectEndingIn(0xFFFD)), 5))
+        .containsExactly(objectEndingIn(0x1F600), objectEndingIn(0x20000));
+    // a supplementary reference is removed by its own text
+    assertThat(index().removeSubjectRefs(objectEndingIn(0x1F600))).isEqualTo(1);
+    assertThat(refsOf(1))
+        .containsExactly(
+            object("r/z"),
+            objectEndingIn(0x00E9),
+            objectEndingIn(0x0800),
+            objectEndingIn(0xE000),
+            objectEndingIn(0xFFFD),
+            objectEndingIn(0x20000));
   }
 
   @Test
@@ -255,6 +304,10 @@ public interface SubjectIndexLedgerContract {
     assertThat(refsOf(1)).isEmpty();
   }
 
+  /**
+   * Pins the validation of the record that every adapter inherits: the ledger never receives the
+   * value, so the assertions that nothing was written hold by construction.
+   */
   @Test
   default void aRefWithAControlCharacterOrOver512IsRefused() {
     index().indexSubjects(List.of(entry(1, object("sealed/a"))));
@@ -285,7 +338,7 @@ public interface SubjectIndexLedgerContract {
         .isInstanceOf(NullPointerException.class);
     // a paired surrogate is a valid character and counts as two
     assertThat(new SubjectRef(RefKind.EVIDENCE_OBJECT, "a😀b").ref()).hasSize(4);
-    // nothing was stored by the refused values
+    // the index is as it was (the refusals are the record constructor's)
     assertThat(refsOf(1)).containsExactly(object("sealed/a"));
   }
 

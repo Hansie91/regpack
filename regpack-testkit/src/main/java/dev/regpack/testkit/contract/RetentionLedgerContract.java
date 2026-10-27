@@ -19,6 +19,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -317,6 +322,93 @@ public interface RetentionLedgerContract {
   }
 
   @Test
+  default void aHoldReachesTheNamedArtifactOnlyAndNotKeysThatShareItsPrefix() {
+    Instant t = at("2030-01-01T00:00:00Z");
+    retention()
+        .recordRetention(
+            List.of(
+                claim("sealed/x", "emir.eu", t),
+                claim("sealed/x", "mifir.eu.rts22", t),
+                claim("sealed/xy", "emir.eu", t),
+                claim("sealed/x/z", "emir.eu", t),
+                claim("sealed/w", "emir.eu", t)));
+
+    retention().setRetentionHold(new EvidenceKey("sealed/x"), true);
+
+    // the key before it and its two extensions (one past a slash, one not) are not held
+    assertThat(every())
+        .extracting(
+            r -> r.claim().artifact().path() + "|" + r.claim().regime().id(),
+            RetentionRow::legalHold)
+        .containsExactly(
+            tuple("sealed/w|emir.eu", false),
+            tuple("sealed/x|emir.eu", true),
+            tuple("sealed/x|mifir.eu.rts22", true),
+            tuple("sealed/x/z|emir.eu", false),
+            tuple("sealed/xy|emir.eu", false));
+    assertThat(triples(due()))
+        .containsExactly(
+            "sealed/w|emir.eu|OBJECT_WRITTEN",
+            "sealed/x/z|emir.eu|OBJECT_WRITTEN",
+            "sealed/xy|emir.eu|OBJECT_WRITTEN");
+
+    // holding the longer key and releasing the shorter one do not reach each other
+    retention().setRetentionHold(new EvidenceKey("sealed/xy"), true);
+    retention().setRetentionHold(new EvidenceKey("sealed/x"), false);
+    assertThat(every())
+        .extracting(r -> r.claim().artifact().path(), RetentionRow::legalHold)
+        .containsExactly(
+            tuple("sealed/w", false),
+            tuple("sealed/x", false),
+            tuple("sealed/x", false),
+            tuple("sealed/x/z", false),
+            tuple("sealed/xy", true));
+  }
+
+  /**
+   * A hold and a claim for one artifact race (one thread holds, the other records a row for a new
+   * regime): whichever comes first, afterwards every row of the artifact is held. Every serial
+   * order ends so, so this passes on every correct adapter in every interleaving and can only fail
+   * on an adapter whose hold and claim do not see each other (some rounds per run).
+   */
+  @Test
+  default void aHoldAndANewRegimeOfOneArtifactRacingEndWithEveryRowHeld() throws Exception {
+    Instant t = at("2030-01-01T00:00:00Z");
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      for (int round = 0; round < 40; round++) {
+        String key = String.format(Locale.ROOT, "race/%03d", round);
+        retention().recordRetention(List.of(claim(key, "emir.eu", t)));
+        CountDownLatch start = new CountDownLatch(1);
+        Future<?> hold =
+            pool.submit(
+                () -> {
+                  assertThat(start.await(30, TimeUnit.SECONDS)).isTrue();
+                  retention().setRetentionHold(new EvidenceKey(key), true);
+                  return null;
+                });
+        Future<?> add =
+            pool.submit(
+                () -> {
+                  assertThat(start.await(30, TimeUnit.SECONDS)).isTrue();
+                  retention().recordRetention(List.of(claim(key, "mifir.eu.rts22", t)));
+                  return null;
+                });
+        start.countDown();
+        hold.get(60, TimeUnit.SECONDS);
+        add.get(60, TimeUnit.SECONDS);
+
+        assertThat(retention().retentionRows(key, Optional.empty(), 5))
+            .as("round %d", round)
+            .hasSize(2)
+            .allMatch(RetentionRow::legalHold);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
   default void aClaimRecordedAfterAHoldIsHeldToo() {
     Instant t = at("2030-01-01T00:00:00Z");
     retention().recordRetention(List.of(claim("sealed/h", "emir.eu", t)));
@@ -412,6 +504,82 @@ public interface RetentionLedgerContract {
         .containsExactly("p/b");
     assertThat(retention().retentionRows("q/", Optional.empty(), 10)).isEmpty();
     assertThat(artifacts(every())).containsExactly("other/z", "p/a", "p/b", "p/c", "p/d");
+  }
+
+  @Test
+  default void aPrefixMatchesTheStartOfAKeyAndNotItsMiddle() {
+    Instant t = at("2030-01-01T00:00:00Z");
+    retention()
+        .recordRetention(
+            List.of(
+                claim("p/a", "emir.eu", t),
+                claim("p/b", "emir.eu", t),
+                claim("q/p/a", "emir.eu", t),
+                claim("sealed/p/b", "emir.eu", t)));
+
+    assertThat(artifacts(retention().retentionRows("p/", Optional.empty(), 10)))
+        .containsExactly("p/a", "p/b");
+    assertThat(artifacts(retention().retentionRows("p/", Optional.of(new EvidenceKey("p/a")), 10)))
+        .containsExactly("p/b");
+    assertThat(retention().retentionRows("p/", Optional.of(new EvidenceKey("p/b")), 10)).isEmpty();
+    assertThat(artifacts(retention().retentionRows("q/", Optional.empty(), 10)))
+        .containsExactly("q/p/a");
+
+    // a key that is also a prefix: after is strictly after, also when it equals the prefix
+    assertThat(artifacts(retention().retentionRows("p/a", Optional.empty(), 10)))
+        .containsExactly("p/a");
+    assertThat(retention().retentionRows("p/a", Optional.of(new EvidenceKey("p/a")), 10)).isEmpty();
+
+    // a walk with the empty prefix advances, one artifact a page
+    assertThat(walkRetentionRows("", 1)).extracting(List::size).containsExactly(1, 1, 1, 1);
+    assertThat(artifacts(flatten(walkRetentionRows("", 1))))
+        .containsExactly("p/a", "p/b", "q/p/a", "sealed/p/b");
+  }
+
+  /** No key has a NUL or a character outside the key alphabet, so such a prefix lists nothing. */
+  @Test
+  default void aPrefixThatNoArtifactCanHaveListsNothing() {
+    Instant t = at("2030-01-01T00:00:00Z");
+    retention()
+        .recordRetention(
+            List.of(
+                claim("a", "emir.eu", t),
+                claim("a/b", "emir.eu", t),
+                claim("ord/a", "emir.eu", t),
+                claim("ord/e", "emir.eu", t)));
+    char nul = (char) 0;
+    char eAcute = (char) 0x00E9;
+    char euro = (char) 0x20AC;
+    char lone = (char) 0xD800;
+
+    for (String prefix :
+        List.of(
+            "a" + nul,
+            String.valueOf(nul),
+            "a/" + nul + "b",
+            "ord/" + nul,
+            "ord/" + eAcute,
+            "ord/e" + eAcute,
+            "ord/" + euro,
+            String.valueOf(eAcute),
+            "a b",
+            "ord/" + lone)) {
+      String shown = prefix.chars().boxed().toList().toString();
+      assertThat(retention().retentionRows(prefix, Optional.empty(), 100))
+          .as("prefix %s", shown)
+          .isEmpty();
+      assertThat(retention().retentionRows(prefix, Optional.of(new EvidenceKey("a")), 100))
+          .as("prefix %s after a", shown)
+          .isEmpty();
+      assertThat(retention().retentionRows(prefix, Optional.empty(), 1))
+          .as("prefix %s with limit 1", shown)
+          .isEmpty();
+    }
+
+    assertThat(artifacts(retention().retentionRows("a", Optional.empty(), 100)))
+        .containsExactly("a", "a/b");
+    assertThat(artifacts(retention().retentionRows("ord/", Optional.empty(), 100)))
+        .containsExactly("ord/a", "ord/e");
   }
 
   @Test
@@ -605,6 +773,34 @@ public interface RetentionLedgerContract {
   }
 
   @Test
+  default void anAsOfTheStoresCannotHoldIsRefused() {
+    retention().recordRetention(List.of(claim("sealed/a", "emir.eu", at("2030-01-01T00:00:00Z"))));
+
+    for (Instant bad :
+        List.of(
+            at("2030-01-01T00:00:00.000000001Z"),
+            at("+10000-01-01T00:00:00Z"),
+            at("-0001-12-31T23:59:59.999999Z"),
+            Instant.MAX,
+            Instant.MIN)) {
+      assertThatThrownBy(() -> retention().expiredRetention(bad, Optional.empty(), 10))
+          .as("asOf %s", bad)
+          .isInstanceOf(IllegalArgumentException.class)
+          .satisfies(
+              e -> assertThat(String.valueOf(e.getMessage())).doesNotContain(bad.toString()));
+    }
+
+    // the first and the last storable instant are accepted
+    assertThat(retention().expiredRetention(at("0000-01-01T00:00:00Z"), Optional.empty(), 10))
+        .isEmpty();
+    assertThat(retention().expiredRetention(farFuture(), Optional.empty(), 10)).hasSize(1);
+  }
+
+  /**
+   * Pins the validation of the record that every adapter inherits: the ledger never receives the
+   * value, so the assertions that nothing was written hold by construction.
+   */
+  @Test
   default void aRetainUntilOutsideTheStorableRangeIsRefused() {
     Instant valid = at("2030-01-01T00:00:00Z");
     List<Instant> unstorable =
@@ -708,6 +904,20 @@ public interface RetentionLedgerContract {
     assertThat(every()).hasSize(4);
   }
 
+  @Test
+  default void anEmptyListOfClaimsIsNotAnErrorAndStoresNothing() {
+    retention().recordRetention(List.of());
+    assertThat(every()).isEmpty();
+
+    retention().recordRetention(List.of(claim("sealed/e", "emir.eu", at("2030-01-01T00:00:00Z"))));
+    retention().recordRetention(List.of());
+    assertThat(every()).hasSize(1);
+  }
+
+  /**
+   * Pins the validation of the record that every adapter inherits: the ledger never receives the
+   * value, so the assertions that nothing was written hold by construction.
+   */
   @Test
   default void anInvalidClassNameIsRefused() {
     Instant t = at("2030-01-01T00:00:00Z");
@@ -821,7 +1031,7 @@ public interface RetentionLedgerContract {
     assertThat(duePages.get(19)).hasSize(1);
     assertThat(triples(flatten(duePages))).containsExactlyElementsOf(expected);
 
-    // a prefix inside the alphabet: 'sealed/a' starts the key 'sealed/a' and its nine neighbours
+    // a prefix inside the alphabet: sealed/a starts the key sealed/a and its eight extensions
     assertThat(artifacts(retention().retentionRows("sealed/a", Optional.empty(), 100)))
         .containsExactly(
             "sealed/a",

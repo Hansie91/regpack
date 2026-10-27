@@ -15,9 +15,10 @@ import java.util.Optional;
  * Nothing else deletes a row.
  *
  * <p>Order. References are ordered by (kind, text): the kind by its code (REPORT_VERSION before
- * EVIDENCE_OBJECT), the text by UTF-16 code unit, which for the alphabet of an evidence key is byte
- * order. An adapter must not use a locale or collation order: on PostgreSQL the column is {@code
- * COLLATE "C"} (D6 of the V003 document).
+ * EVIDENCE_OBJECT), the text by Unicode code point, which is the order of its UTF-8 bytes and of a
+ * PostgreSQL column with {@code COLLATE "C"} in a UTF8 database (for the alphabet of an evidence
+ * key it is also the UTF-16 order of {@code String.compareTo}). An adapter must not use a locale or
+ * collation order: on PostgreSQL the column is {@code COLLATE "C"} (D6 of the V003 document).
  */
 public interface SubjectIndexLedger {
   /** The most references that one {@link #subjectRefs} call returns. */

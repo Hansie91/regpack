@@ -345,6 +345,50 @@ class RetentionEngineTest {
   }
 
   @Test
+  void onlyTheControlNamespaceIsExemptAndNotEveryKeyThatMentionsIt() {
+    for (String path :
+        List.of("sealed/control/x", "controlx/a", "control", "Control/a", "a/control/b")) {
+      EvidenceKey key = new EvidenceKey(path);
+      put(key, Y2031);
+
+      engine.register(written(key, MIFIR, Y2032));
+
+      assertThat(rowsOf(key)).as(path).hasSize(1);
+      assertThat(retainedUntil(key)).as(path).isEqualTo(Y2032);
+    }
+    for (String path : List.of("control/a", "control/epoch/e000000000001")) {
+      assertThatThrownBy(() -> engine.register(written(new EvidenceKey(path), MIFIR, Y2032)))
+          .as(path)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+  }
+
+  @Test
+  void theClassOfTheRowIsTheClassOfThePutAndNotAFixedName() {
+    EvidenceKey landing = EvidenceKey.of("landing", "x1");
+    put(landing, Y2031);
+
+    engine.sealedObject(landing, new Retention(new RetentionClass("landing"), Y2032));
+
+    assertThat(rowsOf(landing))
+        .extracting(row -> row.claim().retentionClass())
+        .containsExactly("landing");
+  }
+
+  @Test
+  void aClaimWithoutADateAlsoRepairsAStoreThatLagsBehindItsRows() {
+    put(SEALED, Y2031);
+    // a row that a crash left ahead of the store: recorded, never extended
+    rows.recordRetention(List.of(written(SEALED, EMIR, Y2035)));
+
+    engine.register(claim(SEALED, MIFIR, AnchorEvent.TERMINATION, Optional.empty()));
+
+    assertThat(retainedUntil(SEALED))
+        .as("the extension to the latest row is repeated although the claim has no date")
+        .isEqualTo(Y2035);
+  }
+
+  @Test
   void theEngineCallsOnlyExtendRetentionAndSetLegalHold() {
     put(SEALED, Y2031);
 

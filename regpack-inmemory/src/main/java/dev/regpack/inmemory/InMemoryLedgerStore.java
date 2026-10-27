@@ -50,8 +50,9 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
- * In-memory {@link LedgerStore}. Every public method is {@code synchronized} on one lock and
- * validates its input before it mutates anything, so a rejected call leaves no trace.
+ * In-memory {@link LedgerStore}. Every public method except the configuration setter {@link
+ * #requireEnvelopeBodies} is {@code synchronized} on one lock and validates its input before it
+ * mutates anything, so a rejected call leaves no trace.
  */
 public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, SubjectIndexLedger {
   private record SourceEvent(EventIdentity eventIdentity, String sourceId) {}
@@ -63,6 +64,9 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, 
 
   private record ChainKey(Regime regime, EventIdentity eventIdentity) {}
 
+  /** The identity of a retention row inside one call: (artifact text, regime id text, anchor). */
+  private record ClaimKey(String artifact, String regime, AnchorEvent anchor) {}
+
   /** The place of a retention row inside its artifact: ordered by regime id text, then anchor. */
   private record RetentionSlot(String regime, AnchorEvent anchor)
       implements Comparable<RetentionSlot> {
@@ -73,9 +77,32 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, 
     }
   }
 
-  /** The order of the references of one hash: the kind by its code, then the text by code unit. */
+  /**
+   * The order of the references of one hash: the kind by its code, then the text by code point (the
+   * order of its UTF-8 bytes).
+   */
   private static final Comparator<SubjectRef> SUBJECT_REF_ORDER =
-      Comparator.comparing(SubjectRef::kind).thenComparing(SubjectRef::ref);
+      Comparator.comparing(SubjectRef::kind)
+          .thenComparing(SubjectRef::ref, InMemoryLedgerStore::compareCodePoints);
+
+  /**
+   * Compares two texts by Unicode code point. {@code KeyText} forbids unpaired surrogates, so a
+   * surrogate is the start of a supplementary code point, which sorts after every BMP character;
+   * this is the order of the UTF-8 bytes and of {@code COLLATE "C"} in a UTF8 database.
+   */
+  private static int compareCodePoints(String a, String b) {
+    int shared = Math.min(a.length(), b.length());
+    for (int i = 0; i < shared; i++) {
+      char x = a.charAt(i);
+      char y = b.charAt(i);
+      if (x != y) {
+        boolean xs = Character.isSurrogate(x);
+        boolean ys = Character.isSurrogate(y);
+        return xs == ys ? x - y : (xs ? 1 : -1);
+      }
+    }
+    return a.length() - b.length();
+  }
 
   /** The order of the expiry list: (retain-until, artifact text, regime id text, anchor). */
   private static final Comparator<RetentionRow> EXPIRY_ORDER =
@@ -256,8 +283,8 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, 
 
   /**
    * The data-subject index: the references of each keyed hash, ordered by (kind code, reference
-   * text); String order is the UTF-16 code-unit order and never a collation. The map is keyed by
-   * the {@link SubjectHash} value, which compares its hash with {@code MessageDigest.isEqual}.
+   * text); the text by code point (UTF-8 byte order) and never a collation. The map is keyed by the
+   * {@link SubjectHash} value, which compares its hash with {@code MessageDigest.isEqual}.
    */
   private final Map<SubjectHash, TreeSet<SubjectRef>> subjectIndex = new HashMap<>();
 
@@ -1265,9 +1292,14 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, 
   public void recordRetention(List<RetentionClaim> claims) {
     Objects.requireNonNull(claims, "claims");
     List<RetentionClaim> copy = List.copyOf(claims);
-    Set<List<Object>> seen = new HashSet<>();
+    if (copy.isEmpty()) {
+      return;
+    }
+    Set<ClaimKey> seen = new HashSet<>();
     for (RetentionClaim claim : copy) {
-      if (!seen.add(List.of(claim.artifact().path(), claim.regime().id(), claim.anchor()))) {
+      ClaimKey identity =
+          new ClaimKey(claim.artifact().path(), claim.regime().id(), claim.anchor());
+      if (!seen.add(identity)) {
         throw new IllegalArgumentException("two claims of one call have one artifact and anchor");
       }
     }
@@ -1358,6 +1390,7 @@ public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, 
       Instant asOf, Optional<RetentionRow> after, int limit) {
     Objects.requireNonNull(asOf, "asOf");
     Objects.requireNonNull(after, "after");
+    RetentionClaim.requireStorable("asOf", asOf);
     if (limit < 0) {
       throw new IllegalArgumentException("limit must not be negative");
     }

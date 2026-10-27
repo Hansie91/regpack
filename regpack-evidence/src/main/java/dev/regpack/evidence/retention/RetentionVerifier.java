@@ -47,6 +47,10 @@ import java.util.Optional;
  *
  * <p>Findings carry the evidence key and a fixed text, never a date, a regime or content. They are
  * sorted by key and kind. The class holds no state between runs.
+ *
+ * <p>A run that overlaps a registration or a hold in flight can report a lag that is gone a moment
+ * later; a caller that alarms runs verify again with the artifact's key as prefix once before it
+ * does.
  */
 public final class RetentionVerifier {
   /** The detail of {@link Kind#RETAIN_UNTIL_SHORTER}. */

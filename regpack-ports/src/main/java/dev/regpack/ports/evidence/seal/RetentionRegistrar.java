@@ -15,8 +15,9 @@ import dev.regpack.ports.evidence.EvidenceStore;
  * {@link EvidenceStore.Retention} that the seal used for that put (also when the put found the
  * object and kept the retention of the first one). It throws what the retention side throws: an
  * {@link dev.regpack.ports.evidence.EvidenceUnavailableException} makes the seal answer {@code
- * EVIDENCE_UNAVAILABLE} with the ledger unchanged, any other exception (a ledger failure included)
- * ends the seal as it is. Idempotent: the call can be repeated for the same arguments.
+ * EVIDENCE_UNAVAILABLE} with the delivery unchanged (a retention row that the registrar already
+ * wrote stays and only over-retains), any other exception (a ledger failure included) ends the seal
+ * as it is. Idempotent: the call can be repeated for the same arguments.
  */
 @FunctionalInterface
 public interface RetentionRegistrar {

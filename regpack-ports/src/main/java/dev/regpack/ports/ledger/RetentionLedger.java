@@ -65,18 +65,36 @@ public interface RetentionLedger {
       Objects.requireNonNull(retainUntil, "retainUntil");
       Objects.requireNonNull(retentionClass, "retentionClass");
       if (retainUntil.isPresent()) {
-        Instant date = retainUntil.get();
-        if (date.getNano() % 1_000 != 0) {
-          throw new IllegalArgumentException("retainUntil must have whole microseconds");
-        }
-        if (date.isBefore(FIRST_YEAR_0000) || date.isAfter(LAST_YEAR_9999)) {
-          throw new IllegalArgumentException("retainUntil year must be from 0000 to 9999");
-        }
+        requireStorable("retainUntil", retainUntil.get());
       }
       if (!CLASS.matcher(retentionClass).matches()) {
         throw new IllegalArgumentException(
             "retentionClass must be 1 to 100 characters of A-Z a-z 0-9 . _ -");
       }
+    }
+
+    /**
+     * Refuses an instant that no store can hold: one with sub-microsecond precision, or one with a
+     * year outside 0000 to 9999. Every adapter calls it, as the record does for a retain-until,
+     * before it binds an instant that a caller supplied (the {@code asOf} of {@link
+     * RetentionLedger#expiredRetention} among them; {@code PgRetention} too). The messages name
+     * {@code field} and the rule and hold no value.
+     *
+     * @param field the name of the parameter, for the message
+     * @return {@code instant}
+     * @throws NullPointerException when {@code field} or {@code instant} is null
+     * @throws IllegalArgumentException when the instant is outside these rules
+     */
+    public static Instant requireStorable(String field, Instant instant) {
+      Objects.requireNonNull(field, "field");
+      Objects.requireNonNull(instant, "instant");
+      if (instant.getNano() % 1_000 != 0) {
+        throw new IllegalArgumentException(field + " must have whole microseconds");
+      }
+      if (instant.isBefore(FIRST_YEAR_0000) || instant.isAfter(LAST_YEAR_9999)) {
+        throw new IllegalArgumentException(field + " year must be from 0000 to 9999");
+      }
+      return instant;
     }
   }
 
@@ -95,7 +113,8 @@ public interface RetentionLedger {
    * merges into the row: {@code retainUntil} becomes the later of the two (a value replaces an
    * empty one, an empty one never replaces a value), the class and {@code recordedAt} stay. A new
    * row takes the legal hold of its artifact (held when any row of the artifact is held) and has
-   * {@code recordedAt} = the ledger clock. An empty list does nothing.
+   * {@code recordedAt} = the ledger clock. An empty list does nothing. A hold and a claim for the
+   * same artifact racing are serialised: afterwards every row of the artifact has the hold.
    *
    * @throws IllegalArgumentException when two claims of the list have one (artifact, regime,
    *     anchor); nothing is stored
@@ -117,6 +136,12 @@ public interface RetentionLedger {
    * across two calls. The prefix need not end at a segment boundary and may be empty; {@code after}
    * is an artifact (not a row) and need not exist.
    *
+   * <p>A prefix is the start of a key, not a part of it anywhere. {@code after} is strictly after,
+   * also when it equals the prefix. A prefix that no key can have (U+0000, or a character outside
+   * the alphabet of an {@link EvidenceKey}) lists nothing. {@code after} is a position (an
+   * artifact), not a cursor: an artifact recorded meanwhile that sorts at or before it is not
+   * returned.
+   *
    * @throws IllegalArgumentException when {@code limit} is negative
    */
   List<RetentionRow> retentionRows(String prefix, Optional<EvidenceKey> after, int limit);
@@ -128,8 +153,15 @@ public interface RetentionLedger {
    * artifact, regime, anchor), strictly after the row {@code after}, at most {@code min(limit,
    * MAX_RETENTION_ROWS_PER_CALL)} rows. A row with an empty date is never due.
    *
-   * @throws IllegalArgumentException when {@code limit} is negative, or when {@code after} has an
-   *     empty date (such a row is never in the list)
+   * <p>A snapshot per call. Over a walk every row that is due and unchanged for the whole walk is
+   * listed exactly once; a row recorded, extended or held meanwhile may be missed or listed twice.
+   * The list is advisory: a caller that acts on a row irreversibly re-reads the rows of the
+   * artifact ({@link #retentionRows}) and the hold of the store immediately before it acts.
+   *
+   * @throws IllegalArgumentException when {@code limit} is negative, when {@code asOf} has
+   *     sub-microsecond precision or a year outside 0000 to 9999 (the rule of a retain-until, see
+   *     {@link RetentionClaim#requireStorable}), or when {@code after} has an empty date (such a
+   *     row is never in the list)
    */
   List<RetentionRow> expiredRetention(Instant asOf, Optional<RetentionRow> after, int limit);
 }

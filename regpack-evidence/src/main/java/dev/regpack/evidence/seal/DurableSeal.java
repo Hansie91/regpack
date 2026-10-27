@@ -52,7 +52,7 @@ import java.util.Optional;
  * manifest rows carry the hash and the size of the bytes as they were put; the rows are planned
  * before the first put, so that the one-line teeth of the shared suite (D-E10) can reorder the
  * steps. The class is not final for the same reason: the template methods are overridden by test
- * subclasses, one each.
+ * subclasses.
  *
  * <p>Retention (SEAL-1, P3c1 D-K4). The sealed key is content-addressed, so a later delivery of the
  * same bytes shares the object and its put keeps the retention of the first one. With a {@link
@@ -186,7 +186,7 @@ public class DurableSeal implements Sealing {
           SealStatus.EVIDENCE_UNAVAILABLE,
           Optional.empty(),
           "the evidence store could not extend the retention of the sealed bytes;"
-              + " the ledger is unchanged");
+              + " the delivery stays queued and a retention row may have been recorded");
     }
     try {
       putIntentObject(context);
@@ -301,10 +301,11 @@ public class DurableSeal implements Sealing {
 
   /**
    * The retention that a seal gives to its sealed object: the class {@value
-   * #SEALED_RETENTION_CLASS} from the clock instant of the seal. A policy is a function of its two
-   * arguments, so the put and the registration of one seal see the same value.
+   * #SEALED_RETENTION_CLASS} from the clock instant of the seal. It is asked twice for one seal
+   * (the put and the registration); both see the same value because a {@link RetentionPolicy}
+   * answers the same for the same arguments.
    */
-  protected EvidenceStore.Retention sealedRetention(SealContext c) {
+  private EvidenceStore.Retention sealedRetention(SealContext c) {
     return retention.retentionFor(SEALED_RETENTION_CLASS, c.intent().clockInstant());
   }
 
@@ -314,9 +315,10 @@ public class DurableSeal implements Sealing {
    * (same bytes, later delivery) is extended to the end of the retention of each later seal and the
    * {@code retention} row follows. The five-argument constructor registers nothing. An {@link
    * EvidenceUnavailableException} of the registrar makes the seal answer {@code
-   * EVIDENCE_UNAVAILABLE} with the ledger unchanged; any other exception, a {@code LedgerException}
-   * among them, propagates, and the delivery stays queued. A row written for a seal that never
-   * commits only over-retains.
+   * EVIDENCE_UNAVAILABLE} with the delivery unchanged (a retention row that the registrar already
+   * wrote stays and only over-retains); any other exception, a {@code LedgerException} among them,
+   * propagates, and the delivery stays queued. A row written for a seal that never commits only
+   * over-retains.
    */
   protected void registerSealedObject(SealContext c) {
     registrar.sealedObject(

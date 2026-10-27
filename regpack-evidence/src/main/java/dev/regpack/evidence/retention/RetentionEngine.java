@@ -50,8 +50,9 @@ import java.util.Optional;
  * store, so retention logic is not in the decorator.
  *
  * <p>Thread-safe when the ledger and the store are. Two claims for one artifact at once both end
- * with the store at the latest date: each reads the rows after its own record, and the one that
- * recorded last sees all of them.
+ * with the store at the latest date because the store only extends: the claim with the lower date
+ * that extends last is refused and counts as satisfied. Reading the rows after the record is what
+ * lets a retry repair a store that lags behind its rows.
  */
 public final class RetentionEngine implements RetentionRegistrar {
   private static final String EXEMPT_KEY = "an epoch marker has no retention row";

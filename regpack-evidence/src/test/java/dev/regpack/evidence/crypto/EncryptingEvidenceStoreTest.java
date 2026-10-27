@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 import dev.regpack.evidence.seal.DurableSeal;
+import dev.regpack.evidence.seal.SealedKeys;
 import dev.regpack.evidence.seal.SendGate;
 import dev.regpack.inmemory.InMemoryEvidenceStore;
 import dev.regpack.inmemory.InMemoryKms;
@@ -59,6 +60,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.Test;
@@ -531,13 +533,54 @@ class EncryptingEvidenceStoreTest {
     assertThat(spy.puts.get(0).key()).isEqualTo(K);
     assertThat(spy.puts.get(0).bytes()).isEqualTo(stored);
     assertThat(spy.puts.get(0).mediaType())
-        .as("the first put's media type")
-        .isEqualTo("text/plain");
-    assertThat(spy.puts.get(0).retention()).as("the first put's retention").isEqualTo(first);
+        .as("the request's media type, which the inner store validates and then ignores")
+        .isEqualTo("application/octet-stream");
+    assertThat(spy.puts.get(0).retention())
+        .as("the request's retention, which the inner store validates and then ignores")
+        .isEqualTo(later);
     StoredObject got = store.get(K).orElseThrow();
     assertThat(got.mediaType()).isEqualTo("text/plain");
     assertThat(got.retention()).isEqualTo(first);
     assertThat(storedBytes(K)).isEqualTo(stored);
+  }
+
+  /** The six instants of {@code EvidenceStoreContract} that no evidence store can hold. */
+  private static List<Instant> unstorableRetainUntils() {
+    return List.of(
+        Instant.parse("2030-01-01T00:00:00.000000001Z"),
+        Instant.parse("2030-01-01T00:00:00.123456789Z"),
+        Instant.parse("+10000-01-01T00:00:00Z"),
+        Instant.parse("-0001-12-31T23:59:59Z"),
+        Instant.MAX,
+        Instant.MIN);
+  }
+
+  @Test
+  void aRepeatedPutWithAnUnstorableRetainUntilIsRefusedLikeTheRawStore() {
+    store.put(request(K, "hello"));
+    byte[] before = storedBytes(K);
+    Retention firstRetention = raw.get(K).orElseThrow().retention();
+
+    for (Instant instant : unstorableRetainUntils()) {
+      PutRequest bad =
+          new PutRequest(
+              K,
+              utf8("hello"),
+              "text/plain",
+              new Retention(new RetentionClass("landing"), instant));
+      assertThatThrownBy(() -> store.put(bad))
+          .as("retain-until %s through the decorator", instant)
+          .isInstanceOf(IllegalArgumentException.class);
+      // the reference: the raw store refuses the same request for the same reason
+      assertThatThrownBy(() -> raw.put(new PutRequest(K, before, "text/plain", bad.retention())))
+          .as("retain-until %s through the raw store", instant)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    assertThat(storedBytes(K)).as("the stored envelope is unchanged").isEqualTo(before);
+    assertThat(raw.get(K).orElseThrow().retention())
+        .as("the first put's retention stays")
+        .isEqualTo(firstRetention);
   }
 
   @Test
@@ -567,7 +610,7 @@ class EncryptingEvidenceStoreTest {
       for (int i = 0; i < threads; i++) {
         Callable<PutOutcome> task =
             () -> {
-              release.await();
+              assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
               return store.put(request(K, "same plaintext"));
             };
         futures.add(pool.submit(task));
@@ -576,7 +619,7 @@ class EncryptingEvidenceStoreTest {
       int created = 0;
       int identical = 0;
       for (Future<PutOutcome> future : futures) {
-        PutOutcome outcome = future.get();
+        PutOutcome outcome = future.get(30, TimeUnit.SECONDS);
         if (outcome == PutOutcome.CREATED) {
           created++;
         } else {
@@ -604,7 +647,7 @@ class EncryptingEvidenceStoreTest {
         String text = "writer-" + i;
         Callable<PutOutcome> task =
             () -> {
-              release.await();
+              assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
               return store.put(request(K, text));
             };
         futures.add(pool.submit(task));
@@ -615,7 +658,7 @@ class EncryptingEvidenceStoreTest {
       String winner = "";
       for (int i = 0; i < threads; i++) {
         try {
-          if (futures.get(i).get() == PutOutcome.CREATED) {
+          if (futures.get(i).get(30, TimeUnit.SECONDS) == PutOutcome.CREATED) {
             created++;
             winner = "writer-" + i;
           }
@@ -766,6 +809,70 @@ class EncryptingEvidenceStoreTest {
     assertThat(raw.get(EvidenceKey.of("landing", "k2"))).isEmpty();
   }
 
+  /**
+   * Pins a consequence, not a wish. The sealed key is content-addressed and the store port has no
+   * delete, so the same bytes sealed again after the KEK of the first copy was destroyed meet the
+   * husk of that copy: the decorator cannot open it to compare, and the seal ends in a {@link
+   * DataShreddedException}, not in a {@link SealStatus}. The delivery stays queued and an attempt
+   * id is spent; that artifact hash stays blocked until a job removes the object. Hand-off to P4
+   * and P8: the destruction job must remove the objects of a destroyed cohort once their retention
+   * and any lock have ended, or the sender must be told that a byte-identical resend of an expired
+   * report is impossible.
+   */
+  @Test
+  void
+      aResealOfByteIdenticalBytesAfterTheirCohortWasDestroyedIsADataShreddedExceptionAndNotAStatus() {
+    ManualClock sealClock = new ManualClock(Instant.parse("2026-06-01T00:00:00Z"));
+    InMemoryEvidenceStore thatStore = new InMemoryEvidenceStore(sealClock);
+    EncryptingEvidenceStore evidence = fixtures.encryptPerYear(thatStore, sealClock);
+    InMemoryLedgerStore ledger = new InMemoryLedgerStore(sealClock);
+    DurableSeal sealing =
+        new DurableSeal(
+            ledger,
+            evidence,
+            sealClock,
+            RetentionPolicy.fixedDays(1826),
+            new SendGate(SendGate.Requirement.none()));
+    EndpointKey endpoint = LedgerFixtures.endpoint("RESEAL");
+    byte[] bytes = SealScenarioContract.reportOf("BK-1");
+    LeaseToken firstToken = SealScenarioContract.lease(ledger, endpoint, "A");
+    DeliveryId first = SealScenarioContract.queued(ledger, endpoint, "BK-1");
+    assertThat(
+            sealing
+                .seal(SealScenarioContract.request(endpoint, firstToken, first, "BK-1", bytes))
+                .status())
+        .isEqualTo(SealStatus.SEALED);
+    EvidenceKey sealedKey = SealedKeys.of(Sha256.of(bytes));
+    assertThat(Envelope.header(thatStore.get(sealedKey).orElseThrow().bytes()).kekId())
+        .isEqualTo("kek-2026");
+
+    // the KEK of the cohort is destroyed; the lease of the first seal has long expired
+    sealClock.set(Instant.parse("2028-02-01T00:00:00Z"));
+    fixtures.destroy("kek-2026");
+    LeaseToken secondToken = SealScenarioContract.lease(ledger, endpoint, "B");
+    DeliveryId second = SealScenarioContract.queued(ledger, endpoint, "BK-2");
+    SealRequest again = SealScenarioContract.request(endpoint, secondToken, second, "BK-2", bytes);
+
+    assertThatThrownBy(() -> sealing.seal(again)).isInstanceOf(DataShreddedException.class);
+    assertThat(ledger.delivery(second).orElseThrow().state()).isEqualTo(DeliveryState.QUEUED);
+    assertThat(ledger.attempt(new AttemptId(2))).as("the attempt id was spent").isEmpty();
+    assertThat(ledger.manifestRows("", Optional.empty(), 100))
+        .hasSize(2)
+        .noneMatch(row -> row.attempt().equals(Optional.of(new AttemptId(2))));
+
+    // other bytes seal as before, under the KEK of the clock's year
+    byte[] other = SealScenarioContract.reportOf("BK-3");
+    DeliveryId third = SealScenarioContract.queued(ledger, endpoint, "BK-3");
+    SealOutcome fresh =
+        sealing.seal(SealScenarioContract.request(endpoint, secondToken, third, "BK-3", other));
+    assertThat(fresh.status()).isEqualTo(SealStatus.SEALED);
+    assertThat(fresh.attempt()).contains(new AttemptId(3));
+    assertThat(
+            Envelope.header(thatStore.get(SealedKeys.of(Sha256.of(other))).orElseThrow().bytes())
+                .kekId())
+        .isEqualTo("kek-2028");
+  }
+
   @Test
   void aShreddedKekDoesNotTouchTheObjectsOfAnotherKek() {
     EncryptingEvidenceStore perYear = fixtures.encryptPerYear(raw, clock);
@@ -882,6 +989,57 @@ class EncryptingEvidenceStoreTest {
     assertOutage(catchThrowable(() -> perYear.put(request(late, "hello"))));
     assertThat(raw.get(late)).isEmpty();
     assertThat(raw.list("", Optional.empty(), 10)).containsExactly(K);
+  }
+
+  @Test
+  void theKeyServiceIsCalledOncePerOperation() {
+    ScriptedKms kms = new ScriptedKms(fixtures.kms());
+    EncryptingEvidenceStore counted = overScriptedKms(kms);
+
+    assertThat(counted.put(request(K, "hello"))).isEqualTo(PutOutcome.CREATED);
+    assertThat(kms.wraps.get()).as("one wrap per object").isEqualTo(1);
+    assertThat(kms.unwraps.get()).as("a new object is not opened").isZero();
+    assertThat(fixtures.drawnHex()).as("one data key and one nonce").hasSize(2);
+
+    assertThat(counted.put(request(K, "hello"))).isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+    assertThat(kms.wraps.get()).as("a repeated put wraps nothing").isEqualTo(1);
+    assertThat(kms.unwraps.get()).as("one unwrap per repeated put").isEqualTo(1);
+    assertThat(fixtures.drawnHex()).as("a repeated put draws nothing").hasSize(2);
+
+    assertThat(counted.get(K)).isPresent();
+    assertThat(kms.wraps.get()).as("a read wraps nothing").isEqualTo(1);
+    assertThat(kms.unwraps.get()).as("one unwrap per read").isEqualTo(2);
+  }
+
+  @Test
+  void thePlainClassesNeedNoKeyServiceAtAll() {
+    ScriptedKms kms = new ScriptedKms(fixtures.kms());
+    ObjectCipher cipher =
+        fixtures.cipher(
+            kms, KekSelector.single(EncryptedFixtures.kek(EncryptedFixtures.SINGLE_KEK)), clock);
+    EncryptingEvidenceStore byDefault = EncryptingEvidenceStore.withDefaultPolicy(raw, cipher);
+    EvidenceKey sealedKey = EvidenceKey.of("sealed", "ab", "ab".repeat(32));
+    EvidenceKey journal = EvidenceKey.of("journal", "a");
+    EvidenceKey marker = EvidenceKey.of("control", "epoch", "e000000000001");
+    byDefault.put(request(sealedKey, "sealed value"));
+    int wraps = kms.wraps.get();
+    int unwraps = kms.unwraps.get();
+
+    // assumption A5: the journal and the control namespace are read and written without a KEK
+    kms.wrapFailure = new IllegalStateException("down");
+    kms.unwrapFailure = new IllegalStateException("down");
+    assertThat(byDefault.put(request(journal, "journal value"))).isEqualTo(PutOutcome.CREATED);
+    assertThat(byDefault.put(request(marker, "marker value"))).isEqualTo(PutOutcome.CREATED);
+    assertThat(byDefault.put(request(journal, "journal value")))
+        .isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+    assertThat(byDefault.get(journal).orElseThrow().bytes()).isEqualTo(utf8("journal value"));
+    assertThat(byDefault.get(marker).orElseThrow().bytes()).isEqualTo(utf8("marker value"));
+    assertThat(byDefault.list("", Optional.empty(), 10)).hasSize(3);
+
+    assertThat(kms.wraps.get()).as("no wrap for a plain class").isEqualTo(wraps);
+    assertThat(kms.unwraps.get()).as("no unwrap for a plain class").isEqualTo(unwraps);
+    // and the encrypted namespace does need it
+    assertOutage(catchThrowable(() -> byDefault.get(sealedKey)));
   }
 
   @Test

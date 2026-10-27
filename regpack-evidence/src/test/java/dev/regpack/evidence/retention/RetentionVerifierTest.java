@@ -18,8 +18,10 @@ import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceStore.Retention;
 import dev.regpack.ports.evidence.EvidenceStore.RetentionClass;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
+import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.ports.ledger.RetentionLedger.AnchorEvent;
 import dev.regpack.ports.ledger.RetentionLedger.RetentionClaim;
+import dev.regpack.ports.ledger.RetentionLedger.RetentionRow;
 import dev.regpack.testkit.clock.ManualClock;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -28,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.Function;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -241,6 +244,33 @@ class RetentionVerifierTest {
         .containsExactly(late.path());
   }
 
+  @Test
+  void aFindingAtTheFirstAndLastArtifactOfEveryPageIsFound() {
+    // three pages of 500 artifacts: the mismatches are the first and the last artifact of each
+    int count = 1_300;
+    List<Integer> mismatched = List.of(0, 499, 500, 999, 1_000, 1_299);
+    List<EvidenceKey> keys = new ArrayList<>();
+    List<String> mismatchedPaths = new ArrayList<>();
+    for (int i = 0; i < count; i++) {
+      EvidenceKey key = key(String.format(Locale.ROOT, "%08d", i));
+      keys.add(key);
+      put(store, key, mismatched.contains(i) ? Y2030 : Y2032);
+      if (mismatched.contains(i)) {
+        mismatchedPaths.add(key.path());
+      }
+    }
+    for (int from = 0; from < count; from += 500) {
+      rows.recordRetention(claims(keys.subList(from, Math.min(from + 500, count)), Y2032));
+    }
+
+    List<Finding> findings = verifier.verify("");
+
+    assertThat(findings)
+        .extracting(finding -> finding.artifact().path())
+        .containsExactlyElementsOf(mismatchedPaths);
+    assertThat(findings).extracting(Finding::kind).containsOnly(Kind.RETAIN_UNTIL_SHORTER);
+  }
+
   private static List<RetentionClaim> claims(List<EvidenceKey> keys, Instant until) {
     List<RetentionClaim> claims = new ArrayList<>();
     for (EvidenceKey key : keys) {
@@ -248,6 +278,95 @@ class RetentionVerifierTest {
           new RetentionClaim(key, MIFIR, AnchorEvent.OBJECT_WRITTEN, Optional.of(until), "sealed"));
     }
     return claims;
+  }
+
+  @Test
+  void aLedgerThatListsOutOfKeyOrderIsAnErrorAndNotAnEndlessWalk() {
+    EvidenceKey first = key("aa0001");
+    EvidenceKey second = key("bb0002");
+    put(store, first, Y2032);
+    put(store, second, Y2032);
+    row(first, MIFIR, Y2032);
+    row(second, MIFIR, Y2032);
+    // a ledger that ignores 'after': every page it answers is the first page again. It answers
+    // the same page three times and then nothing, so that a verifier without the guard ends the
+    // test instead of hanging it
+    int[] calls = {0};
+    RetentionLedger ignoresAfter =
+        (RetentionLedger)
+            Proxy.newProxyInstance(
+                RetentionLedger.class.getClassLoader(),
+                new Class<?>[] {RetentionLedger.class},
+                (proxy, method, args) -> {
+                  try {
+                    if (method.getName().equals("retentionRows")) {
+                      calls[0]++;
+                      if (calls[0] <= 3) {
+                        return rows.retentionRows(
+                            (String) args[0], Optional.empty(), (int) args[2]);
+                      }
+                      return List.of();
+                    }
+                    return method.invoke(rows, args);
+                  } catch (InvocationTargetException e) {
+                    throw e.getCause();
+                  }
+                });
+
+    assertThatThrownBy(() -> new RetentionVerifier(store, ignoresAfter).verify(""))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("the retention rows are not in key order");
+    assertThat(calls[0]).as("the second page is the one that is refused").isEqualTo(2);
+  }
+
+  /** The ledger of this test whose answers to {@code retentionRows} are changed by {@code lie}. */
+  private RetentionLedger lyingLedger(Function<List<RetentionRow>, List<RetentionRow>> lie) {
+    return (RetentionLedger)
+        Proxy.newProxyInstance(
+            RetentionLedger.class.getClassLoader(),
+            new Class<?>[] {RetentionLedger.class},
+            (proxy, method, args) -> {
+              try {
+                Object result = method.invoke(rows, args);
+                if (method.getName().equals("retentionRows")) {
+                  return lie.apply(
+                      ((List<?>) result).stream().map(RetentionRow.class::cast).toList());
+                }
+                return result;
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
+  }
+
+  @Test
+  void aMixedHoldAmongTheRowsOfOneArtifactIsReportedOneWayOrTheOther() {
+    EvidenceKey key = key("aa0001");
+    put(store, key, Y2032);
+    row(key, EMIR, Y2031);
+    row(key, MIFIR, Y2032);
+    // the first row says held and the second says not: no real ledger answers so (the hold is one
+    // flag per artifact), which is why the ledger here lies
+    RetentionLedger mixed =
+        lyingLedger(
+            all -> {
+              List<RetentionRow> lied = new ArrayList<>();
+              for (int i = 0; i < all.size(); i++) {
+                RetentionRow each = all.get(i);
+                lied.add(new RetentionRow(each.claim(), i == 0, each.recordedAt()));
+              }
+              return lied;
+            });
+    RetentionVerifier overMixed = new RetentionVerifier(store, mixed);
+
+    // a row is held and the store is not
+    assertThat(overMixed.verify("")).extracting(Finding::kind).containsExactly(Kind.HOLD_MISSING);
+
+    // the store is held and a row is not
+    store.setLegalHold(key, true);
+    assertThat(overMixed.verify(""))
+        .extracting(Finding::kind)
+        .containsExactly(Kind.HOLD_NOT_RECORDED);
   }
 
   @Test
