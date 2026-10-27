@@ -227,6 +227,9 @@ final class PgSubjectIndex {
    * Compares two texts by Unicode code point. A text of the port has no unpaired surrogate (the
    * rules of {@code KeyText}), so this is the order of the UTF-8 bytes and of {@code COLLATE "C"}
    * in a UTF8 database.
+   *
+   * <p>The same rule as {@code InMemoryLedgerStore#compareCodePoints}, by another algorithm; each
+   * is tested against hand-written literal orders, and nothing else ties them.
    */
   private static int compareCodePoints(String a, String b) {
     int i = 0;

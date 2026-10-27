@@ -147,34 +147,42 @@ class PgHarnessIT {
     String a = PgTestDatabase.freshSchema();
     String b = PgTestDatabase.freshSchema();
     String source = "source-1";
+    String artifact = "sealed/x";
     try (Connection holder = dataSource.getConnection();
         Connection other = dataSource.getConnection()) {
       holder.setAutoCommit(false);
       other.setAutoCommit(false);
-      // the holder takes the migrator (1), partition (2) and source (3) locks of schema a
+      // the holder takes the migrator (1), partition (2), source (3) and retention artifact (4)
+      // locks of schema a
       assertThat(tryLock(holder, 1, a)).isTrue();
       assertThat(tryLock(holder, 2, a)).isTrue();
       assertThat(tryLock(holder, 3, a + ":" + source)).isTrue();
+      assertThat(tryLock(holder, 4, a + ":" + artifact)).isTrue();
 
       // each is really held: the same key cannot be taken by another transaction
       assertThat(tryLock(other, 1, a)).isFalse();
       assertThat(tryLock(other, 2, a)).isFalse();
       assertThat(tryLock(other, 3, a + ":" + source)).isFalse();
+      assertThat(tryLock(other, 4, a + ":" + artifact)).isFalse();
 
       // the same purposes in another schema are different keys
       assertThat(tryLock(other, 1, b)).isTrue();
       assertThat(tryLock(other, 2, b)).isTrue();
       assertThat(tryLock(other, 3, b + ":" + source)).isTrue();
+      assertThat(tryLock(other, 4, b + ":" + artifact)).isTrue();
 
-      // the source lock of another source of the same schema is a different key as well
+      // the source lock of another source of the same schema is a different key as well, and so is
+      // the artifact lock of another artifact
       assertThat(tryLock(other, 3, a + ":source-2")).isTrue();
+      assertThat(tryLock(other, 4, a + ":sealed/y")).isTrue();
       holder.rollback();
       other.rollback();
 
-      // the purposes are different keys: holding purpose 1 does not hold purpose 2 or 3
+      // the purposes are different keys: holding purpose 1 does not hold purpose 2, 3 or 4
       assertThat(tryLock(holder, 1, a)).isTrue();
       assertThat(tryLock(other, 2, a)).isTrue();
       assertThat(tryLock(other, 3, a)).isTrue();
+      assertThat(tryLock(other, 4, a)).isTrue();
       holder.rollback();
       other.rollback();
     }

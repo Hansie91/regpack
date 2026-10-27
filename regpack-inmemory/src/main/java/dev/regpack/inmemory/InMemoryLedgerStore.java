@@ -87,6 +87,9 @@ public final class InMemoryLedgerStore implements LedgerStore {
    * Compares two texts by Unicode code point. {@code KeyText} forbids unpaired surrogates, so a
    * surrogate is the start of a supplementary code point, which sorts after every BMP character;
    * this is the order of the UTF-8 bytes and of {@code COLLATE "C"} in a UTF8 database.
+   *
+   * <p>The same rule as {@code PgSubjectIndex#compareCodePoints}, by another algorithm; each is
+   * tested against hand-written literal orders, and nothing else ties them.
    */
   private static int compareCodePoints(String a, String b) {
     int shared = Math.min(a.length(), b.length());

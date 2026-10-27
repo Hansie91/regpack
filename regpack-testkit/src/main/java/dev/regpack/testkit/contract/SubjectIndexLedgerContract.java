@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.ports.crypto.SubjectHash;
 import dev.regpack.ports.ledger.LedgerStore;
-import dev.regpack.ports.ledger.SubjectIndexLedger;
 import dev.regpack.ports.ledger.SubjectIndexLedger.RefKind;
 import dev.regpack.ports.ledger.SubjectIndexLedger.SubjectEntry;
 import dev.regpack.ports.ledger.SubjectIndexLedger.SubjectRef;
@@ -28,10 +27,6 @@ import org.junit.jupiter.api.Test;
 public interface SubjectIndexLedgerContract {
   /** A fresh, empty ledger for each test. */
   LedgerStore ledger();
-
-  private SubjectIndexLedger index() {
-    return ledger();
-  }
 
   /** A subject hash of 64 lowercase hex digits that differs for each {@code n}. */
   private static SubjectHash hash(int n) {
@@ -57,7 +52,7 @@ public interface SubjectIndexLedgerContract {
   }
 
   private List<SubjectRef> refsOf(int hash) {
-    return index().subjectRefs(hash(hash), Optional.empty(), 1_000);
+    return ledger().subjectRefs(hash(hash), Optional.empty(), 1_000);
   }
 
   /** The pages of {@code subjectRefs} with {@code limit}, walked with the last reference. */
@@ -65,7 +60,7 @@ public interface SubjectIndexLedgerContract {
     List<List<SubjectRef>> pages = new ArrayList<>();
     Optional<SubjectRef> after = Optional.empty();
     for (int guard = 0; guard < 5_000; guard++) {
-      List<SubjectRef> page = index().subjectRefs(hash(hash), after, limit);
+      List<SubjectRef> page = ledger().subjectRefs(hash(hash), after, limit);
       if (page.isEmpty()) {
         return pages;
       }
@@ -83,7 +78,7 @@ public interface SubjectIndexLedgerContract {
 
   @Test
   default void anIndexedRefIsFoundByItsHash() {
-    index()
+    ledger()
         .indexSubjects(
             List.of(
                 entry(1, object("sealed/2026/a")),
@@ -94,20 +89,20 @@ public interface SubjectIndexLedgerContract {
     assertThat(refsOf(2)).containsExactly(object("sealed/2026/a"));
     assertThat(refsOf(3)).isEmpty();
     // an empty list does nothing
-    index().indexSubjects(List.of());
+    ledger().indexSubjects(List.of());
     assertThat(refsOf(1)).hasSize(2);
   }
 
   @Test
   default void indexingTheSameEntryTwiceIsOneRow() {
     SubjectEntry once = entry(1, object("sealed/2026/a"));
-    index().indexSubjects(List.of(once));
-    index().indexSubjects(List.of(once));
-    index().indexSubjects(List.of(once, entry(1, object("sealed/2026/b")), once));
+    ledger().indexSubjects(List.of(once));
+    ledger().indexSubjects(List.of(once));
+    ledger().indexSubjects(List.of(once, entry(1, object("sealed/2026/b")), once));
 
     assertThat(refsOf(1)).containsExactly(object("sealed/2026/a"), object("sealed/2026/b"));
     // one row per (hash, kind, reference): the removal counts the rows, and it counts one
-    assertThat(index().removeSubjectRefs(object("sealed/2026/a"))).isEqualTo(1);
+    assertThat(ledger().removeSubjectRefs(object("sealed/2026/a"))).isEqualTo(1);
     assertThat(refsOf(1)).containsExactly(object("sealed/2026/b"));
   }
 
@@ -121,14 +116,14 @@ public interface SubjectIndexLedgerContract {
       ascending.add(ref);
       descending.add(0, entry(1, ref));
     }
-    index().indexSubjects(descending.subList(0, 1_000));
-    index().indexSubjects(descending.subList(1_000, 2_000));
-    index().indexSubjects(descending.subList(2_000, 2_500));
+    ledger().indexSubjects(descending.subList(0, 1_000));
+    ledger().indexSubjects(descending.subList(1_000, 2_000));
+    ledger().indexSubjects(descending.subList(2_000, 2_500));
     // another hash holds some of the same references and must not appear in the walk
-    index().indexSubjects(List.of(entry(2, object("walk/000000")), entry(2, object("walk/9"))));
+    ledger().indexSubjects(List.of(entry(2, object("walk/000000")), entry(2, object("walk/9"))));
 
     // a limit above the cap returns the cap; the pages of the cap are 1,000, 1,000 and 500
-    assertThat(index().subjectRefs(hash(1), Optional.empty(), 5_000)).hasSize(1_000);
+    assertThat(ledger().subjectRefs(hash(1), Optional.empty(), 5_000)).hasSize(1_000);
     List<List<SubjectRef>> pages = walk(1, 5_000);
     assertThat(pages).extracting(List::size).containsExactly(1_000, 1_000, 500);
     assertThat(flatten(pages)).containsExactlyElementsOf(ascending);
@@ -137,11 +132,11 @@ public interface SubjectIndexLedgerContract {
     assertThat(small).extracting(List::size).containsExactly(999, 999, 502);
     assertThat(flatten(small)).containsExactlyElementsOf(ascending);
     // "after" is strict, and a reference that is not stored can be the bound
-    assertThat(index().subjectRefs(hash(1), Optional.of(object("walk/000009")), 2))
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(object("walk/000009")), 2))
         .containsExactly(object("walk/000010"), object("walk/000011"));
-    assertThat(index().subjectRefs(hash(1), Optional.of(object("walk/0000095")), 2))
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(object("walk/0000095")), 2))
         .containsExactly(object("walk/000010"), object("walk/000011"));
-    assertThat(index().subjectRefs(hash(1), Optional.of(object("walk/002499")), 2)).isEmpty();
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(object("walk/002499")), 2)).isEmpty();
     // the hash that was not walked still holds exactly its own rows
     assertThat(refsOf(2)).containsExactly(object("walk/000000"), object("walk/9"));
   }
@@ -160,7 +155,7 @@ public interface SubjectIndexLedgerContract {
     // two report-version references whose text sorts after every object reference above
     entries.add(entry(1, report("z/b")));
     entries.add(entry(1, report("z/A")));
-    index().indexSubjects(entries);
+    ledger().indexSubjects(entries);
 
     List<SubjectRef> expected =
         List.of(
@@ -181,12 +176,12 @@ public interface SubjectIndexLedgerContract {
     // the same sequence page by page, with the bound in the middle of the characters
     assertThat(flatten(walk(1, 3))).containsExactlyElementsOf(expected);
     assertThat(flatten(walk(1, 1))).containsExactlyElementsOf(expected);
-    assertThat(index().subjectRefs(hash(1), Optional.of(object("r/a")), 3))
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(object("r/a")), 3))
         .containsExactly(object("r/a+b"), object("r/a,b"), object("r/a-b"));
-    assertThat(index().subjectRefs(hash(1), Optional.of(object("r/a.")), 2))
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(object("r/a.")), 2))
         .containsExactly(object("r/a.b"), object("r/a1"));
     // the kind comes first: after the last report version the objects follow, whatever the text
-    assertThat(index().subjectRefs(hash(1), Optional.of(report("zzz")), 2))
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(report("zzz")), 2))
         .containsExactly(object("r/A"), object("r/B"));
   }
 
@@ -212,16 +207,16 @@ public interface SubjectIndexLedgerContract {
     for (int i = expected.size() - 1; i >= 0; i--) {
       reversed.add(entry(1, expected.get(i)));
     }
-    index().indexSubjects(reversed);
+    ledger().indexSubjects(reversed);
 
     assertThat(refsOf(1)).containsExactlyElementsOf(expected);
     assertThat(flatten(walk(1, 1))).containsExactlyElementsOf(expected);
     assertThat(flatten(walk(1, 3))).containsExactlyElementsOf(expected);
     // the bound is a character below the supplementary ones
-    assertThat(index().subjectRefs(hash(1), Optional.of(objectEndingIn(0xFFFD)), 5))
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(objectEndingIn(0xFFFD)), 5))
         .containsExactly(objectEndingIn(0x1F600), objectEndingIn(0x20000));
     // a supplementary reference is removed by its own text
-    assertThat(index().removeSubjectRefs(objectEndingIn(0x1F600))).isEqualTo(1);
+    assertThat(ledger().removeSubjectRefs(objectEndingIn(0x1F600))).isEqualTo(1);
     assertThat(refsOf(1))
         .containsExactly(
             object("r/z"),
@@ -234,7 +229,7 @@ public interface SubjectIndexLedgerContract {
 
   @Test
   default void theSameTextUnderTheOtherKindIsAnotherRow() {
-    index()
+    ledger()
         .indexSubjects(
             List.of(
                 entry(1, report("same/text")),
@@ -242,14 +237,14 @@ public interface SubjectIndexLedgerContract {
                 entry(2, object("same/text"))));
 
     assertThat(refsOf(1)).containsExactly(report("same/text"), object("same/text"));
-    assertThat(index().removeSubjectRefs(report("same/text"))).isEqualTo(1);
+    assertThat(ledger().removeSubjectRefs(report("same/text"))).isEqualTo(1);
     assertThat(refsOf(1)).containsExactly(object("same/text"));
     assertThat(refsOf(2)).containsExactly(object("same/text"));
   }
 
   @Test
   default void removeDeletesOnlyTheNamedRef() {
-    index()
+    ledger()
         .indexSubjects(
             List.of(
                 entry(1, object("sealed/a")),
@@ -260,30 +255,30 @@ public interface SubjectIndexLedgerContract {
                 entry(3, object("sealed/c"))));
 
     // two hashes name the reference: both rows go, the count is the number of rows
-    assertThat(index().removeSubjectRefs(object("sealed/a"))).isEqualTo(2);
+    assertThat(ledger().removeSubjectRefs(object("sealed/a"))).isEqualTo(2);
     assertThat(refsOf(1)).containsExactly(object("sealed/b"), object("sealed/c"));
     assertThat(refsOf(2)).containsExactly(object("sealed/b"));
     assertThat(refsOf(3)).containsExactly(object("sealed/c"));
     // the removal is idempotent
-    assertThat(index().removeSubjectRefs(object("sealed/a"))).isZero();
-    assertThat(index().removeSubjectRefs(object("sealed/c"))).isEqualTo(2);
+    assertThat(ledger().removeSubjectRefs(object("sealed/a"))).isZero();
+    assertThat(ledger().removeSubjectRefs(object("sealed/c"))).isEqualTo(2);
     assertThat(refsOf(1)).containsExactly(object("sealed/b"));
     assertThat(refsOf(2)).containsExactly(object("sealed/b"));
     assertThat(refsOf(3)).isEmpty();
     // a removed reference can be indexed again
-    index().indexSubjects(List.of(entry(1, object("sealed/a"))));
+    ledger().indexSubjects(List.of(entry(1, object("sealed/a"))));
     assertThat(refsOf(1)).containsExactly(object("sealed/a"), object("sealed/b"));
   }
 
   @Test
   default void removeOfAnUnknownRefReturnsZero() {
-    assertThat(index().removeSubjectRefs(object("sealed/none"))).isZero();
-    index().indexSubjects(List.of(entry(1, object("sealed/a"))));
-    assertThat(index().removeSubjectRefs(object("sealed/none"))).isZero();
+    assertThat(ledger().removeSubjectRefs(object("sealed/none"))).isZero();
+    ledger().indexSubjects(List.of(entry(1, object("sealed/a"))));
+    assertThat(ledger().removeSubjectRefs(object("sealed/none"))).isZero();
     // a prefix, a longer text and the other kind are not the named reference
-    assertThat(index().removeSubjectRefs(object("sealed/"))).isZero();
-    assertThat(index().removeSubjectRefs(object("sealed/ab"))).isZero();
-    assertThat(index().removeSubjectRefs(report("sealed/a"))).isZero();
+    assertThat(ledger().removeSubjectRefs(object("sealed/"))).isZero();
+    assertThat(ledger().removeSubjectRefs(object("sealed/ab"))).isZero();
+    assertThat(ledger().removeSubjectRefs(report("sealed/a"))).isZero();
     assertThat(refsOf(1)).containsExactly(object("sealed/a"));
   }
 
@@ -292,14 +287,14 @@ public interface SubjectIndexLedgerContract {
     String longest = "k".repeat(511) + "z";
     assertThat(longest).hasSize(512);
     SubjectRef ref = object(longest);
-    index().indexSubjects(List.of(new SubjectEntry(hash(1), ref)));
+    ledger().indexSubjects(List.of(new SubjectEntry(hash(1), ref)));
 
     assertThat(refsOf(1)).containsExactly(ref);
     // the neighbours in order are told apart at the last character
-    assertThat(index().subjectRefs(hash(1), Optional.of(object("k".repeat(511) + "y")), 5))
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(object("k".repeat(511) + "y")), 5))
         .containsExactly(ref);
-    assertThat(index().subjectRefs(hash(1), Optional.of(ref), 5)).isEmpty();
-    assertThat(index().removeSubjectRefs(ref)).isEqualTo(1);
+    assertThat(ledger().subjectRefs(hash(1), Optional.of(ref), 5)).isEmpty();
+    assertThat(ledger().removeSubjectRefs(ref)).isEqualTo(1);
     assertThat(refsOf(1)).isEmpty();
   }
 
@@ -309,7 +304,7 @@ public interface SubjectIndexLedgerContract {
    */
   @Test
   default void aRefWithAControlCharacterOrOver512IsRefused() {
-    index().indexSubjects(List.of(entry(1, object("sealed/a"))));
+    ledger().indexSubjects(List.of(entry(1, object("sealed/a"))));
     List<String> refused =
         List.of(
             "",
@@ -343,15 +338,15 @@ public interface SubjectIndexLedgerContract {
 
   @Test
   default void aBatchWithABadEntryWritesNothing() {
-    index().indexSubjects(List.of(entry(1, object("sealed/stored"))));
+    ledger().indexSubjects(List.of(entry(1, object("sealed/stored"))));
     SubjectEntry good = entry(1, object("sealed/new"));
 
     // a bad value cannot be built; a missing element or list is what a batch can carry
-    assertThatThrownBy(() -> index().indexSubjects(Arrays.asList(good, null)))
+    assertThatThrownBy(() -> ledger().indexSubjects(Arrays.asList(good, null)))
         .isInstanceOf(NullPointerException.class);
-    assertThatThrownBy(() -> index().indexSubjects(Arrays.asList(null, good)))
+    assertThatThrownBy(() -> ledger().indexSubjects(Arrays.asList(null, good)))
         .isInstanceOf(NullPointerException.class);
-    assertThatThrownBy(() -> index().indexSubjects(null)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> ledger().indexSubjects(null)).isInstanceOf(NullPointerException.class);
     assertThatThrownBy(() -> new SubjectEntry(null, object("sealed/x")))
         .isInstanceOf(NullPointerException.class);
     assertThatThrownBy(() -> new SubjectEntry(hash(1), null))
@@ -359,11 +354,11 @@ public interface SubjectIndexLedgerContract {
     assertThat(refsOf(1)).containsExactly(object("sealed/stored"));
 
     // a limit below zero is refused, a limit of zero returns nothing
-    assertThatThrownBy(() -> index().subjectRefs(hash(1), Optional.empty(), -1))
+    assertThatThrownBy(() -> ledger().subjectRefs(hash(1), Optional.empty(), -1))
         .isInstanceOf(IllegalArgumentException.class);
-    assertThat(index().subjectRefs(hash(1), Optional.empty(), 0)).isEmpty();
+    assertThat(ledger().subjectRefs(hash(1), Optional.empty(), 0)).isEmpty();
     // the good entry is stored by a call of its own
-    index().indexSubjects(List.of(good));
+    ledger().indexSubjects(List.of(good));
     assertThat(refsOf(1)).containsExactly(object("sealed/new"), object("sealed/stored"));
   }
 }

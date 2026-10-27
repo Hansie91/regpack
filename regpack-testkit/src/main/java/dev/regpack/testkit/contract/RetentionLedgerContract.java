@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -43,10 +44,6 @@ public interface RetentionLedgerContract {
 
   /** The clock the ledger reads. */
   ManualClock clock();
-
-  private RetentionLedger retention() {
-    return ledger();
-  }
 
   private static Instant at(String iso) {
     return Instant.parse(iso);
@@ -72,11 +69,11 @@ public interface RetentionLedgerContract {
   }
 
   private List<RetentionRow> every() {
-    return retention().retentionRows("", Optional.empty(), 1_000);
+    return ledger().retentionRows("", Optional.empty(), 1_000);
   }
 
   private List<RetentionRow> due() {
-    return retention().expiredRetention(farFuture(), Optional.empty(), 1_000);
+    return ledger().expiredRetention(farFuture(), Optional.empty(), 1_000);
   }
 
   private static List<String> triples(List<RetentionRow> rows) {
@@ -111,7 +108,7 @@ public interface RetentionLedgerContract {
     List<List<RetentionRow>> pages = new ArrayList<>();
     Optional<EvidenceKey> after = Optional.empty();
     for (int guard = 0; guard < 2_000; guard++) {
-      List<RetentionRow> page = retention().retentionRows(prefix, after, limit);
+      List<RetentionRow> page = ledger().retentionRows(prefix, after, limit);
       if (page.isEmpty()) {
         return pages;
       }
@@ -126,7 +123,7 @@ public interface RetentionLedgerContract {
     List<List<RetentionRow>> pages = new ArrayList<>();
     Optional<RetentionRow> after = Optional.empty();
     for (int guard = 0; guard < 2_000; guard++) {
-      List<RetentionRow> page = retention().expiredRetention(asOf, after, limit);
+      List<RetentionRow> page = ledger().expiredRetention(asOf, after, limit);
       if (page.isEmpty()) {
         return pages;
       }
@@ -148,7 +145,7 @@ public interface RetentionLedgerContract {
     Instant firstAt = clock().now();
     RetentionClaim sealed =
         claim("sealed/ab/" + "c".repeat(64), "mifir.eu.rts22", at("2031-06-01T12:30:45.123456Z"));
-    retention().recordRetention(List.of(sealed));
+    ledger().recordRetention(List.of(sealed));
     clock().advance(Duration.ofHours(1));
 
     assertThat(every()).containsExactly(row(sealed, false, firstAt));
@@ -157,22 +154,22 @@ public interface RetentionLedgerContract {
     Instant secondAt = clock().now();
     RetentionClaim open =
         claim("landing/b1", "emir.eu", AnchorEvent.TERMINATION, Optional.empty(), "landing");
-    retention().recordRetention(List.of(open));
+    ledger().recordRetention(List.of(open));
     assertThat(every()).containsExactly(row(open, false, secondAt), row(sealed, false, firstAt));
 
     // the same claim again does not move the time of the row
     clock().advance(Duration.ofDays(1));
-    retention().recordRetention(List.of(sealed, open));
+    ledger().recordRetention(List.of(sealed, open));
     assertThat(every()).containsExactly(row(open, false, secondAt), row(sealed, false, firstAt));
 
     // the first and the last storable date are kept as they are
     RetentionClaim first = claim("sealed/first", "mifir.eu.rts22", at("0000-01-01T00:00:00Z"));
     RetentionClaim last = claim("sealed/last", "mifir.eu.rts22", farFuture());
-    retention().recordRetention(List.of(last, first));
-    assertThat(retention().retentionRows("sealed/first", Optional.empty(), 5))
+    ledger().recordRetention(List.of(last, first));
+    assertThat(ledger().retentionRows("sealed/first", Optional.empty(), 5))
         .extracting(r -> r.claim().retainUntil())
         .containsExactly(Optional.of(at("0000-01-01T00:00:00Z")));
-    assertThat(retention().retentionRows("sealed/last", Optional.empty(), 5))
+    assertThat(ledger().retentionRows("sealed/last", Optional.empty(), 5))
         .extracting(r -> r.claim().retainUntil())
         .containsExactly(Optional.of(farFuture()));
   }
@@ -183,11 +180,11 @@ public interface RetentionLedgerContract {
     Instant t1 = at("2031-01-01T00:00:00Z");
     Instant t2 = at("2033-01-01T00:00:00Z");
     String key = "sealed/ab/merge";
-    retention().recordRetention(List.of(claim(key, "mifir.eu.rts22", t1)));
+    ledger().recordRetention(List.of(claim(key, "mifir.eu.rts22", t1)));
 
     // later: the date grows; the class and the time of the row stay
     clock().advance(Duration.ofDays(3));
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 claim(
@@ -201,13 +198,13 @@ public interface RetentionLedgerContract {
 
     // earlier, equal and one microsecond earlier: nothing changes
     for (Instant notLater : List.of(t1, t2, t2.minus(Duration.ofNanos(1_000)))) {
-      retention().recordRetention(List.of(claim(key, "mifir.eu.rts22", notLater)));
+      ledger().recordRetention(List.of(claim(key, "mifir.eu.rts22", notLater)));
       assertThat(every()).as("claim %s", notLater).containsExactly(row(expected, false, firstAt));
     }
 
     // one microsecond later is later
     Instant t3 = t2.plus(Duration.ofNanos(1_000));
-    retention().recordRetention(List.of(claim(key, "mifir.eu.rts22", t3)));
+    ledger().recordRetention(List.of(claim(key, "mifir.eu.rts22", t3)));
     assertThat(every()).containsExactly(row(claim(key, "mifir.eu.rts22", t3), false, firstAt));
   }
 
@@ -217,19 +214,19 @@ public interface RetentionLedgerContract {
     String key = "landing/open1";
     RetentionClaim open =
         claim(key, "emir.eu", AnchorEvent.TERMINATION, Optional.empty(), "landing");
-    retention().recordRetention(List.of(open));
+    ledger().recordRetention(List.of(open));
     assertThat(every()).containsExactly(row(open, false, firstAt));
 
     // an empty claim on an empty row, with another class: still empty, the class stays
     clock().advance(Duration.ofHours(2));
-    retention()
+    ledger()
         .recordRetention(
             List.of(claim(key, "emir.eu", AnchorEvent.TERMINATION, Optional.empty(), "other")));
     assertThat(every()).containsExactly(row(open, false, firstAt));
 
     // a value replaces the empty date; class and time stay
     Instant date = at("2032-03-04T05:06:07Z");
-    retention()
+    ledger()
         .recordRetention(
             List.of(claim(key, "emir.eu", AnchorEvent.TERMINATION, Optional.of(date), "other")));
     RetentionClaim valued =
@@ -237,11 +234,11 @@ public interface RetentionLedgerContract {
     assertThat(every()).containsExactly(row(valued, false, firstAt));
 
     // an empty claim never replaces a value
-    retention().recordRetention(List.of(open));
+    ledger().recordRetention(List.of(open));
     assertThat(every()).containsExactly(row(valued, false, firstAt));
 
     // the OBJECT_WRITTEN row of the same artifact and regime is a row of its own
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 claim(
@@ -258,11 +255,11 @@ public interface RetentionLedgerContract {
   default void twoRegimesGiveTwoRowsAndOneRegimeTwiceGivesOne() {
     String key = "sealed/ab/regimes";
     Instant t = at("2031-01-01T00:00:00Z");
-    retention()
+    ledger()
         .recordRetention(
             List.of(claim(key, "mifir.eu.rts22", t), claim(key, "emir.eu", t.plusSeconds(60))));
-    retention().recordRetention(List.of(claim(key, "mifir.eu.rts22", t)));
-    retention().recordRetention(List.of(claim(key, "emir.eu", t)));
+    ledger().recordRetention(List.of(claim(key, "mifir.eu.rts22", t)));
+    ledger().recordRetention(List.of(claim(key, "emir.eu", t)));
 
     // two rows, in regime order; each keeps its own date
     assertThat(triples(every()))
@@ -272,7 +269,7 @@ public interface RetentionLedgerContract {
         .containsExactly(t.plusSeconds(60), t);
 
     // the anchor event is the third part of the key: a third row
-    retention()
+    ledger()
         .recordRetention(
             List.of(claim(key, "emir.eu", AnchorEvent.TERMINATION, Optional.empty(), "sealed")));
     assertThat(triples(every()))
@@ -291,11 +288,11 @@ public interface RetentionLedgerContract {
     RetentionClaim x3 =
         claim("sealed/x", "emir.eu", AnchorEvent.TERMINATION, Optional.empty(), "sealed");
     RetentionClaim y = claim("sealed/y", "mifir.eu.rts22", t);
-    retention().recordRetention(List.of(x1, x2, x3, y));
+    ledger().recordRetention(List.of(x1, x2, x3, y));
     assertThat(due()).hasSize(3);
 
     clock().advance(Duration.ofDays(1));
-    retention().setRetentionHold(new EvidenceKey("sealed/x"), true);
+    ledger().setRetentionHold(new EvidenceKey("sealed/x"), true);
     assertThat(every())
         .containsExactly(
             row(x1, true, firstAt),
@@ -306,13 +303,13 @@ public interface RetentionLedgerContract {
     assertThat(triples(due())).containsExactly("sealed/y|mifir.eu.rts22|OBJECT_WRITTEN");
 
     // the same value again is not an error and changes nothing
-    retention().setRetentionHold(new EvidenceKey("sealed/x"), true);
+    ledger().setRetentionHold(new EvidenceKey("sealed/x"), true);
     assertThat(every())
         .extracting(RetentionRow::legalHold)
         .containsExactly(true, true, true, false);
 
     // the release reaches every row; the dates and the times were never touched
-    retention().setRetentionHold(new EvidenceKey("sealed/x"), false);
+    ledger().setRetentionHold(new EvidenceKey("sealed/x"), false);
     assertThat(every())
         .containsExactly(
             row(x1, false, firstAt),
@@ -325,7 +322,7 @@ public interface RetentionLedgerContract {
   @Test
   default void aHoldReachesTheNamedArtifactOnlyAndNotKeysThatShareItsPrefix() {
     Instant t = at("2030-01-01T00:00:00Z");
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 claim("sealed/x", "emir.eu", t),
@@ -334,7 +331,7 @@ public interface RetentionLedgerContract {
                 claim("sealed/x/z", "emir.eu", t),
                 claim("sealed/w", "emir.eu", t)));
 
-    retention().setRetentionHold(new EvidenceKey("sealed/x"), true);
+    ledger().setRetentionHold(new EvidenceKey("sealed/x"), true);
 
     // the key before it and its two extensions (one past a slash, one not) are not held
     assertThat(every())
@@ -354,8 +351,8 @@ public interface RetentionLedgerContract {
             "sealed/xy|emir.eu|OBJECT_WRITTEN");
 
     // holding the longer key and releasing the shorter one do not reach each other
-    retention().setRetentionHold(new EvidenceKey("sealed/xy"), true);
-    retention().setRetentionHold(new EvidenceKey("sealed/x"), false);
+    ledger().setRetentionHold(new EvidenceKey("sealed/xy"), true);
+    ledger().setRetentionHold(new EvidenceKey("sealed/x"), false);
     assertThat(every())
         .extracting(r -> r.claim().artifact().path(), RetentionRow::legalHold)
         .containsExactly(
@@ -379,27 +376,27 @@ public interface RetentionLedgerContract {
     try {
       for (int round = 0; round < 40; round++) {
         String key = String.format(Locale.ROOT, "race/%03d", round);
-        retention().recordRetention(List.of(claim(key, "emir.eu", t)));
+        ledger().recordRetention(List.of(claim(key, "emir.eu", t)));
         CountDownLatch start = new CountDownLatch(1);
         Future<?> hold =
             pool.submit(
                 () -> {
                   assertThat(start.await(30, TimeUnit.SECONDS)).isTrue();
-                  retention().setRetentionHold(new EvidenceKey(key), true);
+                  ledger().setRetentionHold(new EvidenceKey(key), true);
                   return null;
                 });
         Future<?> add =
             pool.submit(
                 () -> {
                   assertThat(start.await(30, TimeUnit.SECONDS)).isTrue();
-                  retention().recordRetention(List.of(claim(key, "mifir.eu.rts22", t)));
+                  ledger().recordRetention(List.of(claim(key, "mifir.eu.rts22", t)));
                   return null;
                 });
         start.countDown();
         hold.get(60, TimeUnit.SECONDS);
         add.get(60, TimeUnit.SECONDS);
 
-        assertThat(retention().retentionRows(key, Optional.empty(), 5))
+        assertThat(ledger().retentionRows(key, Optional.empty(), 5))
             .as("round %d", round)
             .hasSize(2)
             .allMatch(RetentionRow::legalHold);
@@ -409,14 +406,92 @@ public interface RetentionLedgerContract {
     }
   }
 
+  /**
+   * The same race for an artifact that has no row yet (decision D28): one thread records a row for
+   * one regime, a second records a row for another regime (both are first rows of the artifact),
+   * and a third retries the hold of the artifact until it finds a row to hold. Whichever order the
+   * three take, afterwards both rows exist and every row of the artifact is held (the port rule: a
+   * hold and a claim for one artifact racing are serialised). Every serial order ends so, so it
+   * passes on every correct adapter in every interleaving and can fail only on an adapter whose
+   * hold and claims do not see each other, and then only in some rounds of a run: a ledger that
+   * locks the rows that exist cannot serialise the two first claims, a hold that arrives between
+   * their commits holds the first row only and the second row is written unheld. It is the evidence
+   * for the artifact lock of a ledger on a real server.
+   *
+   * <p>A fresh artifact for each of the 40 rounds. Bounded: every wait, the retries of the hold
+   * included, ends within one deadline of 30 seconds for the whole test, and then the test fails
+   * instead of hanging.
+   */
+  @Test
+  default void aHoldRacingTheFirstClaimsOfANewArtifactLeavesNoRowUnheld() throws Exception {
+    Instant t = at("2030-01-01T00:00:00Z");
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    ExecutorService pool = Executors.newFixedThreadPool(3);
+    try {
+      for (int round = 0; round < 40; round++) {
+        String key = String.format(Locale.ROOT, "race/new/%03d", round);
+        CyclicBarrier together = new CyclicBarrier(3);
+        Future<?> first =
+            pool.submit(
+                () -> {
+                  together.await(untilTheDeadline(deadline), TimeUnit.NANOSECONDS);
+                  ledger().recordRetention(List.of(claim(key, "emir.eu", t)));
+                  return null;
+                });
+        Future<?> second =
+            pool.submit(
+                () -> {
+                  together.await(untilTheDeadline(deadline), TimeUnit.NANOSECONDS);
+                  ledger().recordRetention(List.of(claim(key, "mifir.eu.rts22", t)));
+                  return null;
+                });
+        Future<?> hold =
+            pool.submit(
+                () -> {
+                  together.await(untilTheDeadline(deadline), TimeUnit.NANOSECONDS);
+                  while (true) {
+                    try {
+                      ledger().setRetentionHold(new EvidenceKey(key), true);
+                      return null;
+                    } catch (IllegalArgumentException e) {
+                      // only the refusal of an artifact that has no row yet is tried again
+                      if (!"the artifact has no retention row".equals(e.getMessage())) {
+                        throw e;
+                      }
+                      assertThat(deadline - System.nanoTime())
+                          .as("the hold found a row of %s before the deadline", key)
+                          .isPositive();
+                      Thread.yield();
+                    }
+                  }
+                });
+        first.get(untilTheDeadline(deadline), TimeUnit.NANOSECONDS);
+        second.get(untilTheDeadline(deadline), TimeUnit.NANOSECONDS);
+        hold.get(untilTheDeadline(deadline), TimeUnit.NANOSECONDS);
+
+        assertThat(ledger().retentionRows(key, Optional.empty(), 5))
+            .as("round %d", round)
+            .hasSize(2)
+            .allMatch(RetentionRow::legalHold);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /** The nanoseconds left until {@code deadline} ({@code System.nanoTime()} basis), at least 1. */
+  private static long untilTheDeadline(long deadline) {
+    return Math.max(1, deadline - System.nanoTime());
+  }
+
   @Test
   default void aClaimRecordedAfterAHoldIsHeldToo() {
     Instant t = at("2030-01-01T00:00:00Z");
-    retention().recordRetention(List.of(claim("sealed/h", "emir.eu", t)));
-    retention().setRetentionHold(new EvidenceKey("sealed/h"), true);
+    ledger().recordRetention(List.of(claim("sealed/h", "emir.eu", t)));
+    ledger().setRetentionHold(new EvidenceKey("sealed/h"), true);
 
     // a new regime, a new anchor and a merge into the existing row: all held
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 claim("sealed/h", "mifir.eu.rts22", t),
@@ -426,12 +501,12 @@ public interface RetentionLedgerContract {
     assertThat(due()).isEmpty();
 
     // another artifact is not held by it
-    retention().recordRetention(List.of(claim("sealed/k", "emir.eu", t)));
+    ledger().recordRetention(List.of(claim("sealed/k", "emir.eu", t)));
     assertThat(triples(due())).containsExactly("sealed/k|emir.eu|OBJECT_WRITTEN");
 
     // after the release a new row is not held
-    retention().setRetentionHold(new EvidenceKey("sealed/h"), false);
-    retention().recordRetention(List.of(claim("sealed/h", "sftr.eu", t)));
+    ledger().setRetentionHold(new EvidenceKey("sealed/h"), false);
+    ledger().recordRetention(List.of(claim("sealed/h", "sftr.eu", t)));
     assertThat(every()).noneMatch(RetentionRow::legalHold);
     assertThat(due()).hasSize(5);
   }
@@ -439,17 +514,16 @@ public interface RetentionLedgerContract {
   @Test
   default void aHoldOnAnUnknownArtifactIsRefused() {
     for (boolean hold : List.of(true, false)) {
-      assertThatThrownBy(() -> retention().setRetentionHold(new EvidenceKey("sealed/none"), hold))
+      assertThatThrownBy(() -> ledger().setRetentionHold(new EvidenceKey("sealed/none"), hold))
           .isInstanceOf(IllegalArgumentException.class);
     }
     assertThat(every()).isEmpty();
 
     // a known artifact does not make its neighbour known
-    retention()
-        .recordRetention(List.of(claim("sealed/known", "emir.eu", at("2030-01-01T00:00:00Z"))));
-    assertThatThrownBy(() -> retention().setRetentionHold(new EvidenceKey("sealed/know"), true))
+    ledger().recordRetention(List.of(claim("sealed/known", "emir.eu", at("2030-01-01T00:00:00Z"))));
+    assertThatThrownBy(() -> ledger().setRetentionHold(new EvidenceKey("sealed/know"), true))
         .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> retention().setRetentionHold(new EvidenceKey("sealed/known/x"), true))
+    assertThatThrownBy(() -> ledger().setRetentionHold(new EvidenceKey("sealed/known/x"), true))
         .isInstanceOf(IllegalArgumentException.class);
     assertThat(every()).extracting(RetentionRow::legalHold).containsExactly(false);
   }
@@ -467,7 +541,7 @@ public interface RetentionLedgerContract {
     claims.add(claim("p/d", "mifir.eu.rts22", t));
     claims.add(claim("other/z", "emir.eu", t));
     Collections.reverse(claims);
-    retention().recordRetention(claims);
+    ledger().recordRetention(claims);
 
     // one artifact a page: three, three, one and two rows
     List<List<RetentionRow>> single = walkRetentionRows("p/", 1);
@@ -481,36 +555,36 @@ public interface RetentionLedgerContract {
         .containsExactly("p/a", "p/b", "p/c", "p/d");
 
     // the rows of one artifact come in the order (regime, anchor)
-    assertThat(triples(retention().retentionRows("p/a", Optional.empty(), 1)))
+    assertThat(triples(ledger().retentionRows("p/a", Optional.empty(), 1)))
         .containsExactly(
             "p/a|emir.eu|OBJECT_WRITTEN",
             "p/a|mifir.eu.rts22|OBJECT_WRITTEN",
             "p/a|sftr.eu|OBJECT_WRITTEN");
 
     // limit 0 lists nothing, a negative limit is refused
-    assertThat(retention().retentionRows("p/", Optional.empty(), 0)).isEmpty();
-    assertThatThrownBy(() -> retention().retentionRows("p/", Optional.empty(), -1))
+    assertThat(ledger().retentionRows("p/", Optional.empty(), 0)).isEmpty();
+    assertThatThrownBy(() -> ledger().retentionRows("p/", Optional.empty(), -1))
         .isInstanceOf(IllegalArgumentException.class);
 
     // after is an artifact, exclusive, and need not exist; a prefix need not end at a segment
-    assertThat(artifacts(retention().retentionRows("p/", Optional.of(new EvidenceKey("p/a")), 10)))
+    assertThat(artifacts(ledger().retentionRows("p/", Optional.of(new EvidenceKey("p/a")), 10)))
         .containsExactly("p/b", "p/c", "p/d");
-    assertThat(artifacts(retention().retentionRows("p/", Optional.of(new EvidenceKey("p/b0")), 10)))
+    assertThat(artifacts(ledger().retentionRows("p/", Optional.of(new EvidenceKey("p/b0")), 10)))
         .containsExactly("p/c", "p/d");
-    assertThat(artifacts(retention().retentionRows("p/", Optional.of(new EvidenceKey("a")), 10)))
+    assertThat(artifacts(ledger().retentionRows("p/", Optional.of(new EvidenceKey("a")), 10)))
         .containsExactly("p/a", "p/b", "p/c", "p/d");
-    assertThat(retention().retentionRows("p/", Optional.of(new EvidenceKey("p/d")), 10)).isEmpty();
-    assertThat(retention().retentionRows("p/", Optional.of(new EvidenceKey("zzz")), 10)).isEmpty();
-    assertThat(artifacts(retention().retentionRows("p/b", Optional.empty(), 10)))
+    assertThat(ledger().retentionRows("p/", Optional.of(new EvidenceKey("p/d")), 10)).isEmpty();
+    assertThat(ledger().retentionRows("p/", Optional.of(new EvidenceKey("zzz")), 10)).isEmpty();
+    assertThat(artifacts(ledger().retentionRows("p/b", Optional.empty(), 10)))
         .containsExactly("p/b");
-    assertThat(retention().retentionRows("q/", Optional.empty(), 10)).isEmpty();
+    assertThat(ledger().retentionRows("q/", Optional.empty(), 10)).isEmpty();
     assertThat(artifacts(every())).containsExactly("other/z", "p/a", "p/b", "p/c", "p/d");
   }
 
   @Test
   default void aPrefixMatchesTheStartOfAKeyAndNotItsMiddle() {
     Instant t = at("2030-01-01T00:00:00Z");
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 claim("p/a", "emir.eu", t),
@@ -518,18 +592,18 @@ public interface RetentionLedgerContract {
                 claim("q/p/a", "emir.eu", t),
                 claim("sealed/p/b", "emir.eu", t)));
 
-    assertThat(artifacts(retention().retentionRows("p/", Optional.empty(), 10)))
+    assertThat(artifacts(ledger().retentionRows("p/", Optional.empty(), 10)))
         .containsExactly("p/a", "p/b");
-    assertThat(artifacts(retention().retentionRows("p/", Optional.of(new EvidenceKey("p/a")), 10)))
+    assertThat(artifacts(ledger().retentionRows("p/", Optional.of(new EvidenceKey("p/a")), 10)))
         .containsExactly("p/b");
-    assertThat(retention().retentionRows("p/", Optional.of(new EvidenceKey("p/b")), 10)).isEmpty();
-    assertThat(artifacts(retention().retentionRows("q/", Optional.empty(), 10)))
+    assertThat(ledger().retentionRows("p/", Optional.of(new EvidenceKey("p/b")), 10)).isEmpty();
+    assertThat(artifacts(ledger().retentionRows("q/", Optional.empty(), 10)))
         .containsExactly("q/p/a");
 
     // a key that is also a prefix: after is strictly after, also when it equals the prefix
-    assertThat(artifacts(retention().retentionRows("p/a", Optional.empty(), 10)))
+    assertThat(artifacts(ledger().retentionRows("p/a", Optional.empty(), 10)))
         .containsExactly("p/a");
-    assertThat(retention().retentionRows("p/a", Optional.of(new EvidenceKey("p/a")), 10)).isEmpty();
+    assertThat(ledger().retentionRows("p/a", Optional.of(new EvidenceKey("p/a")), 10)).isEmpty();
 
     // a walk with the empty prefix advances, one artifact a page
     assertThat(walkRetentionRows("", 1)).extracting(List::size).containsExactly(1, 1, 1, 1);
@@ -541,7 +615,7 @@ public interface RetentionLedgerContract {
   @Test
   default void aPrefixThatNoArtifactCanHaveListsNothing() {
     Instant t = at("2030-01-01T00:00:00Z");
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 claim("a", "emir.eu", t),
@@ -566,20 +640,20 @@ public interface RetentionLedgerContract {
             "a b",
             "ord/" + lone)) {
       String shown = prefix.chars().boxed().toList().toString();
-      assertThat(retention().retentionRows(prefix, Optional.empty(), 100))
+      assertThat(ledger().retentionRows(prefix, Optional.empty(), 100))
           .as("prefix %s", shown)
           .isEmpty();
-      assertThat(retention().retentionRows(prefix, Optional.of(new EvidenceKey("a")), 100))
+      assertThat(ledger().retentionRows(prefix, Optional.of(new EvidenceKey("a")), 100))
           .as("prefix %s after a", shown)
           .isEmpty();
-      assertThat(retention().retentionRows(prefix, Optional.empty(), 1))
+      assertThat(ledger().retentionRows(prefix, Optional.empty(), 1))
           .as("prefix %s with limit 1", shown)
           .isEmpty();
     }
 
-    assertThat(artifacts(retention().retentionRows("a", Optional.empty(), 100)))
+    assertThat(artifacts(ledger().retentionRows("a", Optional.empty(), 100)))
         .containsExactly("a", "a/b");
-    assertThat(artifacts(retention().retentionRows("ord/", Optional.empty(), 100)))
+    assertThat(artifacts(ledger().retentionRows("ord/", Optional.empty(), 100)))
         .containsExactly("ord/a", "ord/e");
   }
 
@@ -590,14 +664,13 @@ public interface RetentionLedgerContract {
     for (int i = 0; i < 1_100; i++) {
       claims.add(claim(String.format(Locale.ROOT, "cap/%05d", i), "emir.eu", t));
     }
-    retention().recordRetention(claims);
+    ledger().recordRetention(claims);
 
     for (int limit : List.of(5_000, Integer.MAX_VALUE)) {
-      List<RetentionRow> artifactPage = retention().retentionRows("cap/", Optional.empty(), limit);
+      List<RetentionRow> artifactPage = ledger().retentionRows("cap/", Optional.empty(), limit);
       assertThat(artifactPage).hasSize(1_000);
       assertThat(artifactPage.get(999).claim().artifact().path()).isEqualTo("cap/00999");
-      List<RetentionRow> duePage =
-          retention().expiredRetention(farFuture(), Optional.empty(), limit);
+      List<RetentionRow> duePage = ledger().expiredRetention(farFuture(), Optional.empty(), limit);
       assertThat(duePage).hasSize(1_000);
       assertThat(duePage.get(999).claim().artifact().path()).isEqualTo("cap/00999");
     }
@@ -621,8 +694,8 @@ public interface RetentionLedgerContract {
     claims.add(claim("sealed/e", "emir.eu", AnchorEvent.TERMINATION, Optional.empty(), "sealed"));
     claims.add(claim("sealed/f", "mifir.eu.rts22", at("2028-01-01T00:00:00Z")));
     claims.add(claim("sealed/g", "mifir.eu.rts22", at("2035-01-01T00:00:00Z")));
-    retention().recordRetention(claims);
-    retention().setRetentionHold(new EvidenceKey("sealed/f"), true);
+    ledger().recordRetention(claims);
+    ledger().setRetentionHold(new EvidenceKey("sealed/f"), true);
 
     List<String> dueAt2030 =
         List.of(
@@ -632,12 +705,12 @@ public interface RetentionLedgerContract {
             "sealed/a|mifir.eu.rts22|OBJECT_WRITTEN",
             "sealed/b|mifir.eu.rts22|OBJECT_WRITTEN");
     // the date of a row that is due on the very instant is listed
-    assertThat(triples(retention().expiredRetention(d2030, Optional.empty(), 100)))
+    assertThat(triples(ledger().expiredRetention(d2030, Optional.empty(), 100)))
         .containsExactlyElementsOf(dueAt2030);
     // one microsecond earlier, only the earliest row is due
     assertThat(
             triples(
-                retention()
+                ledger()
                     .expiredRetention(d2030.minus(Duration.ofNanos(1_000)), Optional.empty(), 100)))
         .containsExactly("sealed/c|mifir.eu.rts22|OBJECT_WRITTEN");
     // one microsecond later, the row of sealed/d joins at the end
@@ -645,11 +718,11 @@ public interface RetentionLedgerContract {
     dueLater.add("sealed/d|mifir.eu.rts22|OBJECT_WRITTEN");
     assertThat(
             triples(
-                retention()
+                ledger()
                     .expiredRetention(d2030.plus(Duration.ofNanos(1_000)), Optional.empty(), 100)))
         .containsExactlyElementsOf(dueLater);
     // nothing is due before the earliest date
-    assertThat(retention().expiredRetention(at("2029-05-31T23:59:59Z"), Optional.empty(), 100))
+    assertThat(ledger().expiredRetention(at("2029-05-31T23:59:59Z"), Optional.empty(), 100))
         .isEmpty();
     // far in the future: every dated row but the held one
     assertThat(triples(due()))
@@ -663,26 +736,26 @@ public interface RetentionLedgerContract {
             "sealed/g|mifir.eu.rts22|OBJECT_WRITTEN");
 
     // limit
-    assertThat(triples(retention().expiredRetention(d2030, Optional.empty(), 2)))
+    assertThat(triples(ledger().expiredRetention(d2030, Optional.empty(), 2)))
         .containsExactlyElementsOf(dueAt2030.subList(0, 2));
-    assertThat(retention().expiredRetention(d2030, Optional.empty(), 0)).isEmpty();
-    assertThatThrownBy(() -> retention().expiredRetention(d2030, Optional.empty(), -1))
+    assertThat(ledger().expiredRetention(d2030, Optional.empty(), 0)).isEmpty();
+    assertThatThrownBy(() -> ledger().expiredRetention(d2030, Optional.empty(), -1))
         .isInstanceOf(IllegalArgumentException.class);
 
     // after: strictly after the (date, artifact, regime, anchor) of the row, which need not be
     // stored
-    List<RetentionRow> listed = retention().expiredRetention(d2030, Optional.empty(), 100);
+    List<RetentionRow> listed = ledger().expiredRetention(d2030, Optional.empty(), 100);
     for (int i = 0; i < listed.size(); i++) {
-      assertThat(triples(retention().expiredRetention(d2030, Optional.of(listed.get(i)), 100)))
+      assertThat(triples(ledger().expiredRetention(d2030, Optional.of(listed.get(i)), 100)))
           .as("after row %d", i)
           .containsExactlyElementsOf(dueAt2030.subList(i + 1, dueAt2030.size()));
     }
     RetentionRow before2030 =
         row(claim("sealed/zzz", "mifir.eu.rts22", d2030.minusSeconds(1)), false, clock().now());
-    assertThat(triples(retention().expiredRetention(d2030, Optional.of(before2030), 100)))
+    assertThat(triples(ledger().expiredRetention(d2030, Optional.of(before2030), 100)))
         .containsExactlyElementsOf(dueAt2030.subList(1, dueAt2030.size()));
     RetentionRow insideTheTie = row(claim("sealed/a", "faa.eu", d2030), false, clock().now());
-    assertThat(triples(retention().expiredRetention(d2030, Optional.of(insideTheTie), 100)))
+    assertThat(triples(ledger().expiredRetention(d2030, Optional.of(insideTheTie), 100)))
         .containsExactlyElementsOf(dueAt2030.subList(3, dueAt2030.size()));
     // a row without a date is never in the list, so it is no position in it
     RetentionRow open =
@@ -690,7 +763,7 @@ public interface RetentionLedgerContract {
             claim("sealed/a", "emir.eu", AnchorEvent.TERMINATION, Optional.empty(), "sealed"),
             false,
             clock().now());
-    assertThatThrownBy(() -> retention().expiredRetention(d2030, Optional.of(open), 100))
+    assertThatThrownBy(() -> ledger().expiredRetention(d2030, Optional.of(open), 100))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -719,7 +792,7 @@ public interface RetentionLedgerContract {
     List<RetentionClaim> shuffled = new ArrayList<>(claims);
     Collections.reverse(shuffled);
     Collections.rotate(shuffled, 5);
-    retention().recordRetention(shuffled);
+    ledger().recordRetention(shuffled);
 
     assertThat(expected).hasSize(24);
     assertThat(triples(due())).containsExactlyElementsOf(expected);
@@ -737,7 +810,7 @@ public interface RetentionLedgerContract {
   @Test
   default void expiredRetentionNeverListsControlKeys() {
     Instant t = at("2030-01-01T00:00:00Z");
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 claim("control/epoch-1", "mifir.eu.rts22", t),
@@ -768,14 +841,14 @@ public interface RetentionLedgerContract {
             "sealed/control/a");
     assertThat(walkExpired(farFuture(), 1)).hasSize(4);
     // a hold and its release on a control key change nothing
-    retention().setRetentionHold(new EvidenceKey("control/a/b"), true);
-    retention().setRetentionHold(new EvidenceKey("control/a/b"), false);
+    ledger().setRetentionHold(new EvidenceKey("control/a/b"), true);
+    ledger().setRetentionHold(new EvidenceKey("control/a/b"), false);
     assertThat(due()).hasSize(4);
   }
 
   @Test
   default void anAsOfTheStoresCannotHoldIsRefused() {
-    retention().recordRetention(List.of(claim("sealed/a", "emir.eu", at("2030-01-01T00:00:00Z"))));
+    ledger().recordRetention(List.of(claim("sealed/a", "emir.eu", at("2030-01-01T00:00:00Z"))));
 
     for (Instant bad :
         List.of(
@@ -784,7 +857,7 @@ public interface RetentionLedgerContract {
             at("-0001-12-31T23:59:59.999999Z"),
             Instant.MAX,
             Instant.MIN)) {
-      assertThatThrownBy(() -> retention().expiredRetention(bad, Optional.empty(), 10))
+      assertThatThrownBy(() -> ledger().expiredRetention(bad, Optional.empty(), 10))
           .as("asOf %s", bad)
           .isInstanceOf(IllegalArgumentException.class)
           .satisfies(
@@ -792,9 +865,9 @@ public interface RetentionLedgerContract {
     }
 
     // the first and the last storable instant are accepted
-    assertThat(retention().expiredRetention(at("0000-01-01T00:00:00Z"), Optional.empty(), 10))
+    assertThat(ledger().expiredRetention(at("0000-01-01T00:00:00Z"), Optional.empty(), 10))
         .isEmpty();
-    assertThat(retention().expiredRetention(farFuture(), Optional.empty(), 10)).hasSize(1);
+    assertThat(ledger().expiredRetention(farFuture(), Optional.empty(), 10)).hasSize(1);
   }
 
   /**
@@ -817,7 +890,7 @@ public interface RetentionLedgerContract {
     for (Instant bad : unstorable) {
       assertThatThrownBy(
               () ->
-                  retention()
+                  ledger()
                       .recordRetention(
                           List.of(
                               claim("sealed/ok", "emir.eu", valid),
@@ -827,10 +900,10 @@ public interface RetentionLedgerContract {
       assertThat(every()).as("retain-until %s", bad).isEmpty();
     }
     // an existing row is not touched by a refused claim
-    retention().recordRetention(List.of(claim("sealed/ok", "emir.eu", valid)));
+    ledger().recordRetention(List.of(claim("sealed/ok", "emir.eu", valid)));
     for (Instant bad : unstorable) {
       assertThatThrownBy(
-              () -> retention().recordRetention(List.of(claim("sealed/ok", "emir.eu", bad))))
+              () -> ledger().recordRetention(List.of(claim("sealed/ok", "emir.eu", bad))))
           .isInstanceOf(IllegalArgumentException.class);
     }
     assertThat(every())
@@ -851,15 +924,15 @@ public interface RetentionLedgerContract {
             Optional.of(t),
             "sealed");
     Instant recordedAt = clock().now();
-    retention().recordRetention(List.of(claim));
+    ledger().recordRetention(List.of(claim));
 
-    assertThat(retention().retentionRows(longest.path(), Optional.empty(), 10))
+    assertThat(ledger().retentionRows(longest.path(), Optional.empty(), 10))
         .containsExactly(row(claim, false, recordedAt));
     assertThat(every()).containsExactly(row(claim, false, recordedAt));
     assertThat(due()).containsExactly(row(claim, false, recordedAt));
     // the merge and the hold work at this length too
-    retention().recordRetention(List.of(claim(longest.path(), "mifir.eu.rts22", t.plusSeconds(5))));
-    retention().setRetentionHold(longest, true);
+    ledger().recordRetention(List.of(claim(longest.path(), "mifir.eu.rts22", t.plusSeconds(5))));
+    ledger().setRetentionHold(longest, true);
     assertThat(every())
         .extracting(r -> r.claim().retainUntil().orElseThrow(), RetentionRow::legalHold)
         .containsExactly(tuple(t.plusSeconds(5), true));
@@ -870,7 +943,7 @@ public interface RetentionLedgerContract {
   default void aBatchWithADuplicateIsRefusedAndWritesNothing() {
     Instant t = at("2030-01-01T00:00:00Z");
     RetentionClaim stored = claim("sealed/dup", "emir.eu", t);
-    retention().recordRetention(List.of(stored));
+    ledger().recordRetention(List.of(stored));
     Instant storedAt = clock().now();
     clock().advance(Duration.ofMinutes(1));
 
@@ -886,12 +959,12 @@ public interface RetentionLedgerContract {
                 fresh,
                 claim("sealed/fresh", "emir.eu", AnchorEvent.OBJECT_WRITTEN, Optional.empty(), "x"),
                 later))) {
-      assertThatThrownBy(() -> retention().recordRetention(call))
+      assertThatThrownBy(() -> ledger().recordRetention(call))
           .isInstanceOf(IllegalArgumentException.class);
       assertThat(every()).containsExactly(row(stored, false, storedAt));
     }
     // the same artifact under two regimes, or two anchors, is not a duplicate
-    retention()
+    ledger()
         .recordRetention(
             List.of(
                 fresh,
@@ -907,11 +980,11 @@ public interface RetentionLedgerContract {
 
   @Test
   default void anEmptyListOfClaimsIsNotAnErrorAndStoresNothing() {
-    retention().recordRetention(List.of());
+    ledger().recordRetention(List.of());
     assertThat(every()).isEmpty();
 
-    retention().recordRetention(List.of(claim("sealed/e", "emir.eu", at("2030-01-01T00:00:00Z"))));
-    retention().recordRetention(List.of());
+    ledger().recordRetention(List.of(claim("sealed/e", "emir.eu", at("2030-01-01T00:00:00Z"))));
+    ledger().recordRetention(List.of());
     assertThat(every()).hasSize(1);
   }
 
@@ -948,7 +1021,7 @@ public interface RetentionLedgerContract {
     // the alphabet and the longest name are stored and read back as they are
     List<String> valid = List.of("sealed", "A-Z_a.z-09", "x".repeat(100), "-", ".", "_");
     for (int i = 0; i < valid.size(); i++) {
-      retention()
+      ledger()
           .recordRetention(
               List.of(
                   claim(
@@ -1008,8 +1081,8 @@ public interface RetentionLedgerContract {
     List<RetentionClaim> shuffled = new ArrayList<>(claims);
     Collections.reverse(shuffled);
     Collections.rotate(shuffled, 11);
-    retention().recordRetention(shuffled.subList(0, 40));
-    retention().recordRetention(shuffled.subList(40, shuffled.size()));
+    ledger().recordRetention(shuffled.subList(0, 40));
+    ledger().recordRetention(shuffled.subList(40, shuffled.size()));
 
     assertThat(triples(every())).containsExactlyElementsOf(expected);
     assertThat(triples(due())).containsExactlyElementsOf(expected);
@@ -1033,7 +1106,7 @@ public interface RetentionLedgerContract {
     assertThat(triples(flatten(duePages))).containsExactlyElementsOf(expected);
 
     // a prefix inside the alphabet: sealed/a starts the key sealed/a and its eight extensions
-    assertThat(artifacts(retention().retentionRows("sealed/a", Optional.empty(), 100)))
+    assertThat(artifacts(ledger().retentionRows("sealed/a", Optional.empty(), 100)))
         .containsExactly(
             "sealed/a",
             "sealed/a+b",
@@ -1047,31 +1120,27 @@ public interface RetentionLedgerContract {
     // after: exclusive, in byte order, and the key need not exist
     assertThat(
             artifacts(
-                retention()
-                    .retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/a.b")), 100)))
+                ledger().retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/a.b")), 100)))
         .containsExactly("sealed/a1", "sealed/a=b", "sealed/a_b", "sealed/ab");
     assertThat(
             artifacts(
-                retention()
-                    .retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/B")), 100)))
+                ledger().retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/B")), 100)))
         .first()
         .isEqualTo("sealed/a");
     assertThat(
             artifacts(
-                retention()
-                    .retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/a-")), 100)))
+                ledger().retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/a-")), 100)))
         .containsExactly(
             "sealed/a-b", "sealed/a.b", "sealed/a1", "sealed/a=b", "sealed/a_b", "sealed/ab");
     assertThat(
             artifacts(
-                retention()
-                    .retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/a.")), 100)))
+                ledger().retentionRows("sealed/", Optional.of(new EvidenceKey("sealed/a.")), 100)))
         .containsExactly("sealed/a.b", "sealed/a1", "sealed/a=b", "sealed/a_b", "sealed/ab");
     // after a row of the expiry list inside the tie: the next regime of the same artifact
     RetentionRow afterRow = duePages.get(0).get(3);
     assertThat(afterRow.claim().artifact().path()).isEqualTo("sealed/A");
     assertThat(afterRow.claim().regime().id()).isEqualTo("a1");
-    assertThat(triples(retention().expiredRetention(farFuture(), Optional.of(afterRow), 2)))
+    assertThat(triples(ledger().expiredRetention(farFuture(), Optional.of(afterRow), 2)))
         .containsExactly("sealed/A|a1.b|OBJECT_WRITTEN", "sealed/A|aa|OBJECT_WRITTEN");
   }
 
@@ -1088,10 +1157,10 @@ public interface RetentionLedgerContract {
       String plain = pair.get(0);
       String dotted = pair.get(1);
       String key = "sealed/regimes/" + plain;
-      retention().recordRetention(List.of(claim(key, plain, t), claim(key, dotted, t2)));
+      ledger().recordRetention(List.of(claim(key, plain, t), claim(key, dotted, t2)));
       // a later date on one of them does not reach the other
-      retention().recordRetention(List.of(claim(key, dotted, at("2034-01-01T00:00:00Z"))));
-      List<RetentionRow> rows = retention().retentionRows(key, Optional.empty(), 10);
+      ledger().recordRetention(List.of(claim(key, dotted, at("2034-01-01T00:00:00Z"))));
+      List<RetentionRow> rows = ledger().retentionRows(key, Optional.empty(), 10);
       assertThat(rows).hasSize(2);
       assertThat(rows)
           .extracting(r -> r.claim().regime().id(), r -> r.claim().retainUntil().orElseThrow())

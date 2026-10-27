@@ -40,7 +40,6 @@ import org.junit.jupiter.api.Test;
  */
 class PgSubjectIndexTest {
   private static final Instant NOW = Instant.parse("2026-10-09T08:00:00Z");
-  private static final char DEL = (char) 0x7F;
 
   private final ManualClock clock = new ManualClock(NOW);
   private final Config config = Config.forSchema("t42_7");
@@ -62,14 +61,29 @@ class PgSubjectIndexTest {
     return Files.readString(path, StandardCharsets.UTF_8).replace("\r\n", "\n");
   }
 
+  /**
+   * The CREATE TABLE statement of {@code subject_index} in the script: up to the first ";" line.
+   */
+  private static String createTableOfSubjectIndex(String script) {
+    int start = script.indexOf("CREATE TABLE subject_index (");
+    assertThat(start).as("the script creates subject_index").isNotNegative();
+    int end = script.indexOf(";\n", start);
+    assertThat(end).as("the statement ends with a semicolon line").isGreaterThan(start);
+    return script.substring(start, end + 1);
+  }
+
+  /** The names in the column list of an {@code INSERT INTO table (a, b, ...) VALUES} statement. */
+  private static List<String> columnsOfTheInsert(String insert) {
+    int open = insert.indexOf('(');
+    int close = insert.indexOf(") VALUES");
+    assertThat(open).isPositive().isLessThan(close);
+    return List.of(insert.substring(open + 1, close).split(", "));
+  }
+
   /** A hash of 64 lower-case hex digits that differs for each {@code n}. */
   private static SubjectHash hash(int n) {
     String digits = Integer.toHexString(n);
     return new SubjectHash("0".repeat(64 - digits.length()) + digits);
-  }
-
-  private static String hex(SubjectHash hash) {
-    return hash.hex();
   }
 
   private static SubjectRef report(String ref) {
@@ -157,10 +171,17 @@ class PgSubjectIndexTest {
         .contains("CONSTRAINT subject_index_pk PRIMARY KEY (subject_hash, ref_kind, ref)")
         .contains("CONSTRAINT subject_index_hash_check CHECK (octet_length(subject_hash) = 32)")
         .contains("CREATE INDEX subject_index_ref_idx ON subject_index (ref_kind, ref)");
-    // every column the adapter writes or reads is a column of the table
-    for (String column : List.of("subject_hash", "ref_kind", "ref", "entity_id", "recorded_at")) {
-      assertThat(v003).as(column).contains(column + " ");
-      assertThat(PgSubjectIndex.INSERT_SQL).as(column).contains(column);
+    // every column the adapter writes is defined by the CREATE TABLE statement of subject_index
+    // (and only that statement: the script holds the names of other tables' columns as well, so a
+    // search of the whole script would find any name), and the insert names exactly those columns
+    String createTable = createTableOfSubjectIndex(v003);
+    List<String> insertColumns = columnsOfTheInsert(PgSubjectIndex.INSERT_SQL);
+    List<String> columns = List.of("subject_hash", "ref_kind", "ref", "entity_id", "recorded_at");
+    assertThat(insertColumns).as("the columns of INSERT_SQL").containsExactlyElementsOf(columns);
+    for (String column : columns) {
+      assertThat(createTable)
+          .as("a definition of %s in the CREATE TABLE statement", column)
+          .containsPattern("(^|[\\s(,])" + column + " (bytea|smallint|text|timestamptz)\\b");
     }
     // the arbiter of the insert is the constraint of the script, by name
     assertThat(PgSubjectIndex.INSERT_SQL).contains("ON CONFLICT ON CONSTRAINT subject_index_pk ");
@@ -304,7 +325,12 @@ class PgSubjectIndexTest {
     assertThat(kinds).containsExactly("1", "2", "2", "2", "1", "2");
     assertThat(hashes)
         .containsExactly(
-            hex(hash(1)), hex(hash(1)), hex(hash(1)), hex(hash(1)), hex(hash(2)), hex(hash(2)));
+            hash(1).hex(),
+            hash(1).hex(),
+            hash(1).hex(),
+            hash(1).hex(),
+            hash(2).hex(),
+            hash(2).hex());
     assertThat(statements(spy)).containsExactly(PgSubjectIndex.INSERT_SQL);
   }
 
@@ -343,7 +369,7 @@ class PgSubjectIndexTest {
 
     List<String> events = spy.events();
     assertThat(binds(events, "bind bytes 1="))
-        .containsExactly(hex(hash), hex(hash))
+        .containsExactly(hash.hex(), hash.hex())
         .allSatisfy(bound -> assertThat(HexFormat.of().parseHex(bound)).hasSize(32));
     assertThat(binds(events, "bind short 2=")).containsExactly("1", "2");
     assertThat(binds(events, "bind 3=")).containsExactly("LEI1|X|E1", "sealed/a");
@@ -463,7 +489,7 @@ class PgSubjectIndexTest {
     index(spy).subjectRefs(hash, Optional.empty(), 7);
 
     assertThat(statements(spy)).containsExactly(PgSubjectIndex.REFS_SQL, PgSubjectIndex.REFS_SQL);
-    assertThat(binds(spy.events(), "bind bytes 1=")).containsExactly(hex(hash), hex(hash));
+    assertThat(binds(spy.events(), "bind bytes 1=")).containsExactly(hash.hex(), hash.hex());
     assertThat(binds(spy.events(), "bind long 2="))
         .containsExactly(String.valueOf(SubjectIndexLedger.MAX_REFS_PER_CALL), "7");
   }

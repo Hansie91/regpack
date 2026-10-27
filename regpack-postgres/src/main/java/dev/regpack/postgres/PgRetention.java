@@ -35,31 +35,39 @@ import javax.sql.DataSource;
  * second defence behind the {@code GREATEST} of the upsert.
  *
  * <p><b>Writing.</b> {@link #recordRetention} sorts the claims by (artifact, regime, anchor) and
- * then, in one unit and with constant statements, (1) locks the existing rows of every artifact it
- * touches, one statement per artifact in the order of the artifacts ({@link #LOCK_SQL}, the rows of
- * an artifact in the order of (regime, anchor)), and only then (2) writes every claim with {@link
- * #RECORD_SQL}: an insert whose legal hold is that of the artifact (a row of the artifact is held)
- * and whose conflict on {@code retention_pk} updates the date to the later of the two ({@code
- * GREATEST} ignores a NULL on either side [R]) and nothing else, so the class and {@code
- * recorded_at} of a stored row stay. The constraint is the arbiter, so a schema without it fails
- * with a missing-arbiter error and not with a silent second row (the schema mutant {@code
- * NoRetentionKeyPgLedgerContractIT}). The claims are written in key order, so that two calls with
- * overlapping claims never wait for each other in a circle.
+ * then, in one unit and with constant statements, (1) takes the artifact lock of every distinct
+ * artifact it touches, one statement per artifact in the order of the artifacts ({@link
+ * #ARTIFACT_LOCK_SQL}), and only then (2) writes every claim with {@link #RECORD_SQL}: an insert
+ * whose legal hold is that of the artifact (a row of the artifact is held) and whose conflict on
+ * {@code retention_pk} updates the date to the later of the two ({@code GREATEST} ignores a NULL on
+ * either side [R]) and nothing else, so the class and {@code recorded_at} of a stored row stay. The
+ * constraint is the arbiter, so a schema without it fails with a missing-arbiter error and not with
+ * a silent second row (the schema mutant {@code NoRetentionKeyPgLedgerContractIT}). The claims are
+ * written in key order, like the locks, so that two calls with overlapping claims never wait for
+ * each other in a circle.
  *
- * <p><b>Why the locks come first, in a statement of their own (task note T11-2).</b> Under {@code
- * READ COMMITTED} each statement takes its own snapshot. A hold that is one {@code UPDATE} and a
- * claim for a new regime of the same artifact that is one {@code INSERT} can run at the same time:
- * the update does not see the row that the insert is making and the insert reads the hold before
- * the update has committed, so the new row stays unheld. Here both first lock the existing rows of
- * the artifact; the second to arrive waits for the first to commit, and its write is a later
- * statement with a new snapshot that sees what the first one committed. A hold that finds the rows
- * locked by a claim holds the rows that the claim wrote, and a claim that finds them locked by a
- * hold reads the hold. The limit of this shape: it locks rows that exist. Two claims that both make
- * the first rows of an artifact (different regimes) find nothing to lock and do not wait for each
- * other, so a hold that comes between the commit of the first of them and the commit of the second
- * finds only the first row and the second row is written unheld. A hold needs a committed row to
- * start with, so the window is the time between two first claims for one new artifact; an advisory
- * transaction lock per artifact [R] would close it and is not built (task note T11-2).
+ * <p><b>The artifact lock (task note T11-2, decision D28).</b> Under {@code READ COMMITTED} each
+ * statement takes its own snapshot. A hold that is one {@code UPDATE} and a claim for a new regime
+ * of the same artifact that is one {@code INSERT} can run at the same time: the update does not see
+ * the row that the insert is making and the insert reads the hold before the update has committed,
+ * so the new row stays unheld. Both therefore take the same transaction-level advisory lock first
+ * ({@code pg_advisory_xact_lock(purpose, hashtext(schema ':' artifact))}, the form of Convention 12
+ * of the P3a plan, purpose {@value #RETENTION_LOCK_PURPOSE}), in a statement of its own and as the
+ * first statement of the unit; the second to arrive waits for the first to commit, and its write is
+ * a later statement with a new snapshot that sees what the first one committed. A hold that finds
+ * the lock taken by a claim holds the rows that the claim wrote, and a claim that finds it taken by
+ * a hold reads the hold. The lock does not depend on a row, so it serialises the first claims of a
+ * new artifact too, and a hold of an artifact that has no row takes it, finds no row to update and
+ * fails with the refusal of the port. It is released with the transaction, whether it commits or
+ * not. {@link #recordRetention} and {@link #setRetentionHold} take it for every distinct artifact
+ * of the call, two claims of one artifact lock once; the reads ({@link #retentionRows}, {@link
+ * #expiredRetention}) take none.
+ *
+ * <p>The one honest limit: the lock is named by the 32-bit hash of the text, so two different
+ * artifacts whose hashes collide share one lock. That costs a wait. If two calls took a colliding
+ * pair in different orders it could also be a deadlock; the server detects it and ends one call
+ * with SQLSTATE 40P01, which comes out as the ledger exception of any statement failure, after a
+ * rollback, with nothing written. The case is recorded, not designed away.
  *
  * <p><b>A call that writes nothing still waits for the standby (I1).</b> There is no such call:
  * {@link #recordRetention} writes a row version for every claim (a conflict updates the date
@@ -81,9 +89,16 @@ import javax.sql.DataSource;
  * refusals are those of the in-memory ledger.
  */
 final class PgRetention {
-  /** Parameter: the artifact. Locks the existing rows of one artifact (note T11-2). */
-  static final String LOCK_SQL =
-      "SELECT 1 FROM retention WHERE object_key = ? ORDER BY regime, anchor_event FOR UPDATE";
+  /**
+   * The advisory-lock purpose of the artifact lock of a retention write (Convention 12 of the P3a
+   * plan). The purposes in use: 1 the migrator, 2 the creation of a partition, 3 the source of an
+   * ingest commit, 4 this one. {@code PgHarnessIT#advisoryKeysDifferBetweenSchemas} holds them
+   * together.
+   */
+  private static final int RETENTION_LOCK_PURPOSE = 4;
+
+  /** Parameters: the purpose (an int) and the text schema + ':' + the artifact. */
+  static final String ARTIFACT_LOCK_SQL = "SELECT pg_advisory_xact_lock(?, hashtext(?))";
 
   /**
    * Parameters: key, regime, anchor code, class, retain-until (nullable), key again (the artifact
@@ -135,9 +150,9 @@ final class PgRetention {
           + EXPIRED_TAIL;
 
   /**
-   * The order in which rows are locked and written, and so the order in which two calls meet:
-   * artifact and regime by their text (for the alphabets of a key and of a regime id the order of
-   * the {@code "C"} collation), then the anchor by its declaration, which is its code.
+   * The order in which artifacts are locked and rows are written, and so the order in which two
+   * calls meet: artifact and regime by their text (for the alphabets of a key and of a regime id
+   * the order of the {@code "C"} collation), then the anchor by its declaration, which is its code.
    */
   private static final Comparator<RetentionClaim> KEY_ORDER =
       Comparator.<RetentionClaim, String>comparing(claim -> claim.artifact().path())
@@ -194,7 +209,7 @@ final class PgRetention {
         dataSource,
         config,
         connection -> {
-          lockRowsOf(connection, artifacts);
+          lockArtifacts(connection, artifacts);
           write(connection, writes, recordedAt);
           return Boolean.TRUE;
         });
@@ -206,7 +221,7 @@ final class PgRetention {
         dataSource,
         config,
         connection -> {
-          lockRowsOf(connection, List.of(artifact.path()));
+          lockArtifacts(connection, List.of(artifact.path()));
           try (PreparedStatement update = connection.prepareStatement(HOLD_SQL)) {
             update.setBoolean(1, hold);
             update.setString(2, artifact.path());
@@ -295,20 +310,17 @@ final class PgRetention {
   }
 
   /**
-   * The first statements of a unit that writes (see the class comment): the existing rows of each
-   * artifact, one statement per artifact, in the order of {@code artifacts}. The rows are locked as
-   * the statement produces them, so the result is read to its end and its content is not needed.
+   * The first statements of a unit that writes (see the class comment): the lock of each artifact,
+   * one statement per artifact, in the order of {@code artifacts} (distinct, in key order). The key
+   * is the schema and the artifact in one bind value, as {@code PgIngest#lockSource} does it for a
+   * source, and the lock is held to the end of the transaction.
    */
-  private static void lockRowsOf(Connection connection, List<String> artifacts)
-      throws SQLException {
-    try (PreparedStatement lock = connection.prepareStatement(LOCK_SQL)) {
+  private void lockArtifacts(Connection connection, List<String> artifacts) throws SQLException {
+    try (PreparedStatement lock = connection.prepareStatement(ARTIFACT_LOCK_SQL)) {
       for (String artifact : artifacts) {
-        lock.setString(1, artifact);
-        try (ResultSet rows = lock.executeQuery()) {
-          while (rows.next()) {
-            // a row of the artifact, locked for this unit
-          }
-        }
+        lock.setInt(1, RETENTION_LOCK_PURPOSE);
+        lock.setString(2, config.schema() + ":" + artifact);
+        lock.execute();
       }
     }
   }

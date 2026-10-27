@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
+import dev.regpack.ports.crypto.Envelope;
 import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.LedgerException;
@@ -32,8 +33,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -182,6 +186,31 @@ class PgReportsTest {
             });
   }
 
+  /** A {@code PgReports} built with the production configuration over the given fake server. */
+  private static PgReports strictReports(SqlSpy local) {
+    Config production = Config.production("t42_7");
+    return new PgReports(
+        local.over(null),
+        new ManualClock(Instant.parse("2026-10-09T08:00:00Z")),
+        production,
+        new PgDecisions(local.over(null), production));
+  }
+
+  /**
+   * A unit of two decisions: an envelope body in the first and {@code secondBody} in the second.
+   */
+  private static ReportableCommit unitWithSecondBody(byte[] secondBody) {
+    return unit(
+        new ReportableDecision(
+            reportDecision(0, "E1", "ctx", "d1", MARKET),
+            List.of(
+                EnvelopeBodyFixtures.version(
+                    "E1", MARKET, "TRNE1M", EnvelopeBodyFixtures.envelope()))),
+        new ReportableDecision(
+            reportDecision(0, "E2", "ctx", "d2", MARKET),
+            List.of(EnvelopeBodyFixtures.version("E2", MARKET, "TRNE2M", secondBody))));
+  }
+
   /**
    * The refusal sits in the validation that both writers of {@code report_version.body} share
    * ({@code commitReportable} and the package-private {@code commitReportableIn}), runs for every
@@ -191,27 +220,12 @@ class PgReportsTest {
    */
   @Test
   void aPlainBodyIsRefusedByBothEntryPointsBeforeAnyStatement() {
-    Config production = Config.production("t42_7");
     SqlSpy local = new SqlSpy();
-    PgReports strict =
-        new PgReports(
-            local.over(null),
-            new ManualClock(Instant.parse("2026-10-09T08:00:00Z")),
-            production,
-            new PgDecisions(local.over(null), production));
+    PgReports strict = strictReports(local);
     Connection untouchable = untouchableConnection();
 
     for (byte[] plainBody : List.of(EnvelopeBodyFixtures.plain(), new byte[0])) {
-      ReportableCommit refused =
-          unit(
-              new ReportableDecision(
-                  reportDecision(0, "E1", "ctx", "d1", MARKET),
-                  List.of(
-                      EnvelopeBodyFixtures.version(
-                          "E1", MARKET, "TRNE1M", EnvelopeBodyFixtures.envelope()))),
-              new ReportableDecision(
-                  reportDecision(0, "E2", "ctx", "d2", MARKET),
-                  List.of(EnvelopeBodyFixtures.version("E2", MARKET, "TRNE2M", plainBody))));
+      ReportableCommit refused = unitWithSecondBody(plainBody);
 
       assertThatThrownBy(() -> strict.commitReportable(refused))
           .as("commitReportable, %d bytes", plainBody.length)
@@ -227,17 +241,64 @@ class PgReportsTest {
     assertThat(local.statements()).isZero();
   }
 
+  /**
+   * The test is {@code Envelope.isEnvelope} and not the magic alone: a body that starts like an
+   * envelope and is none (cut after eight bytes, the magic and then garbage, a version, a kind or a
+   * KEK id the format does not know) is a plain body and is refused by both entry points, with the
+   * same text, before any statement, with the connection untouched. A check of the first four bytes
+   * would accept every one of these, and only the contract on a real server would notice.
+   */
+  @Test
+  void aBodyThatOnlyLooksLikeAnEnvelopeIsRefusedByBothEntryPointsBeforeAnyStatement() {
+    byte[] envelope = EnvelopeBodyFixtures.envelope();
+    assertThat(Envelope.isEnvelope(envelope)).as("the fixture is an envelope").isTrue();
+    byte[] magicAndGarbage = new byte[120];
+    Arrays.fill(magicAndGarbage, (byte) 'z');
+    System.arraycopy(envelope, 0, magicAndGarbage, 0, 4);
+    Map<String, byte[]> nearMisses = new LinkedHashMap<>();
+    nearMisses.put("cut after eight bytes", Arrays.copyOf(envelope, 8));
+    nearMisses.put("the magic followed by garbage", magicAndGarbage);
+    nearMisses.put("a bad version byte", withByte(envelope, 4, (byte) 2));
+    nearMisses.put("a bad kind byte", withByte(envelope, 5, (byte) 3));
+    nearMisses.put("a bad KEK id character", withByte(envelope, 7, (byte) '/'));
+
+    SqlSpy local = new SqlSpy();
+    PgReports strict = strictReports(local);
+    Connection untouchable = untouchableConnection();
+    for (Map.Entry<String, byte[]> nearMiss : nearMisses.entrySet()) {
+      byte[] body = nearMiss.getValue();
+      String name = nearMiss.getKey();
+      assertThat(Arrays.copyOf(body, 4))
+          .as("%s starts with the magic", name)
+          .isEqualTo(Arrays.copyOf(envelope, 4));
+      assertThat(Envelope.isEnvelope(body)).as("%s is not an envelope", name).isFalse();
+      ReportableCommit refused = unitWithSecondBody(body);
+
+      assertThatThrownBy(() -> strict.commitReportable(refused))
+          .as("commitReportable, %s", name)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope");
+      assertThatThrownBy(() -> strict.commitReportableIn(untouchable, refused))
+          .as("commitReportableIn, %s", name)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope");
+    }
+
+    assertThat(local.events()).as("no connection, no statement, no bind").isEmpty();
+    assertThat(local.statements()).isZero();
+  }
+
+  private static byte[] withByte(byte[] bytes, int index, byte value) {
+    byte[] copy = bytes.clone();
+    copy[index] = value;
+    return copy;
+  }
+
   /** The same rule, for the second leg of one decision and in either order of the legs. */
   @Test
   void aPlainBodyInTheSecondLegOfOneDecisionIsRefusedToo() {
-    Config production = Config.production("t42_7");
     SqlSpy local = new SqlSpy();
-    PgReports strict =
-        new PgReports(
-            local.over(null),
-            new ManualClock(Instant.parse("2026-10-09T08:00:00Z")),
-            production,
-            new PgDecisions(local.over(null), production));
+    PgReports strict = strictReports(local);
     NewDecision both = reportDecision(0, "E1", "ctx", "d1", MARKET, CLIENT);
     NewVersion envelopeLeg =
         EnvelopeBodyFixtures.version("E1", MARKET, "TRNE1M", EnvelopeBodyFixtures.envelope());
