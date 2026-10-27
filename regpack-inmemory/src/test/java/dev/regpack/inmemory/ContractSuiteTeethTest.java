@@ -8,6 +8,7 @@ import dev.regpack.inmemory.mutants.AnyRetainUntilEvidenceContractTest;
 import dev.regpack.inmemory.mutants.AsAtNotCheckedLedgerContractTest;
 import dev.regpack.inmemory.mutants.BeginSendingNotAtomicWithManifestLedgerContractTest;
 import dev.regpack.inmemory.mutants.CaseFoldedKeysEvidenceContractTest;
+import dev.regpack.inmemory.mutants.EnvelopeRequirementIgnoredEnvelopeBodiesTest;
 import dev.regpack.inmemory.mutants.ExactKeyNotFirstLedgerContractTest;
 import dev.regpack.inmemory.mutants.HighestVersionIsMinLedgerContractTest;
 import dev.regpack.inmemory.mutants.IdempotencyIgnoresContextLedgerContractTest;
@@ -205,6 +206,11 @@ class ContractSuiteTeethTest {
     expected.put(
         BeginSendingNotAtomicWithManifestLedgerContractTest.class,
         Set.of("aConflictingObjectRollsTheSendingTransitionBack"));
+
+    // P3c1 T7: a ledger built to require envelopes accepts a plain body
+    expected.put(
+        EnvelopeRequirementIgnoredEnvelopeBodiesTest.class,
+        Set.of("aPlainBodyIsRefusedWhenEnvelopesAreRequired"));
 
     List<String> misses = new ArrayList<>();
     Set<String> usedExceptions = new TreeSet<>();

@@ -17,6 +17,7 @@ import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.model.json.Json;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.crypto.Envelope;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DuplicateKeyException;
@@ -163,7 +164,9 @@ public final class InMemoryLedgerStore implements LedgerStore {
     /** A beginSending that does not apply still records the objects of its intent. */
     MANIFEST_RECORDED_ON_FAILED_BEGIN,
     /** A manifest conflict in beginSending leaves the state change and the attempt row behind. */
-    BEGIN_SENDING_NOT_ATOMIC_WITH_MANIFEST
+    BEGIN_SENDING_NOT_ATOMIC_WITH_MANIFEST,
+    /** A ledger that is built to require envelope bodies accepts a plain body. */
+    ENVELOPE_REQUIREMENT_IGNORED
   }
 
   /** Constant stand-in for the day under IDEMPOTENCY_KEY_IGNORES_DAY. */
@@ -177,6 +180,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   private final Clock clock;
   private final Flaw flaw;
+  private volatile boolean requireEnvelopeBodies;
   private final Object lock = new Object();
   private final Map<IngestKey, StoredIngest> ingests = new HashMap<>();
   private final Map<EventVersion, StoredIngest> ingestsByEventVersion = new HashMap<>();
@@ -218,6 +222,16 @@ public final class InMemoryLedgerStore implements LedgerStore {
   public InMemoryLedgerStore(Clock clock, Flaw flaw) {
     this.clock = Objects.requireNonNull(clock, "clock");
     this.flaw = Objects.requireNonNull(flaw, "flaw");
+  }
+
+  /**
+   * Builds the store to require envelope bodies (the {@code Config.production} of the PostgreSQL
+   * adapter): a version whose body is not an envelope ({@code Envelope.isEnvelope}) is refused
+   * before anything is written. The default is false. Returns this store.
+   */
+  public InMemoryLedgerStore requireEnvelopeBodies(boolean require) {
+    this.requireEnvelopeBodies = require;
+    return this;
   }
 
   @Override
@@ -561,6 +575,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
     Set<Leg> seen = EnumSet.noneOf(Leg.class);
     for (NewVersion version : reportable.versions()) {
       SubjectKey subject = version.subject();
+      // the single test of the ledger (D-K6); the message holds nothing of the body
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (requireEnvelopeBodies
+          && flaw != Flaw.ENVELOPE_REQUIREMENT_IGNORED
+          && !Envelope.isEnvelope(version.body())) {
+        throw new IllegalArgumentException("a report body must be an envelope");
+      }
       // test double only: deliberate flaw for ContractSuiteTeethTest
       if (body.outcome() != Outcome.REPORT && flaw != Flaw.VERSION_ON_ANY_OUTCOME) {
         throw new IllegalArgumentException("a version needs a REPORT decision: " + body.outcome());

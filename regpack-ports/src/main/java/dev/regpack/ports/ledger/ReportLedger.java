@@ -57,6 +57,15 @@ import java.util.regex.Pattern;
  *   <li>If {@code sequenceBatch} is present and at least one version is {@code CREATED}, one outbox
  *       item of kind {@code SEQUENCE} with {@code subjectId} = the batch id exists afterwards (an
  *       existing one is left; unique on kind and subject).
+ *   <li><b>Bodies.</b> A body is opaque to the ledger and is stored and returned byte for byte. A
+ *       body for which {@code Envelope.isEnvelope} holds (package {@code dev.regpack.ports.crypto};
+ *       the magic alone is not enough) is recorded as an envelope body ({@code body_encoding} 1 in
+ *       PostgreSQL). A ledger that is built to require envelopes (the production configuration)
+ *       refuses every other body, the empty body and a body that only starts like an envelope
+ *       included, with {@link IllegalArgumentException} before any write; the default ledger still
+ *       accepts a plain body. The test needs no key and does not authenticate: a well-formed header
+ *       over random bytes passes, so the guarantee is "not plain JSON", not "authentic". The
+ *       message of the refusal holds nothing of the body.
  * </ol>
  */
 public interface ReportLedger {
