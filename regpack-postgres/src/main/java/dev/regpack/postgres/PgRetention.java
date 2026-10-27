@@ -1,0 +1,369 @@
+package dev.regpack.postgres;
+
+import dev.regpack.model.Regime;
+import dev.regpack.ports.Clock;
+import dev.regpack.ports.evidence.EvidenceKey;
+import dev.regpack.ports.ledger.LedgerException;
+import dev.regpack.ports.ledger.RetentionLedger;
+import dev.regpack.ports.ledger.RetentionLedger.AnchorEvent;
+import dev.regpack.ports.ledger.RetentionLedger.RetentionClaim;
+import dev.regpack.ports.ledger.RetentionLedger.RetentionRow;
+import dev.regpack.postgres.PgLedgerStore.Config;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import javax.sql.DataSource;
+
+/**
+ * The {@code retention} rows on PostgreSQL (spec 11.6; migration V003, D2, D3 and D6 of its
+ * document; P3c1 D-K4, D-K8): one row per (artifact, regime, anchor event), a date that can only
+ * grow and never goes back to unknown, one legal hold per artifact that a new row of the artifact
+ * takes, and the list of rows that are due. The key columns are compared byte by byte ({@code
+ * COLLATE "C"}), so the pages come in the order of the in-memory ledger; a trigger refuses an
+ * update that shortens a date or changes the key, regime, anchor or class of a row, and so is a
+ * second defence behind the {@code GREATEST} of the upsert.
+ *
+ * <p><b>Writing.</b> {@link #recordRetention} sorts the claims by (artifact, regime, anchor) and
+ * then, in one unit and with constant statements, (1) locks the existing rows of every artifact it
+ * touches, one statement per artifact in the order of the artifacts ({@link #LOCK_SQL}, the rows of
+ * an artifact in the order of (regime, anchor)), and only then (2) writes every claim with {@link
+ * #RECORD_SQL}: an insert whose legal hold is that of the artifact (a row of the artifact is held)
+ * and whose conflict on {@code retention_pk} updates the date to the later of the two ({@code
+ * GREATEST} ignores a NULL on either side [R]) and nothing else, so the class and {@code
+ * recorded_at} of a stored row stay. The constraint is the arbiter, so a schema without it fails
+ * with a missing-arbiter error and not with a silent second row (the schema mutant {@code
+ * NoRetentionKeyPgLedgerContractIT}). The claims are written in key order, so that two calls with
+ * overlapping claims never wait for each other in a circle.
+ *
+ * <p><b>Why the locks come first, in a statement of their own (task note T11-2).</b> Under {@code
+ * READ COMMITTED} each statement takes its own snapshot. A hold that is one {@code UPDATE} and a
+ * claim for a new regime of the same artifact that is one {@code INSERT} can run at the same time:
+ * the update does not see the row that the insert is making and the insert reads the hold before
+ * the update has committed, so the new row stays unheld. Here both first lock the existing rows of
+ * the artifact; the second to arrive waits for the first to commit, and its write is a later
+ * statement with a new snapshot that sees what the first one committed. A hold that finds the rows
+ * locked by a claim holds the rows that the claim wrote, and a claim that finds them locked by a
+ * hold reads the hold. The limit of this shape: it locks rows that exist. Two claims that both make
+ * the first rows of an artifact (different regimes) find nothing to lock and do not wait for each
+ * other, so a hold that comes between the commit of the first of them and the commit of the second
+ * finds only the first row and the second row is written unheld. A hold needs a committed row to
+ * start with, so the window is the time between two first claims for one new artifact; an advisory
+ * transaction lock per artifact [R] would close it and is not built (task note T11-2).
+ *
+ * <p><b>A call that writes nothing still waits for the standby (I1).</b> There is no such call:
+ * {@link #recordRetention} writes a row version for every claim (a conflict updates the date
+ * through the {@code DO UPDATE}, also to the value it has [R]) and {@link #setRetentionHold}
+ * updates every row of the artifact or fails. So no durability barrier is taken.
+ *
+ * <p><b>Reading.</b> {@link #retentionRows} is the range on the primary key of {@code PgManifest}
+ * over the artifacts, with the rows of at most {@code limit} artifacts: the keys are chosen by a
+ * {@code DISTINCT} sub-select with the range and the limit, and the rows of those keys come back in
+ * one statement and one snapshot, so the rows of an artifact are never split across two calls.
+ * {@link #expiredRetention} lists due rows that are not held and not under {@link
+ * RetentionLedger#EXEMPT_PREFIX}, in the order (retain_until, artifact, regime, anchor), after a
+ * row by a row comparison [R: per-column collations of a row comparison].
+ *
+ * <p>Every value is a bind parameter, the prefix of the epoch markers included, and no message
+ * carries a value (Convention 12). A retain-until is bound only through {@link
+ * PgTime#timestamp(Instant)} as an {@link OffsetDateTime} (an open anchor as a typed null), never
+ * as text and never through a function of the statement (task note T11-5). The texts of the
+ * refusals are those of the in-memory ledger.
+ */
+final class PgRetention {
+  /** Parameter: the artifact. Locks the existing rows of one artifact (note T11-2). */
+  static final String LOCK_SQL =
+      "SELECT 1 FROM retention WHERE object_key = ? ORDER BY regime, anchor_event FOR UPDATE";
+
+  /**
+   * Parameters: key, regime, anchor code, class, retain-until (nullable), key again (the artifact
+   * whose hold the row takes), recorded at.
+   */
+  static final String RECORD_SQL =
+      "INSERT INTO retention (object_key, regime, anchor_event, entity_id, retention_class,"
+          + " retain_until, legal_hold, recorded_at) VALUES (?, ?, ?, 1, ?, ?,"
+          + " EXISTS (SELECT 1 FROM retention h WHERE h.object_key = ? AND h.legal_hold), ?)"
+          + " ON CONFLICT ON CONSTRAINT retention_pk DO UPDATE SET retain_until ="
+          + " GREATEST(retention.retain_until, EXCLUDED.retain_until)";
+
+  /** Parameters: the hold, the artifact. */
+  static final String HOLD_SQL = "UPDATE retention SET legal_hold = ? WHERE object_key = ?";
+
+  private static final String COLUMNS =
+      "object_key, regime, anchor_event, retention_class, retain_until, legal_hold, recorded_at";
+
+  /**
+   * Parameters: the prefix, its upper bound, the artifact after which to list (or ''), the limit of
+   * artifacts.
+   */
+  static final String ROWS_SQL =
+      "SELECT "
+          + COLUMNS
+          + " FROM retention WHERE object_key IN (SELECT DISTINCT object_key FROM retention"
+          + " WHERE object_key >= ? AND object_key < ? AND object_key > ?"
+          + " ORDER BY object_key LIMIT ?) ORDER BY object_key, regime, anchor_event";
+
+  private static final String EXPIRED_HEAD =
+      "SELECT "
+          + COLUMNS
+          + " FROM retention WHERE retain_until IS NOT NULL AND retain_until <= ?"
+          + " AND NOT legal_hold AND NOT starts_with(object_key, ?)";
+
+  private static final String EXPIRED_TAIL =
+      " ORDER BY retain_until, object_key, regime, anchor_event LIMIT ?";
+
+  /** Parameters: as of, the prefix of the epoch markers, the limit of rows. */
+  static final String EXPIRED_SQL = EXPIRED_HEAD + EXPIRED_TAIL;
+
+  /**
+   * Parameters: as of, the prefix of the epoch markers, the retain-until, key, regime and anchor
+   * code of the row after which to list, the limit of rows.
+   */
+  static final String EXPIRED_AFTER_SQL =
+      EXPIRED_HEAD
+          + " AND (retain_until, object_key, regime, anchor_event) > (?, ?, ?, ?)"
+          + EXPIRED_TAIL;
+
+  /**
+   * The order in which rows are locked and written, and so the order in which two calls meet:
+   * artifact and regime by their text (for the alphabets of a key and of a regime id the order of
+   * the {@code "C"} collation), then the anchor by its declaration, which is its code.
+   */
+  private static final Comparator<RetentionClaim> KEY_ORDER =
+      Comparator.<RetentionClaim, String>comparing(claim -> claim.artifact().path())
+          .thenComparing(claim -> claim.regime().id())
+          .thenComparing(RetentionClaim::anchor);
+
+  /** One claim as it is bound: nothing here can fail inside the unit. */
+  private record Write(
+      String artifact,
+      String regime,
+      short anchor,
+      String retentionClass,
+      Optional<OffsetDateTime> retainUntil) {}
+
+  private final DataSource dataSource;
+  private final Clock clock;
+  private final Config config;
+
+  PgRetention(DataSource dataSource, Clock clock, Config config) {
+    this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+    this.clock = Objects.requireNonNull(clock, "clock");
+    this.config = Objects.requireNonNull(config, "config");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // the port
+
+  void recordRetention(List<RetentionClaim> claims) {
+    Objects.requireNonNull(claims, "claims");
+    List<RetentionClaim> copy = List.copyOf(claims);
+    if (copy.isEmpty()) {
+      return;
+    }
+    requireDistinct(copy);
+    List<RetentionClaim> inKeyOrder = new ArrayList<>(copy);
+    inKeyOrder.sort(KEY_ORDER);
+    List<Write> writes = new ArrayList<>();
+    List<String> artifacts = new ArrayList<>();
+    for (RetentionClaim claim : inKeyOrder) {
+      String artifact = claim.artifact().path();
+      if (artifacts.isEmpty() || !artifacts.get(artifacts.size() - 1).equals(artifact)) {
+        artifacts.add(artifact);
+      }
+      writes.add(
+          new Write(
+              artifact,
+              claim.regime().id(),
+              Codes.of(claim.anchor()),
+              claim.retentionClass(),
+              claim.retainUntil().map(PgTime::timestamp)));
+    }
+    OffsetDateTime recordedAt = PgTime.timestamp(clock.now());
+    Unit.inUnit(
+        dataSource,
+        config,
+        connection -> {
+          lockRowsOf(connection, artifacts);
+          write(connection, writes, recordedAt);
+          return Boolean.TRUE;
+        });
+  }
+
+  void setRetentionHold(EvidenceKey artifact, boolean hold) {
+    Objects.requireNonNull(artifact, "artifact");
+    Unit.inUnit(
+        dataSource,
+        config,
+        connection -> {
+          lockRowsOf(connection, List.of(artifact.path()));
+          try (PreparedStatement update = connection.prepareStatement(HOLD_SQL)) {
+            update.setBoolean(1, hold);
+            update.setString(2, artifact.path());
+            if (update.executeUpdate() == 0) {
+              throw new IllegalArgumentException("the artifact has no retention row");
+            }
+          }
+          return Boolean.TRUE;
+        });
+  }
+
+  List<RetentionRow> retentionRows(String prefix, Optional<EvidenceKey> after, int limit) {
+    Objects.requireNonNull(prefix, "prefix");
+    Objects.requireNonNull(after, "after");
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    int max = Math.min(limit, RetentionLedger.MAX_RETENTION_ROWS_PER_CALL);
+    // no key holds a NUL and the server cannot hold one in a text: nothing can match
+    if (max == 0 || prefix.indexOf('\0') >= 0) {
+      return List.of();
+    }
+    return Unit.inUnit(
+        dataSource,
+        config,
+        connection -> {
+          try (PreparedStatement statement = connection.prepareStatement(ROWS_SQL)) {
+            statement.setString(1, prefix);
+            statement.setString(2, PgManifest.upperBound(prefix));
+            statement.setString(3, after.map(EvidenceKey::path).orElse(""));
+            statement.setLong(4, max);
+            return readAll(statement);
+          }
+        });
+  }
+
+  List<RetentionRow> expiredRetention(Instant asOf, Optional<RetentionRow> after, int limit) {
+    Objects.requireNonNull(asOf, "asOf");
+    Objects.requireNonNull(after, "after");
+    // the rule and the texts of the port, before the instant is bound (PgTime has its own text)
+    RetentionClaim.requireStorable("asOf", asOf);
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    if (after.isPresent() && after.get().claim().retainUntil().isEmpty()) {
+      throw new IllegalArgumentException("a row without a retain-until is not in the expiry list");
+    }
+    int max = Math.min(limit, RetentionLedger.MAX_RETENTION_ROWS_PER_CALL);
+    if (max == 0) {
+      return List.of();
+    }
+    OffsetDateTime bound = PgTime.timestamp(asOf);
+    return Unit.inUnit(
+        dataSource,
+        config,
+        connection -> {
+          String sql = after.isPresent() ? EXPIRED_AFTER_SQL : EXPIRED_SQL;
+          try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            int next = 1;
+            statement.setObject(next++, bound);
+            statement.setString(next++, RetentionLedger.EXEMPT_PREFIX);
+            if (after.isPresent()) {
+              RetentionClaim row = after.get().claim();
+              statement.setObject(next++, PgTime.timestamp(row.retainUntil().orElseThrow()));
+              statement.setString(next++, row.artifact().path());
+              statement.setString(next++, row.regime().id());
+              statement.setShort(next++, Codes.of(row.anchor()));
+            }
+            statement.setLong(next, max);
+            return readAll(statement);
+          }
+        });
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // internals
+
+  private static void requireDistinct(List<RetentionClaim> claims) {
+    Set<List<Object>> seen = new HashSet<>();
+    for (RetentionClaim claim : claims) {
+      // the identity of a row inside one call: (artifact text, regime id text, anchor)
+      if (!seen.add(List.of(claim.artifact().path(), claim.regime().id(), claim.anchor()))) {
+        throw new IllegalArgumentException("two claims of one call have one artifact and anchor");
+      }
+    }
+  }
+
+  /**
+   * The first statements of a unit that writes (see the class comment): the existing rows of each
+   * artifact, one statement per artifact, in the order of {@code artifacts}. The rows are locked as
+   * the statement produces them, so the result is read to its end and its content is not needed.
+   */
+  private static void lockRowsOf(Connection connection, List<String> artifacts)
+      throws SQLException {
+    try (PreparedStatement lock = connection.prepareStatement(LOCK_SQL)) {
+      for (String artifact : artifacts) {
+        lock.setString(1, artifact);
+        try (ResultSet rows = lock.executeQuery()) {
+          while (rows.next()) {
+            // a row of the artifact, locked for this unit
+          }
+        }
+      }
+    }
+  }
+
+  /** The claims, already in key order, as later statements than the locks. */
+  private static void write(Connection connection, List<Write> writes, OffsetDateTime recordedAt)
+      throws SQLException {
+    try (PreparedStatement insert = connection.prepareStatement(RECORD_SQL)) {
+      for (Write each : writes) {
+        insert.setString(1, each.artifact());
+        insert.setString(2, each.regime());
+        insert.setShort(3, each.anchor());
+        insert.setString(4, each.retentionClass());
+        if (each.retainUntil().isPresent()) {
+          insert.setObject(5, each.retainUntil().get());
+        } else {
+          insert.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
+        }
+        insert.setString(6, each.artifact());
+        insert.setObject(7, recordedAt);
+        insert.addBatch();
+      }
+      insert.executeBatch();
+    }
+  }
+
+  private static List<RetentionRow> readAll(PreparedStatement statement) throws SQLException {
+    try (ResultSet rows = statement.executeQuery()) {
+      List<RetentionRow> found = new ArrayList<>();
+      while (rows.next()) {
+        found.add(read(rows));
+      }
+      return List.copyOf(found);
+    }
+  }
+
+  private static RetentionRow read(ResultSet rows) throws SQLException {
+    try {
+      EvidenceKey artifact = new EvidenceKey(rows.getString(1));
+      Regime regime = new Regime(rows.getString(2));
+      AnchorEvent anchor = Codes.anchorEvent(rows.getShort(3));
+      String retentionClass = rows.getString(4);
+      OffsetDateTime retainUntil = rows.getObject(5, OffsetDateTime.class);
+      boolean legalHold = rows.getBoolean(6);
+      Instant recordedAt = PgTime.instant(rows.getObject(7, OffsetDateTime.class));
+      RetentionClaim claim =
+          new RetentionClaim(
+              artifact,
+              regime,
+              anchor,
+              retainUntil == null ? Optional.empty() : Optional.of(PgTime.instant(retainUntil)),
+              retentionClass);
+      return new RetentionRow(claim, legalHold, recordedAt);
+    } catch (IllegalArgumentException e) {
+      throw new LedgerException("stored row is malformed", e);
+    }
+  }
+}

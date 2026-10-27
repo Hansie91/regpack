@@ -21,8 +21,8 @@ import java.util.regex.Pattern;
  * Reads the approved schema documents and the decisions records (test support). The two
  * machine-read blocks of a schema document are the contract of its migration script: {@code
  * docs/ledger/schema-design.md} for {@code V001}, {@code docs/ledger/schema-design-p3b.md} for
- * {@code V002}. Every script has its own document (the approved one is frozen; a change is a new
- * script and a new document).
+ * {@code V002}, {@code docs/ledger/schema-design-p3c.md} for {@code V003}. Every script has its own
+ * document (the approved one is frozen; a change is a new script and a new document).
  */
 public final class SchemaDocument {
   /** One row of the constraint block: a constraint, index or trigger, its table and its kind. */
@@ -34,6 +34,9 @@ public final class SchemaDocument {
   /** The record that keeps the pins and the approval of the P3b document (V002). */
   public static final String EVIDENCE_DECISIONS = "docs/evidence/decisions.md";
 
+  /** The record that keeps the pins and the approval of the P3c document (V003). */
+  public static final String P3C_DECISIONS = "docs/evidence/p3c-decisions.md";
+
   /** The document of each script, in script order: name of the script to repository path. */
   public static final Map<String, String> DOCUMENT_OF_SCRIPT = documents();
 
@@ -43,6 +46,7 @@ public final class SchemaDocument {
     Map<String, String> documents = new LinkedHashMap<>();
     documents.put("V001__core.sql", "docs/ledger/schema-design.md");
     documents.put("V002__evidence_manifest.sql", "docs/ledger/schema-design-p3b.md");
+    documents.put("V003__retention_and_subject_index.sql", "docs/ledger/schema-design-p3c.md");
     return Collections.unmodifiableMap(documents);
   }
 

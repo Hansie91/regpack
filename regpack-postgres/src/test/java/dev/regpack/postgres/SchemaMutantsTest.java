@@ -26,8 +26,9 @@ import org.junit.jupiter.api.Test;
 /**
  * Checks that the schema mutants of T20 are what the plan's table says, without a server: a typo in
  * a constraint name or in a test name would make {@link PgSchemaTeethIT} fail (or, worse, pass
- * vacuously) only on a server: the six mutants of P3a first ran at P3a CP-3, the seventh (T12)
- * first runs at P3b1 CP-1. The real-store behaviour of the mutants is proven by that class.
+ * vacuously) only on a server: the six mutants of P3a first ran at P3a CP-3, the seventh (T12) at
+ * P3b1 CP-1, the eighth (P3c1 T11) first runs at P3c1 CP-1. The real-store behaviour of the mutants
+ * is proven by that class.
  */
 class SchemaMutantsTest {
   private static final Set<String> PLANNED_OBJECTS =
@@ -38,40 +39,47 @@ class SchemaMutantsTest {
           "decision_idem_key",
           "decision_head_pk",
           "ingest_pk",
-          "object_manifest_pk");
+          "object_manifest_pk",
+          "retention_pk");
 
   @Test
-  void theSevenMutationsOfThePlanAreRegisteredOnceEach() {
+  void theEightMutationsOfThePlanAreRegisteredOnceEach() {
     List<String> objects = SchemaMutants.all().stream().map(e -> e.mutation().name()).toList();
 
     assertThat(objects).containsExactlyInAnyOrderElementsOf(PLANNED_OBJECTS);
     assertThat(objects).doesNotHaveDuplicates();
-    assertThat(SchemaMutants.all().stream().map(Entry::type).distinct().count()).isEqualTo(7);
+    assertThat(SchemaMutants.all().stream().map(Entry::type).distinct().count()).isEqualTo(8);
     for (Entry entry : SchemaMutants.all()) {
       assertThat(entry.caughtBy()).as(entry.type().getSimpleName()).isNotEmpty();
     }
   }
 
   /**
-   * The seventh mutant is caught by a failure that says what it proves: the insert names the
-   * constraint as its arbiter, so without it the server answers 42704 and the adapter writes {@code
-   * sqlstate=42704}. A run in which the same test fails for another reason (a typo in the insert, a
-   * wrong parameter type) is a miss. The six mutants of P3a expect any failure.
+   * The mutants of the two constraints that an insert names as its arbiter ({@code
+   * object_manifest_pk} of T12, {@code retention_pk} of P3c1 T11) are caught by a failure that says
+   * what it proves: the insert names the constraint, so without it the server answers 42704 and the
+   * adapter writes {@code sqlstate=42704}. A run in which the same test fails for another reason (a
+   * typo in the insert, a wrong parameter type) is a miss. The six mutants of P3a expect any
+   * failure.
    */
   @Test
-  void theSeventhMutantExpectsTheMissingArbiterAndTheSixOfP3aAnyFailure() {
-    Entry manifest =
-        SchemaMutants.all().stream()
-            .filter(e -> e.mutation().name().equals("object_manifest_pk"))
-            .findFirst()
-            .orElseThrow();
-    assertThat(manifest.expectedFailure()).isEqualTo("sqlstate=42704");
-    assertThat(manifest.expectedFailure()).isEqualTo(SchemaMutants.MISSING_ARBITER);
+  void theTwoArbiterMutantsExpectTheMissingArbiterAndTheSixOfP3aAnyFailure() {
+    Set<String> arbiterBased = Set.of("object_manifest_pk", "retention_pk");
     for (Entry entry : SchemaMutants.all()) {
-      if (!entry.mutation().name().equals("object_manifest_pk")) {
+      if (arbiterBased.contains(entry.mutation().name())) {
+        assertThat(entry.expectedFailure())
+            .as(entry.type().getSimpleName())
+            .isEqualTo("sqlstate=42704");
+        assertThat(entry.expectedFailure()).isEqualTo(SchemaMutants.MISSING_ARBITER);
+      } else {
         assertThat(entry.expectedFailure()).as(entry.type().getSimpleName()).isEmpty();
       }
     }
+    assertThat(
+            SchemaMutants.all().stream()
+                .filter(e -> !e.expectedFailure().isEmpty())
+                .map(e -> e.mutation().name()))
+        .containsExactlyInAnyOrderElementsOf(arbiterBased);
   }
 
   @Test
@@ -231,11 +239,12 @@ class SchemaMutantsTest {
         all.append(resource(name)).append('\n');
       }
     }
-    // the scan must see both scripts, or "every mutation names an object" would be weaker than it
+    // the scan must see every script, or "every mutation names an object" would be weaker than it
     // reads
     assertThat(all.toString())
         .contains("CREATE TABLE ingest (")
-        .contains("CREATE TABLE object_manifest (");
+        .contains("CREATE TABLE object_manifest (")
+        .contains("CREATE TABLE retention (");
     return all.toString();
   }
 

@@ -12,6 +12,8 @@ import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -36,6 +38,7 @@ final class SqlSpy {
   private volatile Answers answers;
   private volatile int updateCount;
   private volatile int batchCount = 1;
+  private volatile boolean typedBinds;
 
   /**
    * The warning chain of the connection, as {@code getWarnings} sees it. One chain for all the
@@ -172,6 +175,18 @@ final class SqlSpy {
     return this;
   }
 
+  /**
+   * Also records the binds that are not text, as {@code bind <kind> <index>=<value>} with the kind
+   * {@code short}, {@code int}, {@code long}, {@code boolean}, {@code object} (the {@code
+   * toString()} of the value, for an {@code OffsetDateTime} its ISO text) or {@code null} (the SQL
+   * type code). Off by default: a recorded text bind is {@code bind <index>=<value>} and no other
+   * test sees the new events.
+   */
+  SqlSpy recordingTypedBinds() {
+    this.typedBinds = true;
+    return this;
+  }
+
   /** Marks a point of the test body in the event list. */
   void mark(String event) {
     events.add(event);
@@ -286,6 +301,14 @@ final class SqlSpy {
             }
           } else if (name.equals("setString")) {
             events.add("bind " + args[0] + "=" + args[1]);
+          } else if (typedBinds && TYPED_SETTERS.contains(name) && args != null) {
+            events.add(
+                "bind "
+                    + name.substring(3).toLowerCase(Locale.ROOT)
+                    + " "
+                    + args[0]
+                    + "="
+                    + args[1]);
           }
           if (real == null) {
             if (name.equals("executeBatch")) {
@@ -302,6 +325,10 @@ final class SqlSpy {
         };
     return Proxy.newProxyInstance(SqlSpy.class.getClassLoader(), new Class<?>[] {type}, handler);
   }
+
+  /** The setters of a prepared statement that {@link #recordingTypedBinds} records. */
+  private static final Set<String> TYPED_SETTERS =
+      Set.of("setShort", "setInt", "setLong", "setBoolean", "setObject", "setNull");
 
   private static ResultSet resultSetProxy() {
     return (ResultSet)

@@ -9,6 +9,7 @@ import dev.regpack.testkit.contract.LeaseDeliveryLedgerContract;
 import dev.regpack.testkit.contract.LedgerDurabilityContract;
 import dev.regpack.testkit.contract.ManifestLedgerContract;
 import dev.regpack.testkit.contract.ReportLedgerContract;
+import dev.regpack.testkit.contract.RetentionLedgerContract;
 import dev.regpack.testkit.contract.StorableValuesLedgerContract;
 
 /**
@@ -17,9 +18,10 @@ import dev.regpack.testkit.contract.StorableValuesLedgerContract;
  * the testkit are implemented here as their tasks land (T15: ingest and outbox; T16: decisions and
  * contexts; T17: leases, deliveries and the fencing scenarios; T18: the report suites and the exit
  * fixtures; P3b1 T12: the object manifest; P3b1 T17: {@code LedgerDurabilityContract}, bound once
- * the placeholder of the durability query was replaced by {@link PgLedgerDurability}). Without a
- * server every test of a subclass is skipped by an assumption. The class is public so that the
- * schema mutants of T20 (package {@code mutants}) can bind the same suites.
+ * the placeholder of the durability query was replaced by {@link PgLedgerDurability}; P3c1 T11:
+ * {@code RetentionLedgerContract}, the 24 methods of the retention rows). Without a server every
+ * test of a subclass is skipped by an assumption. The class is public so that the schema mutants of
+ * T20 (package {@code mutants}) can bind the same suites.
  *
  * <p>In the job {@code ledger-pg} there is no standby, so {@code durability()} answers "not
  * synchronous" and {@code aSynchronousStatusNamesAtLeastOneStandby} has nothing to check there (its
@@ -36,6 +38,7 @@ public abstract class AbstractPgLedgerContract extends AbstractPgStoreTest
         ExitFixturesContract,
         StorableValuesLedgerContract,
         ManifestLedgerContract,
+        RetentionLedgerContract,
         LedgerDurabilityContract {
   @Override
   public LedgerStore ledger() {

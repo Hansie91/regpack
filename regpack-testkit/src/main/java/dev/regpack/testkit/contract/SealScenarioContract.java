@@ -144,9 +144,9 @@ public interface SealScenarioContract {
    * {@code regime}, and extends the stored object to the latest date of all claims of the object.
    * The binding builds a {@code DurableSeal} with a retention policy of 1,826 days, a gate that
    * asks nothing and a retention registrar over the given ports. The suite passes its own ledger
-   * and evidence store, not the proxies of {@code wire} (a JDK proxy implements only {@code
-   * LedgerStore}, and the registrar needs the {@link RetentionLedger} side of the ledger); the
-   * binding casts the ledger to {@link RetentionLedger} until {@code LedgerStore} extends it.
+   * and evidence store, not the proxies of {@code wire}, so that the rows the registrar writes and
+   * the rows the scenario reads are those of one ledger ({@link LedgerStore} is a {@link
+   * RetentionLedger}).
    */
   Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime);
 
@@ -1402,9 +1402,10 @@ public interface SealScenarioContract {
     Case a = newDelivery(endpoint, token, "BK-RETAIN-A", bytes);
     Case b = newDelivery(endpoint, token, "BK-RETAIN-B", bytes);
     Regime regime = new Regime("mifir.eu.rts22");
-    // the suite's own stores: the retention side of the ledger is not on the proxies of wire()
+    // the suite's own stores, not the proxies of wire(): the rows are read from the ledger that the
+    // registrar wrote to
     Sealing sealing = sealingWithRetention(ledger(), evidence(), regime);
-    RetentionLedger rows = (RetentionLedger) ledger();
+    RetentionLedger rows = ledger();
     EvidenceKey sealedKey = sealedKeyOf(Sha256.of(bytes));
     Duration policy = Duration.ofDays(1826);
     Instant t0 = clock().now();

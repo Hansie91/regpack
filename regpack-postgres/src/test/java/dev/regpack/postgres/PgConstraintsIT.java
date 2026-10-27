@@ -20,17 +20,18 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
- * The constraints of {@code V001} and (P3b1 T12) of {@code V002} against seeded duplicates and
- * orphans (spec 14.1, review focus LF23; Convention 6): raw SQL on a migrated schema, each
- * statement expected to be rejected with a SQLState and, where the server names one, the
- * constraint. They are the seeded-duplicate evidence of the constraint clause of the P3 exit
- * criterion, together with {@code
+ * The constraints of {@code V001}, (P3b1 T12) of {@code V002} and (P3c1 T11) of {@code V003}
+ * against seeded duplicates and orphans (spec 14.1, review focus LF23; Convention 6): raw SQL on a
+ * migrated schema, each statement expected to be rejected with a SQLState and, where the server
+ * names one, the constraint. They are the seeded-duplicate evidence of the constraint clause of the
+ * P3 exit criterion, together with {@code
  * PgDecisionsIT#crossPartitionDuplicateDecisionSeqIsRejectedByTheHead}. The adapter is not used:
  * what the schema itself refuses is the point. Skipped without {@code REGPACK_PG_URL}. The tests of
- * P3a first ran at P3a CP-3; the tests of {@code V002} (T12) first run at P3b1 CP-1. The tests of
- * the dictionary, batch, checkpoint, lease and restore-epoch keys and of the foreign keys of the
- * decision, ingest, TRN, attempt and lease tables were added in FP3 and first run at the checkpoint
- * after it; docs/ledger/p3a-notes.md (section 4) lists which constraints have a seeded test.
+ * P3a first ran at P3a CP-3; the tests of {@code V002} (T12) first ran at P3b1 CP-1; those of
+ * {@code V003} (P3c1 T11) first run at P3c1 CP-1. The tests of the dictionary, batch, checkpoint,
+ * lease and restore-epoch keys and of the foreign keys of the decision, ingest, TRN, attempt and
+ * lease tables were added in FP3 and first run at the checkpoint after it; docs/ledger/p3a-notes.md
+ * (section 4) lists which constraints have a seeded test.
  *
  * <p>State and kind codes in the statements are the stored ones of {@link Codes}: delivery states
  * QUEUED 3, SENDING 4, AWAITING_ACK 5; outcome REPORT 1; leg MARKET 1, CLIENT 2; version origin
@@ -888,6 +889,260 @@ class PgConstraintsIT extends AbstractPgStoreTest {
                   .contains(index)
                   .doesNotContain("Seq Scan"));
     }
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // the retention rows and the data-subject index (V003, P3c1 T11)
+
+  private static final String Y2030 = "timestamptz '2030-01-01 00:00:00+00'";
+  private static final String Y2031 = "timestamptz '2031-01-01 00:00:00+00'";
+  private static final String Y2032 = "timestamptz '2032-01-01 00:00:00+00'";
+
+  /**
+   * A retention row: class {@code sealed}, not held; {@code anchor} is the stored code
+   * (OBJECT_WRITTEN 1, TERMINATION 2) and {@code until} an SQL expression for the date (a
+   * timestamptz literal, or NULL while the anchor is unknown).
+   */
+  private static String retentionRow(String key, String regime, int anchor, String until) {
+    return "INSERT INTO retention (object_key, regime, anchor_event, retention_class,"
+        + " retain_until, legal_hold, recorded_at) VALUES ('"
+        + key
+        + "', '"
+        + regime
+        + "', "
+        + anchor
+        + ", 'sealed', "
+        + until
+        + ", false, now())";
+  }
+
+  /**
+   * A data-subject index row: the hash is {@code hashBytes} bytes of {@code hashByte}, the kind the
+   * stored code (REPORT_VERSION 1, EVIDENCE_OBJECT 2).
+   */
+  private static String subjectRow(String hashByte, int hashBytes, int kind, String ref) {
+    return "INSERT INTO subject_index (subject_hash, ref_kind, ref, recorded_at) VALUES"
+        + " (decode(repeat('"
+        + hashByte
+        + "', "
+        + hashBytes
+        + "), 'hex'), "
+        + kind
+        + ", '"
+        + ref
+        + "', now())";
+  }
+
+  @Test
+  void aSecondRetentionRowForOneArtifactRegimeAnchorIsRejected() throws SQLException {
+    exec(retentionRow("sealed/ab/key-one", "mifir.eu.rts22", 1, Y2030));
+    // the same triple with another date: only the primary key can clash
+    assertRejected(
+        retentionRow("sealed/ab/key-one", "mifir.eu.rts22", 1, Y2031), "23505", "retention_pk");
+    assertRejected(
+        retentionRow("sealed/ab/key-one", "mifir.eu.rts22", 1, "NULL"), "23505", "retention_pk");
+    // another regime, another anchor, a regime that differs in a dot, a key that differs in case
+    // and a longer key are other rows
+    exec(
+        retentionRow("sealed/ab/key-one", "emir.eu", 1, Y2030),
+        retentionRow("sealed/ab/key-one", "mifir.eu.rts22", 2, "NULL"),
+        retentionRow("sealed/ab/key-one", "mifir.eurts22", 1, Y2030),
+        retentionRow("sealed/ab/Key-one", "mifir.eu.rts22", 1, Y2030),
+        retentionRow("sealed/ab/key-one2", "mifir.eu.rts22", 1, Y2030));
+    assertThat(count("SELECT count(*) FROM retention")).isEqualTo(6);
+    assertThat(
+            count(
+                "SELECT count(*) FROM retention WHERE object_key = 'sealed/ab/key-one'"
+                    + " AND regime = 'mifir.eu.rts22' AND anchor_event = 1 AND retain_until = "
+                    + Y2030))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void aSubjectIndexRowOfTheWrongHashLengthIsRejected() throws SQLException {
+    for (int length : new int[] {0, 31, 33}) {
+      assertRejected(
+          subjectRow("ab", length, 1, "report/one"), "23514", "subject_index_hash_check");
+    }
+    assertThat(count("SELECT count(*) FROM subject_index")).isZero();
+    // the length itself is accepted
+    exec(subjectRow("ab", 32, 1, "report/one"));
+    assertThat(count("SELECT count(*) FROM subject_index")).isEqualTo(1);
+  }
+
+  @Test
+  void aDuplicateSubjectIndexRowIsRejected() throws SQLException {
+    exec(subjectRow("ab", 32, 1, "report/one"));
+    assertRejected(subjectRow("ab", 32, 1, "report/one"), "23505", "subject_index_pk");
+    // the same hash and text under the other kind, the same reference under another hash and
+    // another reference under the same hash are other rows
+    exec(
+        subjectRow("ab", 32, 2, "report/one"),
+        subjectRow("cd", 32, 1, "report/one"),
+        subjectRow("ab", 32, 1, "report/two"),
+        subjectRow("ab", 32, 1, "Report/one"));
+    assertThat(count("SELECT count(*) FROM subject_index")).isEqualTo(5);
+  }
+
+  /**
+   * D2: the trigger {@code retention_extend_only} refuses an update that moves a date back. The
+   * adapter never issues one (its upsert writes {@code GREATEST}), so this is the second defence,
+   * shown with raw SQL; the trigger raises 55000 and names no constraint.
+   */
+  @Test
+  void aRetainUntilCannotBeShortenedBySql() throws SQLException {
+    exec(retentionRow("sealed/s1", "mifir.eu.rts22", 1, Y2031));
+    String update = "UPDATE retention SET retain_until = ";
+    String where = " WHERE object_key = 'sealed/s1'";
+    assertRejected(update + Y2030 + where, "55000", null);
+    // one microsecond earlier is earlier
+    assertRejected(update + Y2031 + " - interval '1 microsecond'" + where, "55000", null);
+    assertThat(count("SELECT count(*) FROM retention" + where + " AND retain_until = " + Y2031))
+        .as("the refused updates changed nothing")
+        .isEqualTo(1);
+    // the same date and a later one are accepted, and the date is extend-only from there
+    exec(update + Y2031 + where, update + Y2032 + where);
+    assertThat(count("SELECT count(*) FROM retention" + where + " AND retain_until = " + Y2032))
+        .isEqualTo(1);
+    assertRejected(update + Y2031 + where, "55000", null);
+  }
+
+  @Test
+  void aNonNullRetainUntilCannotBecomeNull() throws SQLException {
+    exec(
+        retentionRow("sealed/n1", "emir.eu", 1, Y2031),
+        retentionRow("sealed/n2", "emir.eu", 2, "NULL"));
+    assertRejected(
+        "UPDATE retention SET retain_until = NULL WHERE object_key = 'sealed/n1'", "55000", null);
+    assertThat(
+            count(
+                "SELECT count(*) FROM retention WHERE object_key = 'sealed/n1'"
+                    + " AND retain_until = "
+                    + Y2031))
+        .isEqualTo(1);
+    // an open anchor may stay open, and takes a value once
+    exec(
+        "UPDATE retention SET legal_hold = true WHERE object_key = 'sealed/n2'",
+        "UPDATE retention SET retain_until = NULL WHERE object_key = 'sealed/n2'",
+        "UPDATE retention SET retain_until = " + Y2030 + " WHERE object_key = 'sealed/n2'");
+    assertThat(
+            count(
+                "SELECT count(*) FROM retention WHERE object_key = 'sealed/n2'"
+                    + " AND retain_until = "
+                    + Y2030))
+        .isEqualTo(1);
+    assertRejected(
+        "UPDATE retention SET retain_until = NULL WHERE object_key = 'sealed/n2'", "55000", null);
+  }
+
+  /**
+   * D2, open question 2 of the approved document: the key, the regime, the anchor and the class of
+   * a row are fixed, alone or together with a column that may change; {@code legal_hold} and {@code
+   * recorded_at} may change.
+   */
+  @Test
+  void theKeyRegimeAnchorAndClassOfARowCannotBeChangedBySql() throws SQLException {
+    exec(retentionRow("sealed/k1", "mifir.eu.rts22", 1, Y2030));
+    String where = " WHERE object_key = 'sealed/k1'";
+    List<String> forbidden =
+        List.of(
+            "UPDATE retention SET object_key = 'sealed/k2'",
+            "UPDATE retention SET regime = 'emir.eu'",
+            "UPDATE retention SET anchor_event = 2",
+            "UPDATE retention SET retention_class = 'other'",
+            "UPDATE retention SET object_key = 'sealed/k2', legal_hold = true",
+            "UPDATE retention SET retention_class = 'other', retain_until = " + Y2032);
+    for (String sql : forbidden) {
+      assertRejected(sql + where, "55000", null);
+    }
+    assertThat(
+            count(
+                "SELECT count(*) FROM retention WHERE object_key = 'sealed/k1'"
+                    + " AND regime = 'mifir.eu.rts22' AND anchor_event = 1"
+                    + " AND retention_class = 'sealed' AND NOT legal_hold AND retain_until = "
+                    + Y2030))
+        .as("the refused updates changed nothing")
+        .isEqualTo(1);
+    // the hold and the time of the row are not guarded
+    exec("UPDATE retention SET legal_hold = true, recorded_at = now()" + where);
+    assertThat(count("SELECT count(*) FROM retention" + where + " AND legal_hold")).isEqualTo(1);
+  }
+
+  /**
+   * Section 4 of the approved document: the tables have no foreign key, because the retention row
+   * of a sealed object is written before the SENDING unit that writes its manifest row, and after a
+   * restore the evidence tier is ahead of the database.
+   */
+  @Test
+  void aRetentionRowMayNameAnArtifactThatHasNoManifestRow() throws SQLException {
+    assertThat(count("SELECT count(*) FROM object_manifest")).isZero();
+    exec(
+        retentionRow("sealed/ab/no-manifest-row", "mifir.eu.rts22", 1, Y2030),
+        subjectRow("ab", 32, 2, "sealed/ab/no-manifest-row"),
+        subjectRow("ab", 32, 1, "report/with-no-version"));
+    assertThat(count("SELECT count(*) FROM retention")).isEqualTo(1);
+    assertThat(count("SELECT count(*) FROM subject_index")).isEqualTo(2);
+    assertThat(count("SELECT count(*) FROM object_manifest")).isZero();
+  }
+
+  private List<String> collationOf(String table, String column) throws SQLException {
+    try (Connection connection = raw();
+        PreparedStatement statement =
+            connection.prepareStatement(
+                "SELECT c.collname::text FROM pg_attribute a"
+                    + " JOIN pg_collation c ON c.oid = a.attcollation"
+                    + " WHERE a.attrelid = to_regclass(?) AND a.attname = ?")) {
+      statement.setString(1, schema() + "." + table);
+      statement.setString(2, column);
+      try (ResultSet rows = statement.executeQuery()) {
+        List<String> found = new ArrayList<>();
+        while (rows.next()) {
+          found.add(rows.getString(1));
+        }
+        return found;
+      }
+    }
+  }
+
+  /**
+   * D6, task note T11-1 (D18, D21): the key columns are compared byte by byte. The ordering tests
+   * of both contracts would fail without the clause, but only on a cluster whose default collation
+   * is not byte order (the pinned image is en_US.utf8 [R]; a cluster started with {@code
+   * --locale=C} or {@code C.UTF-8} sorts the contract keys in byte order by itself), and the range
+   * predicate of {@code PgRetention} is exact only in byte order. So the columns are asked in the
+   * catalogue: the collation of {@code object_key}, {@code regime} and {@code ref} is {@code C},
+   * and the collatable columns are exactly the ones named here, so a text column added later is a
+   * decision of its own. The order of the references by code point (D21) is the byte order of UTF-8
+   * only in a UTF8 database, so the encoding of the database is asked too.
+   */
+  @Test
+  void theKeyColumnsOfRetentionAndTheSubjectIndexHaveTheCCollation() throws SQLException {
+    assertThat(collationOf("retention", "object_key")).containsExactly("C");
+    assertThat(collationOf("retention", "regime")).containsExactly("C");
+    assertThat(collationOf("subject_index", "ref")).containsExactly("C");
+    String collatable =
+        "SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid = to_regclass(?)"
+            + " AND a.attnum > 0 AND NOT a.attisdropped AND a.attcollation <> 0"
+            + " ORDER BY a.attname::text";
+    assertThat(strings(collatable, schema() + ".retention"))
+        .as("the class is compared for equality only and has no clause")
+        .containsExactly("object_key", "regime", "retention_class");
+    assertThat(strings(collatable, schema() + ".subject_index")).containsExactly("ref");
+    assertThat(collationOf("retention", "retention_class")).doesNotContain("C");
+    assertThat(
+            names(
+                "SELECT pg_encoding_to_char(encoding)::text FROM pg_database"
+                    + " WHERE datname = current_database()"))
+        .as("the order of the references by code point is the byte order of UTF-8")
+        .containsExactly("UTF8");
+    // the expiry index holds the dated rows that are not held, and the expiry list asks the same
+    assertThat(
+            strings("SELECT pg_get_indexdef(to_regclass(?))", schema() + ".retention_expiry_idx"))
+        .singleElement()
+        .asString()
+        .contains("WHERE")
+        .contains("retain_until IS NOT NULL")
+        .contains("NOT legal_hold");
   }
 
   // ------------------------------------------------------------------------------------------

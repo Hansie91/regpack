@@ -25,7 +25,6 @@ import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerStore;
-import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.postgres.PgWormSupport.S3Settings;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
@@ -97,8 +96,7 @@ class PgWormSealScenarioIT extends AbstractPgStoreTest implements SealScenarioCo
   /**
    * The sealer with the retention registrar (SEAL-1) over the PostgreSQL ledger and P-WORM: the
    * policy of 1,826 days, a gate that asks nothing and a {@link RetentionEngine} for {@code
-   * regime}. Until {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is
-   * cast. NOT RUN LOCALLY: the class skips without {@code REGPACK_PG_URL} and {@code
+   * regime}. NOT RUN LOCALLY: the class skips without {@code REGPACK_PG_URL} and {@code
    * REGPACK_S3_ENDPOINT}; the first run is CP-1.
    */
   @Override
@@ -109,7 +107,7 @@ class PgWormSealScenarioIT extends AbstractPgStoreTest implements SealScenarioCo
         clock(),
         RetentionPolicy.fixedDays(1826),
         new SendGate(SendGate.Requirement.none()),
-        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
+        new RetentionEngine(ledger, evidence, regime));
   }
 
   // ---------------------------------------------------------------------------------------------

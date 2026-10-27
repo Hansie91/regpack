@@ -31,7 +31,8 @@ import org.junit.jupiter.api.Test;
  * and D6 of the V003 document): one row per (artifact, regime, anchor event), a date that can only
  * grow and never goes back to unknown, one legal hold per artifact that a new row of the artifact
  * also takes, a list of due rows that leaves out held rows and epoch markers, and paging in byte
- * order. The port is reached by a cast of {@link #ledger()} until {@code LedgerStore} extends it.
+ * order. The port is reached through {@link #ledger()}: a {@link LedgerStore} is a {@link
+ * RetentionLedger}.
  *
  * <p>Every assertion is adapter-neutral: the literal orders below are byte orders of the key and
  * regime texts, never the order in which an adapter happens to hold them.
@@ -44,7 +45,7 @@ public interface RetentionLedgerContract {
   ManualClock clock();
 
   private RetentionLedger retention() {
-    return (RetentionLedger) ledger();
+    return ledger();
   }
 
   private static Instant at(String iso) {

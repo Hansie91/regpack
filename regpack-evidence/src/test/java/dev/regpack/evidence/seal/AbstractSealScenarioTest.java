@@ -7,7 +7,6 @@ import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import dev.regpack.ports.evidence.seal.Sealing;
 import dev.regpack.ports.ledger.LedgerStore;
-import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.SealScenarioContract;
 import java.io.IOException;
@@ -75,8 +74,7 @@ abstract class AbstractSealScenarioTest implements SealScenarioContract {
 
   /**
    * The sealer with the retention registrar (SEAL-1): the policy of {@link #RETENTION}, a gate that
-   * asks nothing and a {@link RetentionEngine} for {@code regime} over the given ports. Until
-   * {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is cast.
+   * asks nothing and a {@link RetentionEngine} for {@code regime} over the given ports.
    */
   @Override
   public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
@@ -86,6 +84,6 @@ abstract class AbstractSealScenarioTest implements SealScenarioContract {
         clock,
         RETENTION,
         gate(false),
-        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
+        new RetentionEngine(ledger, evidence, regime));
   }
 }

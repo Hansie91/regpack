@@ -26,7 +26,6 @@ import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.LeaseLedger;
 import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.ports.ledger.ManifestConflictException;
-import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.ports.ledger.SubjectIndexLedger;
 import dev.regpack.ports.ledger.TrnConflictException;
 import dev.regpack.ports.ledger.WithdrawalRequiredException;
@@ -54,7 +53,7 @@ import java.util.TreeSet;
  * #requireEnvelopeBodies} is {@code synchronized} on one lock and validates its input before it
  * mutates anything, so a rejected call leaves no trace.
  */
-public final class InMemoryLedgerStore implements LedgerStore, RetentionLedger, SubjectIndexLedger {
+public final class InMemoryLedgerStore implements LedgerStore, SubjectIndexLedger {
   private record SourceEvent(EventIdentity eventIdentity, String sourceId) {}
 
   /** The spec 10 {@code ingest_event_version_key}: (event identity, source, source version). */

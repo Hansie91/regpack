@@ -12,6 +12,7 @@ import dev.regpack.ports.Clock;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.LedgerStore;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Objects;
@@ -27,11 +28,12 @@ import javax.sql.DataSource;
  * <p>Built in tasks: T15 ingest, outbox and context reads; T16 decisions and partitions; T17 leases
  * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work); P3b1
  * T12 the object manifest; P3b1 T17 the durability query of {@link
- * dev.regpack.ports.ledger.LedgerDurability} ({@link PgLedgerDurability}). No method is left
- * unbuilt: {@code NoStubsLeftTest} scans this module's main sources for the exception of an unbuilt
- * method and for the placeholder text of an unbuilt task. The integrity queries of T19 are not part
- * of the {@link LedgerStore} port: {@link LedgerIntegrity} reads the same schema through a {@link
- * DataSource} and the schema name of the {@link Config}.
+ * dev.regpack.ports.ledger.LedgerDurability} ({@link PgLedgerDurability}); P3c1 T11 the {@code
+ * retention} rows ({@link PgRetention}). No method is left unbuilt: {@code NoStubsLeftTest} scans
+ * this module's main sources for the exception of an unbuilt method and for the placeholder text of
+ * an unbuilt task. The integrity queries of T19 are not part of the {@link LedgerStore} port:
+ * {@link LedgerIntegrity} reads the same schema through a {@link DataSource} and the schema name of
+ * the {@link Config}.
  */
 public final class PgLedgerStore implements LedgerStore {
   /**
@@ -113,6 +115,7 @@ public final class PgLedgerStore implements LedgerStore {
   private final PgDeliveries deliveries;
   private final PgReports reports;
   private final PgManifest manifest;
+  private final PgRetention retention;
   private final PgLedgerDurability durability;
 
   public PgLedgerStore(DataSource dataSource, Clock clock, Config config) {
@@ -128,6 +131,7 @@ public final class PgLedgerStore implements LedgerStore {
     // the report unit shares the decision side: its partitions cache and its head conflicts
     this.reports = new PgReports(dataSource, clock, config, decisions);
     this.manifest = new PgManifest(dataSource, clock, config);
+    this.retention = new PgRetention(dataSource, clock, config);
     this.durability = new PgLedgerDurability(dataSource, config);
   }
 
@@ -293,6 +297,29 @@ public final class PgLedgerStore implements LedgerStore {
   @Override
   public List<ManifestRow> manifestRows(String prefix, Optional<EvidenceKey> after, int limit) {
     return manifest.manifestRows(prefix, after, limit);
+  }
+
+  // RetentionLedger (P3c1 T11)
+
+  @Override
+  public void recordRetention(List<RetentionClaim> claims) {
+    retention.recordRetention(claims);
+  }
+
+  @Override
+  public void setRetentionHold(EvidenceKey artifact, boolean hold) {
+    retention.setRetentionHold(artifact, hold);
+  }
+
+  @Override
+  public List<RetentionRow> retentionRows(String prefix, Optional<EvidenceKey> after, int limit) {
+    return retention.retentionRows(prefix, after, limit);
+  }
+
+  @Override
+  public List<RetentionRow> expiredRetention(
+      Instant asOf, Optional<RetentionRow> after, int limit) {
+    return retention.expiredRetention(asOf, after, limit);
   }
 
   // LedgerDurability (P3b1 T17)

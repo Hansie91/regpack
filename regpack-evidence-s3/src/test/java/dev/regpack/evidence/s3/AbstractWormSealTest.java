@@ -28,7 +28,6 @@ import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerDurability;
 import dev.regpack.ports.ledger.LedgerStore;
-import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
@@ -122,8 +121,7 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
 
   /**
    * The sealer with the retention registrar (SEAL-1): the policy of {@link #RETENTION}, a gate that
-   * asks nothing and a {@link RetentionEngine} for {@code regime} over the given ports. Until
-   * {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is cast.
+   * asks nothing and a {@link RetentionEngine} for {@code regime} over the given ports.
    */
   @Override
   public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
@@ -133,7 +131,7 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
         clock,
         RETENTION,
         gate(false),
-        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
+        new RetentionEngine(ledger, evidence, regime));
   }
 
   /** The configuration of the store under test (its bucket and endpoint). */

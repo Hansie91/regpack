@@ -33,7 +33,6 @@ import dev.regpack.ports.ledger.ManifestLedger.ManifestRow;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectEntry;
 import dev.regpack.ports.ledger.ManifestLedger.Provenance;
-import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
 import java.io.IOException;
@@ -132,8 +131,8 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
   /**
    * The sealer with the retention registrar (SEAL-1) over the PostgreSQL ledger and P-SEALED: the
    * policy of 1,826 days, a gate that asks nothing and a {@link RetentionEngine} for {@code
-   * regime}. Until {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is
-   * cast. NOT RUN LOCALLY: the class skips without {@code REGPACK_PG_URL}; the first run is CP-1.
+   * regime}. NOT RUN LOCALLY: the class skips without {@code REGPACK_PG_URL}; the first run is
+   * CP-1.
    */
   @Override
   public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
@@ -143,7 +142,7 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
         clock(),
         RetentionPolicy.fixedDays(1826),
         new SendGate(SendGate.Requirement.none()),
-        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
+        new RetentionEngine(ledger, evidence, regime));
   }
 
   // ---------------------------------------------------------------------------------------------

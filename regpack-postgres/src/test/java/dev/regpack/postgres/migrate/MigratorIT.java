@@ -73,11 +73,11 @@ class MigratorIT {
     return SqlIdentifier.require(schema) + "." + SqlIdentifier.require(name);
   }
 
-  /** The real scripts followed by one broken script that is the next version (V003 today). */
+  /** The real scripts followed by one broken script that is the next version (V004 today). */
   private static ScriptCatalogue withABrokenNextScript(String brokenSql) {
     List<ScriptCatalogue.Script> scripts =
         new ArrayList<>(ScriptCatalogue.fromClasspath().scripts());
-    scripts.add(ScriptCatalogue.Script.of(scripts.size() + 1, "V003__broken.sql", brokenSql));
+    scripts.add(ScriptCatalogue.Script.of(scripts.size() + 1, "V004__broken.sql", brokenSql));
     return ScriptCatalogue.of(scripts);
   }
 
@@ -213,8 +213,8 @@ class MigratorIT {
   @Test
   void refusesAGapInTheStoredVersions() throws SQLException {
     Migrator.migrate(dataSource, schema);
-    // stored versions {2,3} instead of {1,2}: the history does not start at 1
-    update("UPDATE " + table("schema_migration") + " SET version = 3 WHERE version = 1");
+    // stored versions {2,3,4} instead of {1,2,3}: the history does not start at 1
+    update("UPDATE " + table("schema_migration") + " SET version = 4 WHERE version = 1");
     assertThatThrownBy(() -> Migrator.migrate(dataSource, schema))
         .isInstanceOfSatisfying(
             MigrationException.class,
@@ -222,7 +222,7 @@ class MigratorIT {
               assertThat(e.kind()).isEqualTo(Kind.GAP);
               assertThat(e.version()).as("the first version that is missing").isEqualTo(1);
             });
-    // a hole in the middle: stored versions {1,3} instead of {1,2}
+    // a hole in the middle: stored versions {1,3,4} instead of {1,2,3}
     update("UPDATE " + table("schema_migration") + " SET version = 1 WHERE version = 2");
     assertThatThrownBy(() -> Migrator.migrate(dataSource, schema))
         .isInstanceOfSatisfying(
@@ -278,16 +278,16 @@ class MigratorIT {
             MigrationException.class,
             e -> {
               assertThat(e.kind()).isEqualTo(Kind.SCRIPT_FAILED);
-              assertThat(e.version()).isEqualTo(3);
+              assertThat(e.version()).isEqualTo(4);
             });
     assertThat(
             column("SELECT version::text FROM " + table("schema_migration") + " ORDER BY version"))
-        .as("the two real scripts stay applied")
-        .containsExactly("1", "2");
+        .as("the three real scripts stay applied")
+        .containsExactly("1", "2", "3");
     assertThat(column("SELECT to_regclass(?)::text", schema + ".broken_probe"))
         .as("nothing of the broken script: its first statement was rolled back")
         .containsExactly((String) null);
-    // version 3 was never recorded, so a run with the real catalogue finds nothing to do
+    // version 4 was never recorded, so a run with the real catalogue finds nothing to do
     assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
   }
 
@@ -300,7 +300,7 @@ class MigratorIT {
             MigrationException.class,
             e -> {
               assertThat(e.getMessage())
-                  .contains("V003__broken.sql")
+                  .contains("V004__broken.sql")
                   .contains("SCRIPT_FAILED")
                   .doesNotContain("secret_marker_table_zz")
                   .doesNotContain("INSERT")
@@ -317,7 +317,8 @@ class MigratorIT {
             "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
                 + " WHERE n.nspname = ? AND c.relkind IN ('r', 'p')",
             schema);
-    // the union of the documents of every script: the 18 tables of V001 and object_manifest (V002)
+    // the union of the documents of every script: the 18 tables of V001, object_manifest (V002),
+    // retention and subject_index (V003)
     assertThat(tables).containsExactlyInAnyOrderElementsOf(SchemaDocument.allTableNames());
 
     // and, as far as the server can show it, every named constraint, index and trigger of the
