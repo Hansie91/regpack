@@ -15,7 +15,7 @@ Branch `p3c/keys-manifests` from `main` at `38f8a18` (the merge of `p3b2/worm-s3
 | AP-3 | The one edit of `.github/workflows/ci.yml`: the push filter line `branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**', 'p3b/**', 'p3b2/**', 'p3c/**']` (line 5 only, no job change) | asked 2026-10-26 11:38:57 UTC, answered 11:50:35 UTC | hans | "Approve the exact line (Recommended)" (label); committed in T1 step 5 |
 | AP-4 | Merge into `main`, tag `p3c1-keys-encryption` and the sign-offs of `docs/exit/P3c1.md` | | | not asked (T16) |
 | AP-5 | One test-scope dependency in `regpack-postgres/pom.xml`: `<dependency><groupId>dev.regpack</groupId><artifactId>regpack-inmemory</artifactId><scope>test</scope></dependency>` (for `InMemoryKms` in `PgEncryptedSealScenarioIT`; no new module, no third-party coordinate) | asked 2026-10-26 11:38:57 UTC, answered 11:50:35 UTC | hans | "Approve the exact dependency (Recommended)" (label); used in T13 only |
-| AP-7 | The schema document `docs/ledger/schema-design-p3c.md` by its SHA-256, before any SQL | | | not asked (T2 owner stop); the line `approved-schema-p3c-sha256:` below stays empty until then |
+| AP-7 | The schema document `docs/ledger/schema-design-p3c.md` (commit `4c5fb3e`, 290 lines) by its SHA-256 `c2c3147b5a565f87b6a807307ac9bcaf803a75b09dc2b1a8a0683ffb52b2bfd0` (after removing carriage returns), with the Decision sheet answered by its recommendations: D2 a BEFORE UPDATE trigger `retention_extend_only`, D3 regime as text, D4 keyed hashes and references with nothing encrypted at rest (changes "yes, encrypted" of the approved P3a document), D5 the partial expiry index, D6 byte-order collation, D7 no purge in P3c1; D1 settled by AP-1; the defaults of its open questions 1 to 5 apply | asked 2026-10-26 12:16:49 UTC, answered 2026-10-27 00:54:53 UTC | hans | "Approve the document by this hash (Recommended)" (label). Open question 2 default: `PgConstraintsIT#theKeyRegimeAnchorAndClassOfARowCannotBeChangedBySql` is added to T11; open question 4 default: the tests (a), (b), (d) are added to T8, T10 and T11 as task notes; open question 5: the sizes stay unmeasured |
 
 AP-6 is not needed (no image, no job).
 
@@ -23,19 +23,19 @@ AP-6 is not needed (no image, no job).
 
 | Id | Question | Default | Answer |
 |---|---|---|---|
-| OI-1 | Plan approval, A1 to A12; veto or no veto on A13 to A16; the move of the owner of record of the meta-file items (Scope check) | none | plan approval given as AP-1; no veto of A13 to A16 given; the move of the owner of record was not asked (D1), so the owner of record stays P3c |
+| OI-1 | Plan approval, A1 to A12; veto or no veto on A13 to A16; the move of the owner of record of the meta-file items (Scope check) | none | plan approval given as AP-1; no veto of A13 to A16 given. Move of the owner of record: "Move as proposed (Recommended)" (label), asked 2026-10-26 12:16:49 UTC, answered 2026-10-27 00:54:53 UTC: the immutable per-revision meta-file design goes to P3c2 together with tamper evidence of meta files; single-owner enforcement of a volume pair and the OR rule of a hold go to P4 or SP-W |
 | OI-2 | The split of P3c into P3c1 and P3c2 | split | "Split into P3c1 and P3c2 (Recommended)" (label), 2026-10-26 11:38:43 UTC |
 | OI-3 | KEK granularity | per UTC year | "One KEK per UTC year (Recommended)" (label), 2026-10-26 11:38:43 UTC; the question said that one year is the shredding granularity and that an object stays readable until the last retention of its year ends. Departure (2) stands |
 | OI-4 | The time anchor for P3c2 (A14) | A14 | not asked (D1); A14 stays a veto window for the P3c2 plan |
 | OI-5 | The encrypted classes and the reading of the journal types (A5); the DPO's view if any | A5 | "Default A5 (Recommended)" (label), 2026-10-26 11:50:35 UTC: `sealed/`, `landing/`, `enrichment/` encrypted; `journal/` and `control/` plain. No DPO view was given. The question named the risk that journal objects have free-text fields and that no check shows they hold no personal data |
 | OI-6 | Retention class names and periods | `journal`, `sealed`, `epoch`, `landing`, `enrichment`, 1,826 days | "Default placeholders (Recommended)" (label), 2026-10-26 11:50:35 UTC; Legal replaces them at G8 |
-| OI-7 | The owner's minutes of this slice | none: the owner's own figure | not asked (D1); asked at the T2 stop and in T16 |
+| OI-7 | The owner's minutes of this slice | none: the owner's own figure | "About 10 minutes" (label), 2026-10-27 00:54:53 UTC, for the stops up to and including the schema stop (the plan and settings dialogs of 2026-10-26 and the schema stop); asked again in T16 for the whole slice |
 | OI-8 | Group V of `docs/exit/P3b.md` | not taken here | not asked (D1) |
 | OI-9 | Whether AP-3 also carries the guard of CI-2 (fail `evidence-worm` on `skipped > 0`) | no | not asked (D1); no job text is edited |
 | OI-10 | Departure (3): the key-destruction job is deferred to P4 (spec 17.4 cut order, item 3) | defer | "Defer to P4 (Recommended)" (label), 2026-10-26 11:38:43 UTC; the question said that no record yet says the calibration triggers that cut order |
-| Worksheet for P3c at the end of `docs/exit/P3b2.md` | task-count estimate, runs, owner minutes, re-estimate decision | | not asked (D1); the blanks are the owner's and stay open |
+| Worksheet for P3c at the end of `docs/exit/P3b2.md` | re-estimate decision (continue, or the cut order of spec 17.4) | | "Continue as planned (Recommended)" (label), 2026-10-27 00:54:53 UTC; the question named 16 tasks, about 68 runs (56 to 89), about 680 active minutes (480 to 890), about 30 owner minutes and the stop rule 116 runs or 1,157 minutes. The numeric blanks of the worksheet (task-count estimate, runs, owner minutes) and the box stay the owner's; the agent has edited neither |
 
-approved-schema-p3c-sha256:
+approved-schema-p3c-sha256: c2c3147b5a565f87b6a807307ac9bcaf803a75b09dc2b1a8a0683ffb52b2bfd0
 
 ## Pins created
 
@@ -44,12 +44,13 @@ Added by the task that creates each pin, in its own commit (T16 step 1 checks th
 | Pin | Value | Task | Reason |
 |---|---|---|---|
 | Push filter | `branches: [main, 'p0/**', 'p1a/**', 'p2a/**', 'p3a/**', 'p3b/**', 'p3b2/**', 'p3c/**']`, expected by `SpikeWorkflowTest#ciPushFilterNamesTheWorkBranches` | T1 | AP-3 |
+| schema-design-p3c.md (approved) | SHA-256 `c2c3147b5a565f87b6a807307ac9bcaf803a75b09dc2b1a8a0683ffb52b2bfd0` (commit `4c5fb3e`, carriage returns removed); the line `approved-schema-p3c-sha256:` above holds the same value | T2 | AP-7 |
 
 ## Deviations
 
 | Id | Task | What | Why |
 |---|---|---|---|
-| D1 | T1 step 4 | The owner message named AP-1, OI-2, OI-3, OI-10, AP-3, AP-5, OI-5 and OI-6 (two dialogs). It did not carry the move of the owner of record of the meta-file items, OI-4, OI-7, OI-8, OI-9 or the blanks of the P3c worksheet | Only the items that block T3 and the push filter were asked now; the rest is asked at the T2 stop and in T16. The defaults stand and are not answers |
+| D1 | T1 step 4 | The owner message named AP-1, OI-2, OI-3, OI-10, AP-3, AP-5, OI-5 and OI-6 (two dialogs). It did not carry the move of the owner of record of the meta-file items, OI-4, OI-7, OI-8, OI-9 or the blanks of the P3c worksheet | Only the items that block T3 and the push filter were asked now; the move of the owner of record, the re-estimate decision and OI-7 were asked at the T2 stop (answered 2026-10-27); OI-4, OI-8 and OI-9 were not asked and their defaults stand (a default is not an answer); OI-7 is asked again in T16 |
 | D2 | T1 step 1 | The plan commit is `603f8a3` with the message "docs: revise the P3c1 implementation plan after the second review round (not approved)" (the plan text names a shorter message) | The commit follows the second review round and the final-reader fixes |
 
 ## CI checkpoints
