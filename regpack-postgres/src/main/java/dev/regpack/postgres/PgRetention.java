@@ -40,11 +40,11 @@ import javax.sql.DataSource;
  * #ARTIFACT_LOCK_SQL}), and only then (2) writes every claim with {@link #RECORD_SQL}: an insert
  * whose legal hold is that of the artifact (a row of the artifact is held) and whose conflict on
  * {@code retention_pk} updates the date to the later of the two ({@code GREATEST} ignores a NULL on
- * either side [R]) and nothing else, so the class and {@code recorded_at} of a stored row stay. The
- * constraint is the arbiter, so a schema without it fails with a missing-arbiter error and not with
- * a silent second row (the schema mutant {@code NoRetentionKeyPgLedgerContractIT}). The claims are
- * written in key order, like the locks, so that two calls with overlapping claims never wait for
- * each other in a circle.
+ * either side: manual, Conditional Expressions) and nothing else, so the class and {@code
+ * recorded_at} of a stored row stay. The constraint is the arbiter, so a schema without it fails
+ * with a missing-arbiter error and not with a silent second row (the schema mutant {@code
+ * NoRetentionKeyPgLedgerContractIT}). The claims are written in key order, like the locks, so that
+ * two calls with overlapping claims never wait for each other in a circle.
  *
  * <p><b>The artifact lock (task note T11-2, decision D28).</b> Under {@code READ COMMITTED} each
  * statement takes its own snapshot. A hold that is one {@code UPDATE} and a claim for a new regime
@@ -69,6 +69,27 @@ import javax.sql.DataSource;
  * with SQLSTATE 40P01, which comes out as the ledger exception of any statement failure, after a
  * rollback, with nothing written. The case is recorded, not designed away.
  *
+ * <p><b>What the lock does and does not do.</b> It serialises the writers that take it, and only
+ * those. Every other writer of retention rows (the purge of P4, a tool for holds, a loader) must
+ * take {@link #ARTIFACT_LOCK_SQL} first, with purpose {@value #RETENTION_LOCK_PURPOSE} and the text
+ * schema ':' artifact, in key order, in the unit that writes, or the window that D28 closed
+ * returns: a hold that misses an uncommitted row, a claim that reads a stale hold. The lock is
+ * released when the transaction ends, and a commit with {@code synchronous_commit} on waits for the
+ * synchronous standby before it releases its locks. So while the standby is slow or away, the next
+ * call for the same artifact waits up to {@code lock_timeout} and fails with SQLSTATE 55P03, with
+ * nothing written (fail closed, per artifact; the job {@code ledger-pg} has no standby and cannot
+ * show it). {@code recorded_at} is read before the unit, that is before any wait for the lock.
+ *
+ * <p><b>Cost.</b> The lock takes one entry of the server's shared lock table for each distinct
+ * artifact of a call until the commit. Advisory and ordinary locks share one pool of {@code
+ * max_locks_per_transaction} times ({@code max_connections} plus {@code max_prepared_transactions})
+ * entries, 64 times 100 by default (manual: Server Configuration, Lock Management; Explicit
+ * Locking, Advisory Locks). The port makes a call all or nothing, so the adapter cannot split one,
+ * and a bulk caller chunks its claims (note P4-3). A call that meets the limit fails with SQLSTATE
+ * 53200, which comes out as the ledger exception of any statement failure, after a rollback, with
+ * nothing written. {@code RetentionLedgerContract#theLimitIsCappedAtOneThousand} (1,100 distinct
+ * artifacts in one call) is the first call of that size on a server (CP-1).
+ *
  * <p><b>A call that writes nothing still waits for the standby (I1).</b> There is no such call:
  * {@link #recordRetention} writes a row version for every claim (a conflict updates the date
  * through the {@code DO UPDATE}, also to the value it has [R]) and {@link #setRetentionHold}
@@ -80,7 +101,13 @@ import javax.sql.DataSource;
  * one statement and one snapshot, so the rows of an artifact are never split across two calls.
  * {@link #expiredRetention} lists due rows that are not held and not under {@link
  * RetentionLedger#EXEMPT_PREFIX}, in the order (retain_until, artifact, regime, anchor), after a
- * row by a row comparison [R: per-column collations of a row comparison].
+ * row by a row comparison. The two text parameters of that comparison carry {@code COLLATE "C"}
+ * (deviation D30 from the statement shape of the plan): the explicit collation equals that of the
+ * column and wins over any implicit one, so it cannot conflict, and the result does not depend on
+ * how the server pairs the collations of the two sides of a row comparison. The scalar comparisons
+ * name no collation: a column's own collation beats the default one of a bound parameter (manual,
+ * Collation Support, Collation Concepts). That the pages come in byte order is still shown at CP-1
+ * by the contract tests, on a cluster whose default collation is {@code en_US.utf8}.
  *
  * <p>Every value is a bind parameter, the prefix of the epoch markers included, and no message
  * carries a value (Convention 12). A retain-until is bound only through {@link
@@ -146,7 +173,8 @@ final class PgRetention {
    */
   static final String EXPIRED_AFTER_SQL =
       EXPIRED_HEAD
-          + " AND (retain_until, object_key, regime, anchor_event) > (?, ?, ?, ?)"
+          + " AND (retain_until, object_key, regime, anchor_event) >"
+          + " (?, ? COLLATE \"C\", ? COLLATE \"C\", ?)"
           + EXPIRED_TAIL;
 
   /**
@@ -375,7 +403,7 @@ final class PgRetention {
               retentionClass);
       return new RetentionRow(claim, legalHold, recordedAt);
     } catch (IllegalArgumentException e) {
-      throw new LedgerException("stored row is malformed", e);
+      throw new LedgerException("stored retention row is malformed", e);
     }
   }
 }

@@ -15,6 +15,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -25,6 +26,10 @@ import javax.sql.DataSource;
  * real data source it counts the statements an adapter sends (the tripwire against per-row round
  * trips); over none it is a fake server that answers every statement with an empty result, so the
  * unit-of-work prologue and its error paths can be tested without a database.
+ *
+ * <p>Limits of the fake: the count that it returns for a batch is the same for every entry of the
+ * batch (see {@link #batchingRows}), and the close of statements and result sets is not tracked
+ * (only the close of connections is).
  */
 final class SqlSpy {
   private final List<String> events = new CopyOnWriteArrayList<>();
@@ -40,6 +45,7 @@ final class SqlSpy {
   private volatile int updateCount;
   private volatile int batchCount = 1;
   private volatile boolean typedBinds;
+  private volatile boolean strictBinds;
 
   /**
    * The warning chain of the connection, as {@code getWarnings} sees it. One chain for all the
@@ -48,8 +54,13 @@ final class SqlSpy {
    */
   private final AtomicReference<SQLWarning> warnings = new AtomicReference<>();
 
-  /** A statement whose text contains {@code fragment} fails with {@code exception}. */
-  private record Fault(String fragment, SQLException exception, AtomicInteger remaining) {}
+  /**
+   * A statement whose text contains {@code fragment} fails with {@code exception}: the first {@code
+   * skip} executions of such a statement run as if there were no fault, then {@code remaining}
+   * executions fail.
+   */
+  private record Fault(
+      String fragment, SQLException exception, AtomicInteger skip, AtomicInteger remaining) {}
 
   /**
    * What the fake server answers to a query: the rows (values by column, 1-based in the result set)
@@ -144,7 +155,35 @@ final class SqlSpy {
    * executions fail: the later ones are answered as if there were no fault (a transient failure).
    */
   SqlSpy failStatementWith(String sqlFragment, SQLException exception, int times) {
-    this.fault = new Fault(sqlFragment, exception, new AtomicInteger(times));
+    return failStatementAfter(sqlFragment, 0, exception, times);
+  }
+
+  /**
+   * Like {@link #failStatementWith(String, SQLException, int)}, but the first {@code skip}
+   * executions of a statement whose text contains {@code sqlFragment} run as if there were no fault
+   * (they are recorded and answered like any other), and then the next {@code times} fail: with a
+   * skip of 1 and a {@code times} of 1 the second matching execution fails and no other one does.
+   * It shows a failure on the second of two statements of one kind, for example the lock of the
+   * second artifact of a call.
+   */
+  SqlSpy failStatementAfter(String sqlFragment, int skip, SQLException exception, int times) {
+    this.fault =
+        new Fault(sqlFragment, exception, new AtomicInteger(skip), new AtomicInteger(times));
+    return this;
+  }
+
+  /**
+   * Opt-in: the fake checks the binds of a prepared statement as the driver does, for the
+   * statements of {@code prepareStatement} (not for those of {@code createStatement}). A bind at an
+   * index below 1 or above the number of {@code ?} in the text fails at once with {@code 22023}
+   * ("The column index is out of range"), and an execution without arguments, or the first {@code
+   * addBatch} of a statement, with an index that has no value fails with {@code 07004} ("No value
+   * specified for parameter"). The values stay across {@code addBatch} (so only the first entry of
+   * a batch is checked) and {@code clearParameters} drops them. The number of {@code ?} is counted
+   * in the text, which must hold no quoted question mark. Off by default: no other test changes.
+   */
+  SqlSpy strictBinds() {
+    this.strictBinds = true;
     return this;
   }
 
@@ -280,10 +319,41 @@ final class SqlSpy {
 
   private Object statementProxy(Object real, Class<?> type, String preparedSql) {
     AtomicInteger batched = new AtomicInteger();
+    Set<Integer> bound = ConcurrentHashMap.newKeySet();
+    int placeholders =
+        preparedSql == null ? 0 : (int) preparedSql.chars().filter(c -> c == '?').count();
     InvocationHandler handler =
         (proxy, method, args) -> {
           String name = method.getName();
-          if (name.equals("addBatch") && (args == null || args.length == 0)) {
+          boolean noArguments = args == null || args.length == 0;
+          if (name.startsWith("set")
+              && args != null
+              && args.length >= 2
+              && args[0] instanceof Integer index) {
+            if (strictBinds && preparedSql != null && (index < 1 || index > placeholders)) {
+              throw new SQLException(
+                  "The column index is out of range: "
+                      + index
+                      + ", number of columns: "
+                      + placeholders
+                      + ".",
+                  "22023");
+            }
+            bound.add(index);
+          } else if (name.equals("clearParameters")) {
+            bound.clear();
+          }
+          boolean firstOfABatch = name.equals("addBatch") && noArguments && batched.get() == 0;
+          boolean runs =
+              name.equals("execute") || name.equals("executeQuery") || name.equals("executeUpdate");
+          if (strictBinds && preparedSql != null && noArguments && (firstOfABatch || runs)) {
+            for (int i = 1; i <= placeholders; i++) {
+              if (!bound.contains(i)) {
+                throw new SQLException("No value specified for parameter " + i + ".", "07004");
+              }
+            }
+          }
+          if (name.equals("addBatch") && noArguments) {
             batched.incrementAndGet();
           }
           if (name.startsWith("execute")) {
@@ -295,6 +365,7 @@ final class SqlSpy {
             if (failing != null
                 && sql != null
                 && sql.contains(failing.fragment())
+                && failing.skip().getAndUpdate(left -> Math.max(0, left - 1)) == 0
                 && failing.remaining().getAndUpdate(left -> Math.max(0, left - 1)) > 0) {
               throw failing.exception();
             }

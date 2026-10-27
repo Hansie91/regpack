@@ -142,11 +142,11 @@ class MigratorIT {
 
   /**
    * The production starting point of a database that the P3a build migrated: only V001 is stored.
-   * The first start of the next build applies V002 alone, leaves the rows of V001 and the data as
-   * they are, and is then idempotent.
+   * The first start of the next build applies every later script alone, leaves the rows of V001 and
+   * the data as they are, and is then idempotent.
    */
   @Test
-  void anUpgradeFromAV001OnlyDatabaseAppliesOnlyV002() throws SQLException {
+  void anUpgradeFromAV001OnlyDatabaseAppliesEveryLaterScript() throws SQLException {
     ScriptCatalogue full = ScriptCatalogue.fromClasspath();
     ScriptCatalogue.Script v001 = full.scripts().get(0);
     assertThat(v001.name()).isEqualTo("V001__core.sql");
@@ -190,6 +190,75 @@ class MigratorIT {
         .as("the manifest exists after the upgrade")
         .doesNotContainNull()
         .hasSize(1);
+    assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
+  }
+
+  /**
+   * The production starting point of a database that the P3b build migrated: V001 and V002 are
+   * stored, with data in the tables of both. The first start of the next build applies the later
+   * scripts alone (V003 today, and so on), leaves the rows of the stored ones and all data as they
+   * are, creates the tables of the later scripts empty, and is then idempotent. The expected set is
+   * taken from the catalogue, so that a later script does not make the test stale.
+   */
+  @Test
+  void anUpgradeFromAV001AndV002DatabaseAppliesOnlyTheLaterScripts() throws SQLException {
+    ScriptCatalogue full = ScriptCatalogue.fromClasspath();
+    Migrator.Report before =
+        Migrator.migrate(dataSource, schema, ScriptCatalogue.of(full.scripts().subList(0, 2)));
+    assertThat(before.applied()).containsExactly(1, 2);
+    assertThat(column("SELECT to_regclass(?)::text", schema + ".retention"))
+        .as("the P3b database has no retention table")
+        .containsExactly((String) null);
+    assertThat(column("SELECT to_regclass(?)::text", schema + ".subject_index"))
+        .as("the P3b database has no subject index")
+        .containsExactly((String) null);
+    update("INSERT INTO " + table("regime") + " (regime) VALUES ('survivor')");
+    update(
+        "INSERT INTO "
+            + table("object_manifest")
+            + " (object_key, object_class, sha256, size_bytes, provenance, written_at)"
+            + " VALUES ('sealed/ab/survivor', 1, decode(repeat('ab', 32), 'hex'), 10, 1, now())");
+    String appliedAtOfV002 =
+        column("SELECT applied_at::text FROM " + table("schema_migration") + " WHERE version = 2")
+            .get(0);
+
+    Migrator.Report upgrade = Migrator.migrate(dataSource, schema);
+
+    assertThat(upgrade.applied())
+        .as("only the scripts after V002 are applied")
+        .containsExactlyElementsOf(
+            full.scripts().stream().skip(2).map(ScriptCatalogue.Script::version).toList())
+        .startsWith(3);
+    assertThat(upgrade.currentVersion()).isEqualTo(full.latestVersion());
+    assertThat(
+            column(
+                "SELECT version::text || ' ' || name || ' ' || sha256 FROM "
+                    + table("schema_migration")
+                    + " ORDER BY version"))
+        .isEqualTo(
+            full.scripts().stream()
+                .map(s -> s.version() + " " + s.name() + " " + s.sha256())
+                .toList());
+    assertThat(
+            column(
+                "SELECT applied_at::text FROM " + table("schema_migration") + " WHERE version = 2"))
+        .as("the row of V002 is left alone")
+        .containsExactly(appliedAtOfV002);
+    assertThat(column("SELECT regime FROM " + table("regime")))
+        .as("the data of V001 survives")
+        .containsExactly("survivor");
+    assertThat(column("SELECT object_key FROM " + table("object_manifest")))
+        .as("the data of V002 survives")
+        .containsExactly("sealed/ab/survivor");
+    for (String created : List.of("retention", "subject_index")) {
+      assertThat(column("SELECT to_regclass(?)::text", schema + "." + created))
+          .as("%s exists after the upgrade", created)
+          .doesNotContainNull()
+          .hasSize(1);
+      assertThat(column("SELECT count(*)::text FROM " + table(created)))
+          .as("%s starts empty", created)
+          .containsExactly("0");
+    }
     assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
   }
 

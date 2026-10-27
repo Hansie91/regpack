@@ -35,10 +35,18 @@ import org.junit.jupiter.api.Test;
  * well-formed header over random bytes is accepted (nothing here holds a key).
  */
 public interface EnvelopeBodyLedgerContract {
-  /** A fresh, empty ledger in the default configuration (plain bodies are accepted). */
+  /**
+   * A ledger over an empty store when the test starts, in the default configuration (plain bodies
+   * are accepted). The two hooks may share their data (the PostgreSQL binding does: one schema); a
+   * test that uses both uses events that no other step of it used.
+   */
   LedgerStore ledger();
 
-  /** A fresh, empty ledger that is built to require envelope bodies. */
+  /**
+   * A ledger over an empty store when the test starts, built to require envelope bodies. The two
+   * hooks may share their data (the PostgreSQL binding does: one schema); a test that uses both
+   * uses events that no other step of it used.
+   */
   LedgerStore ledgerRequiringEnvelopes();
 
   /**
@@ -88,6 +96,7 @@ public interface EnvelopeBodyLedgerContract {
   private static void assertRefusedAndNothingStored(LedgerStore ledger, byte[] body) {
     assertThatThrownBy(() -> commitOneVersion(ledger, body))
         .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("a report body must be an envelope")
         .satisfies(
             e -> {
               assertThat(String.valueOf(e.getMessage())).doesNotContain("SECRET-PLAIN-TEXT");
@@ -187,7 +196,6 @@ public interface EnvelopeBodyLedgerContract {
     NewDecision event2 = reportDecision("E2", "ctx", "d2", Leg.MARKET);
     NewVersion e1Market = version("E1", Leg.MARKET, "TRNE1M", envelopeBody());
     NewVersion e1ClientPlain = version("E1", Leg.CLIENT, "TRNE1C", plainBody());
-    NewVersion e1ClientEnvelope = version("E1", Leg.CLIENT, "TRNE1C", envelopeBody());
     NewVersion e2Plain = version("E2", Leg.MARKET, "TRNE2M", plainBody());
     NewVersion e2Envelope = version("E2", Leg.MARKET, "TRNE2M", envelopeBody());
     EventIdentity event2Identity = EventIdentity.of("LEI1", "XPAR", "E2");
@@ -224,18 +232,39 @@ public interface EnvelopeBodyLedgerContract {
     }
 
     // so the refusals were for the plain bodies and not for another reason: the same ledger takes
-    // the units with envelopes, a fresh one takes the two legs, and the default ledger takes a
-    // plain
-    // body in the second leg
+    // the unit with envelopes
     assertThat(ledger.commitReportable(unit(with(marketOnly, e1Market), with(event2, e2Envelope))))
         .hasSize(2);
     assertThat(ledger.subject(subjectKey(MIFIR_REGIME, "E1", Leg.MARKET))).isPresent();
     assertThat(ledger.subject(subjectKey(MIFIR_REGIME, "E2", Leg.MARKET))).isPresent();
+
+    // a strict ledger takes both legs of an event that nothing above used, with envelope bodies
+    NewDecision event3 = reportDecision("E3", "ctx", "d3", Leg.MARKET, Leg.CLIENT);
     assertThat(
             ledgerRequiringEnvelopes()
-                .commitReportable(unit(with(bothLegs, e1Market, e1ClientEnvelope))))
+                .commitReportable(
+                    unit(
+                        with(
+                            event3,
+                            version("E3", Leg.MARKET, "TRNE3M", envelopeBody()),
+                            version("E3", Leg.CLIENT, "TRNE3C", envelopeBody())))))
         .hasSize(1);
-    assertThat(ledger().commitReportable(unit(with(bothLegs, e1Market, e1ClientPlain)))).hasSize(1);
+
+    // and the default ledger takes a plain body in the second leg of another new event, and keeps
+    // it
+    NewDecision event4 = reportDecision("E4", "ctx", "d4", Leg.MARKET, Leg.CLIENT);
+    LedgerStore standard = ledger();
+    List<ReportableCommitted> committed =
+        standard.commitReportable(
+            unit(
+                with(
+                    event4,
+                    version("E4", Leg.MARKET, "TRNE4M", envelopeBody()),
+                    version("E4", Leg.CLIENT, "TRNE4C", plainBody()))));
+    assertThat(committed).hasSize(1);
+    // the results follow the order of the request: market, client
+    assertThat(standard.versions(committed.get(0).versions().get(1).subject()).get(0).body())
+        .isEqualTo(plainBody());
   }
 
   /**
@@ -249,7 +278,8 @@ public interface EnvelopeBodyLedgerContract {
     ReportableCommitted first = commitOneVersion(ledger, envelopeBody());
 
     assertThatThrownBy(() -> commitOneVersion(ledger, plainBody()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("a report body must be an envelope");
 
     List<StoredVersion> versions = ledger.versions(first.versions().get(0).subject());
     assertThat(versions).hasSize(1);

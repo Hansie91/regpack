@@ -50,21 +50,19 @@ import javax.sql.DataSource;
  *
  * <p><b>Reading and the order.</b> {@link #subjectRefs} is a range on the primary key: the rows of
  * one hash, ordered by {@code ref_kind, ref}, strictly after a position by the row comparison
- * {@code (ref_kind, ref) > (?, ?)}. The order is that of the column {@code ref}, which is {@code
- * COLLATE "C"} in the script: in a UTF8 database the byte order of the UTF-8 text, which is the
- * order of the code points and the order of the in-memory ledger. The {@code ORDER BY} and the
- * comparison name the column, and no statement names a collation, a cast or a function of it, so
- * the collation of the column governs both. What the comparison rests on, and CP-1 shows, is a
- * recollection [R] of the PostgreSQL rule for the collation of an operator's inputs: a column
- * carries its own collation as implicit, a bound parameter carries the default collation as
- * implicit, and when two inputs differ in implicit collation the one that is not the default wins,
- * so {@code ref > $3} compares under {@code "C"}; a row comparison gets that rule for each pair of
- * columns. If CP-1 were to show otherwise, the repair is a {@code COLLATE "C"} on the parameter (an
- * explicit collation wins over an implicit one) and nothing else. {@code SubjectRef} is not
- * restricted to the evidence key alphabet, so the order beyond that alphabet is the whole point of
- * the choice: UTF-16 order and byte order differ for a supplementary character against U+E000 to
- * U+FFFF. A cluster that is not UTF8 would not give this order and is a defect of the deployment
- * ({@code PgConstraintsIT} asks the catalogue).
+ * {@code (ref_kind, ref) > (?, ? COLLATE "C")}. The order is that of the column {@code ref}, which
+ * is {@code COLLATE "C"} in the script: in a UTF8 database the byte order of the UTF-8 text, which
+ * is the order of the code points and the order of the in-memory ledger. The {@code ORDER BY} names
+ * the column and applies no cast or function to it, so the collation of the column governs the
+ * order. The bound reference of the row comparison carries the same collation explicitly: the
+ * explicit clause and the column agree, an explicit collation wins over an implicit one and cannot
+ * conflict with it, and so the result does not depend on how the server pairs the collations of the
+ * two sides of a row comparison (deviation D30 from the statement shape of the plan). CP-1 still
+ * shows byte order, through the contract tests on a cluster whose default collation is {@code
+ * en_US.utf8}. {@code SubjectRef} is not restricted to the evidence key alphabet, so the order
+ * beyond that alphabet is the whole point of the choice: UTF-16 order and byte order differ for a
+ * supplementary character against U+E000 to U+FFFF. A cluster that is not UTF8 would not give this
+ * order and is a defect of the deployment ({@code PgConstraintsIT} asks the catalogue).
  *
  * <p><b>The hash in a lookup.</b> The adapter compares no hash in Java: the server finds the rows
  * of a hash by value through the primary key. A stored hash is a pseudonym that a holder of the
@@ -72,6 +70,12 @@ import javax.sql.DataSource;
  * protects, so the rule of Convention 3 for the check of a MAC (a comparison in constant time,
  * {@code MessageDigest.isEqual}) is not what decides here; {@code SubjectHash} itself compares with
  * it.
+ *
+ * <p><b>The cause of an exception.</b> Convention 12 keeps values out of the message of the ledger
+ * exception only. The cause is the driver's exception, and for a failed batch its message holds the
+ * statement with every bound value of the failing entry, so it holds the hash and the reference in
+ * clear ({@code PgErrors#wrap}, ADAPTER-5). A caller never logs the exception with its causes; the
+ * log-scrubber test of P9a must feed it a {@code BatchUpdateException} from {@code indexSubjects}.
  */
 final class PgSubjectIndex {
   /** Parameters: the hash (32 bytes), the kind code, the reference, recorded at. */
@@ -87,7 +91,7 @@ final class PgSubjectIndex {
   /** Parameters: the hash, the kind code and the reference after which to list, the limit. */
   static final String REFS_AFTER_SQL =
       "SELECT ref_kind, ref FROM subject_index WHERE subject_hash = ?"
-          + " AND (ref_kind, ref) > (?, ?) ORDER BY ref_kind, ref LIMIT ?";
+          + " AND (ref_kind, ref) > (?, ? COLLATE \"C\") ORDER BY ref_kind, ref LIMIT ?";
 
   /** Parameters: the kind code, the reference. */
   static final String DELETE_SQL = "DELETE FROM subject_index WHERE ref_kind = ? AND ref = ?";
@@ -250,7 +254,7 @@ final class PgSubjectIndex {
     try {
       return new SubjectRef(Codes.refKind(rows.getShort(1)), rows.getString(2));
     } catch (IllegalArgumentException e) {
-      throw new LedgerException("stored row is malformed", e);
+      throw new LedgerException("stored subject index row is malformed", e);
     }
   }
 }

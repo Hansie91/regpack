@@ -483,8 +483,9 @@ class PgReportsTest {
 
   @Test
   void theVersionIsStoredPlainAndTheDecisionDayIsKept() throws IOException {
-    // body_encoding 0 is plain until the key hierarchy of P3c; the foreign key to the partitioned
-    // decision table needs the day
+    // body_encoding 0 is a body that is not an envelope (PgReports.BODY_ENCODING); 1 is an
+    // envelope body since P3c1 (ENVELOPE_ENCODING); the foreign key to the partitioned decision
+    // table needs the day
     assertThat(PgReports.BODY_ENCODING).isZero();
     assertThat(PgReports.VERSION_INSERT_SQL).contains("decision_as_at");
     assertThat(migration())

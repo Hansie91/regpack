@@ -20,7 +20,7 @@ import dev.regpack.testkit.contract.SubjectIndexLedgerContract;
  * contexts; T17: leases, deliveries and the fencing scenarios; T18: the report suites and the exit
  * fixtures; P3b1 T12: the object manifest; P3b1 T17: {@code LedgerDurabilityContract}, bound once
  * the placeholder of the durability query was replaced by {@link PgLedgerDurability}; P3c1 T11:
- * {@code RetentionLedgerContract}, the 24 methods of the retention rows; P3c1 T12: {@code
+ * {@code RetentionLedgerContract}, the 25 methods of the retention rows; P3c1 T12: {@code
  * SubjectIndexLedgerContract}, the 11 methods of the data-subject index). Without a server every
  * test of a subclass is skipped by an assumption. The class is public so that the schema mutants of
  * T20 (package {@code mutants}) can bind the same suites.

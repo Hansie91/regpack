@@ -355,7 +355,8 @@ public interface SubjectIndexLedgerContract {
 
     // a limit below zero is refused, a limit of zero returns nothing
     assertThatThrownBy(() -> ledger().subjectRefs(hash(1), Optional.empty(), -1))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("limit must not be negative");
     assertThat(ledger().subjectRefs(hash(1), Optional.empty(), 0)).isEmpty();
     // the good entry is stored by a call of its own
     ledger().indexSubjects(List.of(good));

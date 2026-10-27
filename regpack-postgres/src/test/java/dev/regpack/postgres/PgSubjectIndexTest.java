@@ -26,6 +26,8 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -154,7 +156,7 @@ class PgSubjectIndexTest {
     assertThat(PgSubjectIndex.REFS_AFTER_SQL)
         .isEqualTo(
             "SELECT ref_kind, ref FROM subject_index WHERE subject_hash = ?"
-                + " AND (ref_kind, ref) > (?, ?) ORDER BY ref_kind, ref LIMIT ?");
+                + " AND (ref_kind, ref) > (?, ? COLLATE \"C\") ORDER BY ref_kind, ref LIMIT ?");
     assertThat(PgSubjectIndex.DELETE_SQL)
         .isEqualTo("DELETE FROM subject_index WHERE ref_kind = ? AND ref = ?");
   }
@@ -193,30 +195,106 @@ class PgSubjectIndexTest {
 
   /**
    * The order of the references is the order of the column {@code ref}, {@code COLLATE "C"} in the
-   * script: the same column is sorted ({@code ORDER BY}) and compared ({@code (ref_kind, ref) > (?,
-   * ?)}), and neither statement names a collation, a cast or a function of the column, so that the
-   * collation of the column governs both. What the comparison relies on is a recollection of the
-   * PostgreSQL rule for collation derivation: a bound parameter carries the default collation
-   * (implicit), a column its own, and when two inputs of an operator differ in implicit collation
-   * the one that is not the default wins [R]. CP-1 shows it: {@code
+   * script: the same column is sorted ({@code ORDER BY}, with no cast or function of the column, so
+   * that the collation of the column governs the order) and compared ({@code (ref_kind, ref) > (?,
+   * ? COLLATE "C")}). The bound reference of the row comparison names the collation of the column
+   * explicitly: the explicit clause and the column agree, an explicit collation wins over an
+   * implicit one and cannot conflict with it, and so the result does not depend on how the server
+   * pairs the collations of the two sides of a row comparison (deviation D30). The statement
+   * without a bound position names no collation. CP-1 still shows byte order: {@code
    * refsAreOrderedByKindThenByByteOrderOfTheRefNotByCollation} and {@code
    * refsBeyondTheKeyAlphabetAreOrderedByCodePointNotByUtf16Unit} page with bounds in the middle of
    * the characters on a cluster whose default collation is not C.
    */
   @Test
-  void theOrderAndTheBoundAreOnTheColumnAndNameNoCollation() throws IOException {
+  void theBoundOfTheRowComparisonNamesTheCollationOfTheColumn() throws IOException {
     for (String sql : List.of(PgSubjectIndex.REFS_SQL, PgSubjectIndex.REFS_AFTER_SQL)) {
       assertThat(sql)
           .contains(" ORDER BY ref_kind, ref LIMIT ?")
-          .doesNotContain("COLLATE")
           .doesNotContain("::")
           .doesNotContain("(ref)")
           .doesNotContain("lower(")
           .doesNotContain("upper(")
           .doesNotContain("cast(");
     }
-    assertThat(PgSubjectIndex.REFS_AFTER_SQL).contains(" AND (ref_kind, ref) > (?, ?) ORDER BY ");
+    assertThat(PgSubjectIndex.REFS_SQL).doesNotContain("COLLATE");
+    assertThat(PgSubjectIndex.REFS_AFTER_SQL)
+        .containsOnlyOnce("COLLATE")
+        .contains(" AND (ref_kind, ref) > (?, ? COLLATE \"C\") ORDER BY ");
     assertThat(migrationV003()).contains("ref text COLLATE \"C\" NOT NULL");
+  }
+
+  private static final Pattern PRIMARY_KEY =
+      Pattern.compile("CONSTRAINT subject_index_pk PRIMARY KEY \\(([^)]*)\\)");
+
+  private static final Pattern REF_INDEX =
+      Pattern.compile("CREATE INDEX subject_index_ref_idx ON subject_index \\(([^)]*)\\)");
+
+  private static final String C_COLLATION = " COLLATE \"C\"";
+
+  private static List<String> names(String commaSeparated) {
+    return List.of(commaSeparated.split(",\\s*"));
+  }
+
+  private static String groupOf(Pattern pattern, String text) {
+    Matcher matcher = pattern.matcher(text);
+    assertThat(matcher.find()).as("%s in the script", pattern.pattern()).isTrue();
+    return matcher.group(1);
+  }
+
+  /** The list of the last {@code ORDER BY} of a statement, without a {@code LIMIT ?} behind it. */
+  private static List<String> orderBy(String select) {
+    String marker = " ORDER BY ";
+    int start = select.lastIndexOf(marker);
+    assertThat(start).as("%s has an ORDER BY", select).isPositive();
+    String list = select.substring(start + marker.length());
+    int limit = list.indexOf(" LIMIT ?");
+    return names(limit < 0 ? list : list.substring(0, limit));
+  }
+
+  /**
+   * The statements pinned literally above could be wrong in the same way as the text they pin. This
+   * one takes the primary key and the index from the script: a lookup by hash is a range of the key
+   * (the hash is its first column), the order is the rest of the key, which is also the index of
+   * the delete, the row comparison runs over the same columns in the same order, and a bound
+   * carries {@code COLLATE "C"} exactly where its column is a text column of that collation.
+   */
+  @Test
+  void theSortAndTheKeysetOfTheReferenceReadAreTheKeyOfV003() throws IOException {
+    String v003 = migrationV003();
+    List<String> key = names(groupOf(PRIMARY_KEY, v003));
+    List<String> index = names(groupOf(REF_INDEX, v003));
+    assertThat(key).as("the primary key parsed from V003").hasSizeGreaterThan(2);
+    List<String> afterTheHash = key.subList(1, key.size());
+    assertThat(index).as("the index parsed from V003").isEqualTo(afterTheHash);
+
+    for (String sql : List.of(PgSubjectIndex.REFS_SQL, PgSubjectIndex.REFS_AFTER_SQL)) {
+      assertThat(sql).as("the lookup by %s", key.get(0)).contains(" WHERE " + key.get(0) + " = ?");
+      assertThat(orderBy(sql)).as(sql).isEqualTo(afterTheHash).isEqualTo(index);
+    }
+
+    Matcher comparison =
+        Pattern.compile(" AND \\(([^)]*)\\) > \\(([^)]*)\\) ORDER BY ")
+            .matcher(PgSubjectIndex.REFS_AFTER_SQL);
+    assertThat(comparison.find()).as("a row comparison before the ORDER BY").isTrue();
+    assertThat(names(comparison.group(1))).isEqualTo(afterTheHash);
+    List<String> bounds = names(comparison.group(2));
+    assertThat(bounds).hasSameSizeAs(afterTheHash);
+    Matcher collated =
+        Pattern.compile("(\\w+) text COLLATE \"C\"").matcher(createTableOfSubjectIndex(v003));
+    List<String> textColumnsOfC = new ArrayList<>();
+    while (collated.find()) {
+      textColumnsOfC.add(collated.group(1));
+    }
+    assertThat(textColumnsOfC).as("the text columns of V003 with COLLATE \"C\"").contains("ref");
+    for (int i = 0; i < bounds.size(); i++) {
+      assertThat(bounds.get(i).replace(C_COLLATION, ""))
+          .as("the bound of %s", afterTheHash.get(i))
+          .isEqualTo("?");
+      assertThat(bounds.get(i).endsWith(C_COLLATION))
+          .as("the bound of %s names the collation of its column", afterTheHash.get(i))
+          .isEqualTo(textColumnsOfC.contains(afterTheHash.get(i)));
+    }
   }
 
   @Test
@@ -244,7 +322,7 @@ class PgSubjectIndexTest {
    */
   @Test
   void aCallThatInsertsOrDeletesNothingEndsWithTheBarrier() {
-    SqlSpy inserting = new SqlSpy().batchingRows(0).answering(BARRIER_ROW);
+    SqlSpy inserting = new SqlSpy().strictBinds().batchingRows(0).answering(BARRIER_ROW);
     index(inserting).indexSubjects(List.of(entry(hash(1), object("sealed/a"))));
 
     assertThat(statements(inserting))
@@ -257,7 +335,7 @@ class PgSubjectIndexTest {
         .containsExactly("execute: " + Unit.BARRIER_SQL);
     assertThat(events).containsSubsequence("execute: " + Unit.BARRIER_SQL, "commit");
 
-    SqlSpy deleting = new SqlSpy().updatingRows(0).answering(BARRIER_ROW);
+    SqlSpy deleting = new SqlSpy().strictBinds().updatingRows(0).answering(BARRIER_ROW);
     assertThat(index(deleting).removeSubjectRefs(object("sealed/none"))).isZero();
 
     assertThat(statements(deleting))
@@ -268,15 +346,29 @@ class PgSubjectIndexTest {
 
   @Test
   void aCallThatWritesARowAddsNoBarrier() {
-    SqlSpy inserting = new SqlSpy().batchingRows(1).answering(BARRIER_ROW);
+    SqlSpy inserting = new SqlSpy().strictBinds().batchingRows(1).answering(BARRIER_ROW);
     index(inserting).indexSubjects(List.of(entry(hash(1), object("sealed/a"))));
     assertThat(statements(inserting)).containsExactly(PgSubjectIndex.INSERT_SQL);
     assertThat(inserting.events()).contains("commit");
 
-    SqlSpy deleting = new SqlSpy().updatingRows(3).answering(BARRIER_ROW);
+    SqlSpy deleting = new SqlSpy().strictBinds().updatingRows(3).answering(BARRIER_ROW);
     assertThat(index(deleting).removeSubjectRefs(object("sealed/a"))).isEqualTo(3);
     assertThat(statements(deleting)).containsExactly(PgSubjectIndex.DELETE_SQL);
     assertThat(deleting.events()).contains("commit");
+  }
+
+  /**
+   * The case between the two above and the commonest one in production: a delete of exactly one row
+   * wrote, so it needs no barrier. A rule of "at most one row is nothing" would add a lock to it.
+   */
+  @Test
+  void aDeleteOfExactlyOneRowAddsNoBarrier() {
+    SqlSpy deleting = new SqlSpy().strictBinds().updatingRows(1).answering(BARRIER_ROW);
+
+    assertThat(index(deleting).removeSubjectRefs(object("sealed/a"))).isEqualTo(1);
+
+    assertThat(statements(deleting)).containsExactly(PgSubjectIndex.DELETE_SQL);
+    assertThat(deleting.events()).doesNotContain("execute: " + Unit.BARRIER_SQL).contains("commit");
   }
 
   /**
@@ -286,7 +378,7 @@ class PgSubjectIndexTest {
    */
   @Test
   void aBatchThatSaysNothingAboutItsRowsIsTreatedAsInsertingNothing() {
-    SqlSpy unknown = new SqlSpy().batchingRows(-2).answering(BARRIER_ROW);
+    SqlSpy unknown = new SqlSpy().strictBinds().batchingRows(-2).answering(BARRIER_ROW);
     index(unknown).indexSubjects(List.of(entry(hash(1), object("sealed/a"))));
 
     assertThat(statements(unknown)).containsExactly(PgSubjectIndex.INSERT_SQL, Unit.BARRIER_SQL);
@@ -301,7 +393,7 @@ class PgSubjectIndexTest {
    */
   @Test
   void entriesAreWrittenInKeyOrder() {
-    SqlSpy spy = new SqlSpy().recordingTypedBinds();
+    SqlSpy spy = new SqlSpy().recordingTypedBinds().strictBinds();
     String e000 = "r/" + Character.toString(0xE000);
     String smile = "r/" + Character.toString(0x1F600);
     List<SubjectEntry> given =
@@ -360,7 +452,7 @@ class PgSubjectIndexTest {
    */
   @Test
   void theHashIsBoundAsThirtyTwoBytesTheKindAsItsCodeAndOneTimeForTheCall() {
-    SqlSpy spy = new SqlSpy().recordingTypedBinds();
+    SqlSpy spy = new SqlSpy().recordingTypedBinds().strictBinds();
     SubjectHash hash =
         new SubjectHash("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
 
@@ -382,7 +474,7 @@ class PgSubjectIndexTest {
   @Test
   void theClockIsReadOnceForTheWholeCall() {
     AtomicInteger reads = new AtomicInteger();
-    SqlSpy spy = new SqlSpy();
+    SqlSpy spy = new SqlSpy().strictBinds();
     PgSubjectIndex index = new PgSubjectIndex(spy.over(null), countingClock(reads), config);
 
     index.indexSubjects(
@@ -397,7 +489,7 @@ class PgSubjectIndexTest {
   @Test
   void anEmptyListOpensNoConnectionAndReadsNoClock() {
     AtomicInteger reads = new AtomicInteger();
-    SqlSpy spy = new SqlSpy();
+    SqlSpy spy = new SqlSpy().strictBinds();
     PgSubjectIndex index = new PgSubjectIndex(spy.over(null), countingClock(reads), config);
 
     index.indexSubjects(List.of());
@@ -408,7 +500,7 @@ class PgSubjectIndexTest {
 
   @Test
   void nullArgumentsAreRefusedBeforeAnyStatement() {
-    SqlSpy spy = new SqlSpy();
+    SqlSpy spy = new SqlSpy().strictBinds();
     PgSubjectIndex index = index(spy);
     SubjectEntry good = entry(hash(1), object("sealed/a"));
 
@@ -431,7 +523,8 @@ class PgSubjectIndexTest {
     // the text of a server error can hold the key of a row; the message of the exception never does
     SQLException server =
         new SQLException("Key (subject_hash, ref)=(secret-hash, sealed/SECRET-REF)", "23505");
-    SqlSpy failing = new SqlSpy().failStatementWith("INSERT INTO subject_index", server);
+    SqlSpy failing =
+        new SqlSpy().strictBinds().failStatementWith("INSERT INTO subject_index", server);
 
     assertThatThrownBy(
             () ->
@@ -441,7 +534,8 @@ class PgSubjectIndexTest {
     assertThat(failing.events()).contains("rollback").doesNotContain("commit");
     assertThat(failing.openConnections()).isZero();
 
-    SqlSpy deleting = new SqlSpy().failStatementWith("DELETE FROM subject_index", server);
+    SqlSpy deleting =
+        new SqlSpy().strictBinds().failStatementWith("DELETE FROM subject_index", server);
     assertThatThrownBy(() -> index(deleting).removeSubjectRefs(object("sealed/SECRET-REF")))
         .isInstanceOf(LedgerException.class)
         .hasMessage("ledger statement failed: sqlstate=23505 constraint=none");
@@ -453,7 +547,7 @@ class PgSubjectIndexTest {
 
   @Test
   void theDeleteNamesTheKindAndTheTextAndReturnsTheRowsDeleted() {
-    SqlSpy spy = new SqlSpy().recordingTypedBinds().updatingRows(2);
+    SqlSpy spy = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(2);
 
     assertThat(index(spy).removeSubjectRefs(object("sealed/2026/a"))).isEqualTo(2);
     assertThat(index(spy).removeSubjectRefs(report("LEI1|XPAR|E1"))).isEqualTo(2);
@@ -469,7 +563,7 @@ class PgSubjectIndexTest {
 
   @Test
   void aNegativeLimitIsRefusedAndALimitOfZeroListsNothingWithoutAConnection() {
-    SqlSpy spy = new SqlSpy();
+    SqlSpy spy = new SqlSpy().strictBinds();
     PgSubjectIndex index = index(spy);
 
     assertThatThrownBy(() -> index.subjectRefs(hash(1), Optional.empty(), -1))
@@ -482,7 +576,7 @@ class PgSubjectIndexTest {
 
   @Test
   void theLimitIsCappedAtOneThousandAndTheHashIsBoundAsBytes() {
-    SqlSpy spy = new SqlSpy().recordingTypedBinds();
+    SqlSpy spy = new SqlSpy().recordingTypedBinds().strictBinds();
     SubjectHash hash = hash(0xabcdef);
 
     index(spy).subjectRefs(hash, Optional.empty(), Integer.MAX_VALUE);
@@ -496,7 +590,7 @@ class PgSubjectIndexTest {
 
   @Test
   void theReferenceAfterWhichToListIsBoundAsItsKindCodeAndItsText() {
-    SqlSpy spy = new SqlSpy().recordingTypedBinds();
+    SqlSpy spy = new SqlSpy().recordingTypedBinds().strictBinds();
 
     index(spy).subjectRefs(hash(1), Optional.of(object("r/a.")), 5);
     index(spy).subjectRefs(hash(1), Optional.of(report("zzz")), 5);
@@ -515,6 +609,7 @@ class PgSubjectIndexTest {
     String smile = "r/" + Character.toString(0x1F600);
     SqlSpy answering =
         new SqlSpy()
+            .strictBinds()
             .answering(
                 refsAnswer(
                     new Object[] {(short) 1, "LEI1|XPAR|E1"},
@@ -542,12 +637,12 @@ class PgSubjectIndexTest {
             new Object[] {(short) 2, "a" + (char) 0x0a + "b"},
             new Object[] {(short) 2, "k".repeat(513)});
     for (int i = 0; i < bad.size(); i++) {
-      SqlSpy answering = new SqlSpy().answering(refsAnswer(bad.get(i)));
+      SqlSpy answering = new SqlSpy().strictBinds().answering(refsAnswer(bad.get(i)));
       PgSubjectIndex index = index(answering);
       assertThatThrownBy(() -> index.subjectRefs(hash(1), Optional.empty(), 10))
           .as("the malformed stored row number %d", i)
           .isInstanceOf(LedgerException.class)
-          .hasMessage("stored row is malformed");
+          .hasMessage("stored subject index row is malformed");
     }
   }
 }

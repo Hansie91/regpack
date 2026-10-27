@@ -27,7 +27,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -60,7 +63,7 @@ class PgRetentionTest {
    */
   private static final Set<Integer> PURPOSES_IN_USE = Set.of(1, 2, 3);
 
-  private final SqlSpy spy = new SqlSpy().recordingTypedBinds();
+  private final SqlSpy spy = new SqlSpy().recordingTypedBinds().strictBinds();
   private final ManualClock clock = new ManualClock(NOW);
   private final Config config = Config.forSchema("t42_7");
 
@@ -217,7 +220,8 @@ class PgRetentionTest {
                 + columns
                 + " FROM retention WHERE retain_until IS NOT NULL AND retain_until <= ?"
                 + " AND NOT legal_hold AND NOT starts_with(object_key, ?)"
-                + " AND (retain_until, object_key, regime, anchor_event) > (?, ?, ?, ?)"
+                + " AND (retain_until, object_key, regime, anchor_event) >"
+                + " (?, ? COLLATE \"C\", ? COLLATE \"C\", ?)"
                 + " ORDER BY retain_until, object_key, regime, anchor_event LIMIT ?");
   }
 
@@ -230,20 +234,6 @@ class PgRetentionTest {
         .contains("regime text COLLATE \"C\" NOT NULL")
         .contains("CONSTRAINT retention_pk PRIMARY KEY (object_key, regime, anchor_event)")
         .contains("entity_id smallint NOT NULL DEFAULT 1");
-    // every column the adapter reads or writes is a column of the table
-    for (String column :
-        List.of(
-            "object_key",
-            "regime",
-            "anchor_event",
-            "entity_id",
-            "retention_class",
-            "retain_until",
-            "legal_hold",
-            "recorded_at")) {
-      assertThat(v003).as(column).contains(column + " ");
-      assertThat(PgRetention.RECORD_SQL).as(column).contains(column);
-    }
     // the arbiter of the upsert is the constraint of the script, by name
     assertThat(PgRetention.RECORD_SQL).contains("ON CONFLICT ON CONSTRAINT retention_pk ");
     // the expiry list asks what the partial index holds, so that the planner may use it (D5)
@@ -259,6 +249,222 @@ class PgRetentionTest {
     assertThat(v003).contains("CREATE TRIGGER retention_extend_only BEFORE UPDATE ON retention");
     assertThat(PgRetention.RECORD_SQL).doesNotContain("recorded_at =");
     assertThat(PgRetention.HOLD_SQL).doesNotContain("retain_until");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // the statements against the columns, the key and the partial index of V003
+  //
+  // The statements are pinned literally above, and a pin can be wrong in the same way as the text
+  // it
+  // pins. The tests below take the columns, the primary key and the index from the script and ask
+  // the statements what they must be, so a typo or a drifted sort key is seen without a server.
+
+  private static final String CREATE_TABLE = "CREATE TABLE retention (";
+
+  private static final Pattern COLUMN_DEFINITION =
+      Pattern.compile("(?:^|[(,])\\s*(\\w+)\\s+(?:text|smallint|timestamptz|boolean|bytea)\\b");
+
+  private static final Pattern PRIMARY_KEY =
+      Pattern.compile("CONSTRAINT retention_pk PRIMARY KEY \\(([^)]*)\\)");
+
+  private static final Pattern EXPIRY_INDEX =
+      Pattern.compile(
+          "CREATE INDEX retention_expiry_idx ON retention \\(([^)]*)\\) WHERE ([^;\\n]*);");
+
+  private static final Pattern IDENTIFIER = Pattern.compile("\\b[a-z][a-z_0-9]*\\b");
+
+  /** The lower-case words of the statements that name no column. */
+  private static final Set<String> NOT_COLUMNS =
+      Set.of("retention", "retention_pk", "h", "starts_with");
+
+  private static final String C_COLLATION = " COLLATE \"C\"";
+
+  /** The CREATE TABLE statement of {@code retention}: from its head to the line that ends it. */
+  private static String createTableOfRetention(String script) {
+    int start = script.indexOf(CREATE_TABLE);
+    assertThat(start).as("the script creates retention").isNotNegative();
+    int end = script.indexOf(";\n", start);
+    assertThat(end).as("the statement ends with a semicolon line").isGreaterThan(start);
+    return script.substring(start, end + 1);
+  }
+
+  /** The columns of the table in the order of the script. */
+  private static List<String> tableColumns(String script) {
+    Matcher matcher =
+        COLUMN_DEFINITION.matcher(createTableOfRetention(script).substring(CREATE_TABLE.length()));
+    List<String> columns = new ArrayList<>();
+    while (matcher.find()) {
+      columns.add(matcher.group(1));
+    }
+    return columns;
+  }
+
+  /** The text columns of the table, with {@code COLLATE "C"} or without. */
+  private static List<String> textColumns(String script, boolean collatedC) {
+    String pattern = collatedC ? "(\\w+) text COLLATE \"C\"" : "(\\w+) text(?! COLLATE)";
+    Matcher matcher = Pattern.compile(pattern).matcher(createTableOfRetention(script));
+    List<String> columns = new ArrayList<>();
+    while (matcher.find()) {
+      columns.add(matcher.group(1));
+    }
+    return columns;
+  }
+
+  private static List<String> names(String commaSeparated) {
+    return List.of(commaSeparated.split(",\\s*"));
+  }
+
+  private static List<String> primaryKey(String script) {
+    Matcher matcher = PRIMARY_KEY.matcher(script);
+    assertThat(matcher.find()).as("the script names the primary key of retention").isTrue();
+    return names(matcher.group(1));
+  }
+
+  private static Matcher expiryIndex(String script) {
+    Matcher matcher = EXPIRY_INDEX.matcher(script);
+    assertThat(matcher.find()).as("the script creates the expiry index").isTrue();
+    return matcher;
+  }
+
+  /** The names of an {@code INSERT INTO retention (a, b, ...) VALUES} statement. */
+  private static List<String> insertColumns(String insert) {
+    String head = "INSERT INTO retention (";
+    assertThat(insert).startsWith(head);
+    int close = insert.indexOf(") VALUES");
+    assertThat(close).isGreaterThan(head.length());
+    return names(insert.substring(head.length(), close));
+  }
+
+  /** The select list of a {@code SELECT a, b FROM retention ...} statement. */
+  private static List<String> selectList(String select) {
+    assertThat(select).startsWith("SELECT ");
+    int from = select.indexOf(" FROM retention");
+    assertThat(from).isPositive();
+    return names(select.substring("SELECT ".length(), from));
+  }
+
+  /** The list of the last {@code ORDER BY} of a statement, without a {@code LIMIT ?} behind it. */
+  private static List<String> orderBy(String select) {
+    String marker = " ORDER BY ";
+    int start = select.lastIndexOf(marker);
+    assertThat(start).as("%s has an ORDER BY", select).isPositive();
+    String list = select.substring(start + marker.length());
+    int limit = list.indexOf(" LIMIT ?");
+    return names(limit < 0 ? list : list.substring(0, limit));
+  }
+
+  /** The lower-case words of a statement that are not a table, an alias or a function. */
+  private static Set<String> columnsNamedBy(String sql) {
+    Matcher matcher = IDENTIFIER.matcher(sql);
+    Set<String> found = new TreeSet<>();
+    while (matcher.find()) {
+      if (!NOT_COLUMNS.contains(matcher.group())) {
+        found.add(matcher.group());
+      }
+    }
+    return found;
+  }
+
+  @Test
+  void everyColumnNamedByTheRetentionStatementsIsAColumnOfTheTable() throws IOException {
+    String v003 = migrationV003();
+    List<String> table = tableColumns(v003);
+    assertThat(table).as("the columns parsed from V003").hasSize(8);
+
+    // the insert names every column, entity_id included, once
+    assertThat(insertColumns(PgRetention.RECORD_SQL)).containsExactlyInAnyOrderElementsOf(table);
+    // the two reads select the seven columns the mapping reads, in the order it reads them
+    List<String> mapped =
+        List.of(
+            "object_key",
+            "regime",
+            "anchor_event",
+            "retention_class",
+            "retain_until",
+            "legal_hold",
+            "recorded_at");
+    for (String sql :
+        List.of(PgRetention.ROWS_SQL, PgRetention.EXPIRED_SQL, PgRetention.EXPIRED_AFTER_SQL)) {
+      assertThat(selectList(sql)).as(sql).containsExactlyElementsOf(mapped).isSubsetOf(table);
+    }
+    // and no word of any statement, in a condition, an order or a hold, is a column that is not one
+    for (String sql :
+        List.of(
+            PgRetention.RECORD_SQL,
+            PgRetention.HOLD_SQL,
+            PgRetention.ROWS_SQL,
+            PgRetention.EXPIRED_SQL,
+            PgRetention.EXPIRED_AFTER_SQL)) {
+      assertThat(columnsNamedBy(sql)).as(sql).isNotEmpty().isSubsetOf(table);
+    }
+  }
+
+  @Test
+  void theSortAndTheKeysetOfTheRetentionReadsAreTheKeyOfV003() throws IOException {
+    String v003 = migrationV003();
+    List<String> key = primaryKey(v003);
+    List<String> indexColumns = names(expiryIndex(v003).group(1));
+    assertThat(key).as("the primary key parsed from V003").hasSizeGreaterThan(1);
+    assertThat(indexColumns).as("the expiry index parsed from V003").hasSizeGreaterThan(1);
+
+    // the pages of artifacts come in the order of the primary key, and the artifacts of a page are
+    // picked in the order of its first column
+    assertThat(orderBy(PgRetention.ROWS_SQL)).isEqualTo(key);
+    assertThat(PgRetention.ROWS_SQL).contains(" ORDER BY " + key.get(0) + " LIMIT ?)");
+
+    // the expiry list: the columns of the partial index, then the rest of the key
+    List<String> expiryOrder = new ArrayList<>(indexColumns);
+    key.stream().filter(column -> !indexColumns.contains(column)).forEach(expiryOrder::add);
+    for (String sql : List.of(PgRetention.EXPIRED_SQL, PgRetention.EXPIRED_AFTER_SQL)) {
+      assertThat(orderBy(sql)).as(sql).isEqualTo(expiryOrder);
+    }
+
+    // the row after which to list is compared with the same columns, in the same order, and a bound
+    // carries COLLATE "C" exactly where its column is a text column of that collation
+    Matcher comparison =
+        Pattern.compile(" AND \\(([^)]*)\\) > \\(([^)]*)\\) ORDER BY ")
+            .matcher(PgRetention.EXPIRED_AFTER_SQL);
+    assertThat(comparison.find()).as("a row comparison before the ORDER BY").isTrue();
+    assertThat(names(comparison.group(1))).isEqualTo(expiryOrder);
+    List<String> bounds = names(comparison.group(2));
+    assertThat(bounds).hasSameSizeAs(expiryOrder);
+    List<String> collated = textColumns(v003, true);
+    for (int i = 0; i < bounds.size(); i++) {
+      assertThat(bounds.get(i).replace(C_COLLATION, ""))
+          .as("the bound of %s", expiryOrder.get(i))
+          .isEqualTo("?");
+      assertThat(bounds.get(i).endsWith(C_COLLATION))
+          .as("the bound of %s names the collation of its column", expiryOrder.get(i))
+          .isEqualTo(collated.contains(expiryOrder.get(i)));
+    }
+  }
+
+  @Test
+  void theExpiryListAsksEveryConditionOfThePartialIndexOfV003() throws IOException {
+    List<String> conjuncts = List.of(expiryIndex(migrationV003()).group(2).split(" AND "));
+    assertThat(conjuncts).as("the predicate parsed from V003").hasSizeGreaterThan(1);
+    for (String sql : List.of(PgRetention.EXPIRED_SQL, PgRetention.EXPIRED_AFTER_SQL)) {
+      for (String conjunct : conjuncts) {
+        assertThat(sql).as("the condition %s of the index", conjunct).contains(conjunct);
+      }
+    }
+  }
+
+  @Test
+  void noTextColumnWithoutTheCCollationIsOrderedOrComparedByTheReads() throws IOException {
+    String v003 = migrationV003();
+    List<String> uncollated = textColumns(v003, false);
+    assertThat(uncollated)
+        .as("the text columns of V003 without COLLATE \"C\"")
+        .containsExactly("retention_class");
+    for (String sql :
+        List.of(PgRetention.ROWS_SQL, PgRetention.EXPIRED_SQL, PgRetention.EXPIRED_AFTER_SQL)) {
+      // after the select list: the conditions, the orders and the comparison
+      String clauses = sql.substring(sql.indexOf(" FROM retention"));
+      for (String column : uncollated) {
+        assertThat(clauses).as("%s in the clauses of %s", column, sql).doesNotContain(column);
+      }
+    }
   }
 
   @Test
@@ -279,7 +485,7 @@ class PgRetentionTest {
     String hostileKey = "x" + quote + " OR " + quote + "1" + quote + "=" + quote + "1";
     String hostilePrefix = hostileKey + "/";
     // the fake server updates one row, so that the hold is not refused for want of a row
-    SqlSpy local = new SqlSpy().recordingTypedBinds().updatingRows(1);
+    SqlSpy local = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(1);
     PgRetention retention = new PgRetention(local.over(null), clock, config);
     // the hostile text cannot be an EvidenceKey, so it can only reach the adapter as a prefix
     retention.retentionRows(hostilePrefix, Optional.empty(), 10);
@@ -324,6 +530,7 @@ class PgRetentionTest {
     SqlSpy answering =
         new SqlSpy()
             .recordingTypedBinds()
+            .strictBinds()
             .answering(
                 (sql, events) ->
                     sql.equals(Unit.BARRIER_SQL) ? List.<Object[]>of(new Object[] {1}) : List.of());
@@ -415,7 +622,8 @@ class PgRetentionTest {
    * artifact however many claims it has. A hold that races the first claims of a new artifact (no
    * row to lock yet) then waits for the claim that holds the lock, and the write that follows takes
    * a new snapshot of {@code READ COMMITTED} and sees the row the other call committed; without the
-   * lock the later one would not see it and a row would stay unheld.
+   * lock the later one would not see it and a row would stay unheld. The same holds for a hold and
+   * for a release: a release takes the lock too.
    */
   @Test
   void aHoldAndARecordTakeTheArtifactLockBeforeTheyWrite() {
@@ -446,22 +654,71 @@ class PgRetentionTest {
         .noneMatch(e -> e.startsWith("bind object 7=") || e.startsWith("bind short 3="));
     assertThat(events.subList(lastLock, events.size())).contains("commit");
 
-    // the hold: the lock, then the update
-    SqlSpy holdSpy = new SqlSpy().recordingTypedBinds().updatingRows(2);
-    new PgRetention(holdSpy.over(null), clock, config)
-        .setRetentionHold(new EvidenceKey("sealed/a"), true);
-    assertThat(statements(holdSpy))
-        .containsExactly(PgRetention.ARTIFACT_LOCK_SQL, PgRetention.HOLD_SQL);
-    assertThat(locksTaken(holdSpy)).containsExactly(PURPOSE + "|t42_7:sealed/a");
-    List<String> holdEvents = holdSpy.events();
-    int lock = holdEvents.indexOf("execute: " + PgRetention.ARTIFACT_LOCK_SQL);
-    int update = holdEvents.indexOf("execute: " + PgRetention.HOLD_SQL);
-    assertThat(lock).isPositive();
-    assertThat(update).as("the update comes after the lock").isGreaterThan(lock);
-    assertThat(holdEvents.subList(update - 2, update))
-        .containsExactly("bind boolean 1=true", "bind 2=sealed/a");
-    assertThat(holdEvents.subList(0, lock)).noneMatch(e -> e.startsWith("bind boolean"));
-    assertThat(holdEvents.subList(update, holdEvents.size())).contains("commit");
+    // the hold and the release: the lock, then the update (a release that skipped the lock would
+    // miss the row of a claim that has not committed, and leave a hold nobody asked for)
+    for (boolean hold : List.of(true, false)) {
+      SqlSpy holdSpy = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(2);
+      new PgRetention(holdSpy.over(null), clock, config)
+          .setRetentionHold(new EvidenceKey("sealed/a"), hold);
+      assertThat(statements(holdSpy))
+          .as("hold %s", hold)
+          .containsExactly(PgRetention.ARTIFACT_LOCK_SQL, PgRetention.HOLD_SQL);
+      assertThat(locksTaken(holdSpy))
+          .as("hold %s", hold)
+          .containsExactly(PURPOSE + "|t42_7:sealed/a");
+      List<String> holdEvents = holdSpy.events();
+      int lock = holdEvents.indexOf("execute: " + PgRetention.ARTIFACT_LOCK_SQL);
+      int update = holdEvents.indexOf("execute: " + PgRetention.HOLD_SQL);
+      assertThat(lock).as("hold %s", hold).isPositive();
+      assertThat(update).as("hold %s: the update comes after the lock", hold).isGreaterThan(lock);
+      assertThat(holdEvents.subList(update - 2, update))
+          .as("hold %s", hold)
+          .containsExactly("bind boolean 1=" + hold, "bind 2=sealed/a");
+      assertThat(holdEvents.subList(0, lock))
+          .as("hold %s", hold)
+          .noneMatch(e -> e.startsWith("bind boolean"));
+      assertThat(holdEvents.subList(update, holdEvents.size()))
+          .as("hold %s", hold)
+          .contains("commit");
+    }
+  }
+
+  /**
+   * The locks and the write are one transaction: one connection, one commit after the write, no
+   * rollback. An xact lock is released at the end of the transaction that took it, so a call that
+   * locked in one unit and wrote in a second would hold nothing while it wrote, and every
+   * statement-order assertion above would still pass.
+   */
+  @Test
+  void theLocksAndTheWriteShareOneTransactionForTheRecordAndForTheHold() {
+    retention()
+        .recordRetention(List.of(claim("sealed/a", MIFIR, D2031), claim("sealed/b", MIFIR, D2031)));
+    assertOneTransaction(spy, PgRetention.RECORD_SQL);
+
+    for (boolean hold : List.of(true, false)) {
+      SqlSpy one = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(1);
+      new PgRetention(one.over(null), clock, config)
+          .setRetentionHold(new EvidenceKey("sealed/a"), hold);
+      assertOneTransaction(one, PgRetention.HOLD_SQL);
+    }
+  }
+
+  private static void assertOneTransaction(SqlSpy recorded, String writeSql) {
+    List<String> events = recorded.events();
+    assertThat(events.stream().filter(e -> e.equals("open")).count())
+        .as("connections opened for %s", writeSql)
+        .isEqualTo(1);
+    assertThat(events.stream().filter(e -> e.equals("commit")).count())
+        .as("commits for %s", writeSql)
+        .isEqualTo(1);
+    assertThat(events).as("no rollback for %s", writeSql).doesNotContain("rollback");
+    int lock = events.indexOf("execute: " + PgRetention.ARTIFACT_LOCK_SQL);
+    assertThat(lock).as("the lock for %s", writeSql).isPositive();
+    int write = events.indexOf("execute: " + writeSql);
+    assertThat(write).as("the write comes after the lock").isGreaterThan(lock);
+    assertThat(events.indexOf("commit"))
+        .as("the commit comes after the write")
+        .isGreaterThan(write);
   }
 
   /**
@@ -511,7 +768,7 @@ class PgRetentionTest {
             List.of(claims.get(4), claims.get(3), claims.get(2), claims.get(1), claims.get(0)),
             List.of(claims.get(2), claims.get(0), claims.get(4), claims.get(1), claims.get(3)));
     for (List<RetentionClaim> order : permutations) {
-      SqlSpy each = new SqlSpy().recordingTypedBinds();
+      SqlSpy each = new SqlSpy().recordingTypedBinds().strictBinds();
       new PgRetention(each.over(null), clock, config).recordRetention(order);
       assertThat(locksTaken(each)).containsExactlyElementsOf(inKeyOrder);
     }
@@ -544,8 +801,8 @@ class PgRetentionTest {
    */
   @Test
   void twoSchemasBindTwoLockTexts() {
-    SqlSpy first = new SqlSpy().recordingTypedBinds().updatingRows(1);
-    SqlSpy second = new SqlSpy().recordingTypedBinds().updatingRows(1);
+    SqlSpy first = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(1);
+    SqlSpy second = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(1);
     PgRetention inFirst = new PgRetention(first.over(null), clock, Config.forSchema("t42_7"));
     PgRetention inSecond = new PgRetention(second.over(null), clock, Config.forSchema("t42_8"));
     RetentionClaim claim = claim("sealed/a", MIFIR, D2031);
@@ -569,7 +826,7 @@ class PgRetentionTest {
    */
   @Test
   void theLockPurposeIsNotOneOfThePurposesOfTheOtherAdapters() {
-    SqlSpy holding = new SqlSpy().recordingTypedBinds().updatingRows(1);
+    SqlSpy holding = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(1);
     PgRetention retention = new PgRetention(holding.over(null), clock, config);
     retention.recordRetention(List.of(claim("sealed/a", MIFIR, D2031)));
     retention.setRetentionHold(new EvidenceKey("sealed/a"), true);
@@ -586,7 +843,7 @@ class PgRetentionTest {
   @Test
   void theHoldIsBoundAsABooleanAndAReleaseIsTheSameStatement() {
     for (boolean hold : List.of(true, false)) {
-      SqlSpy one = new SqlSpy().recordingTypedBinds().updatingRows(1);
+      SqlSpy one = new SqlSpy().recordingTypedBinds().strictBinds().updatingRows(1);
       new PgRetention(one.over(null), clock, config)
           .setRetentionHold(new EvidenceKey("sealed/x"), hold);
       assertThat(one.events()).contains("bind boolean 1=" + hold, "bind 2=sealed/x", "commit");
@@ -648,7 +905,7 @@ class PgRetentionTest {
             claim("sealed/a", EMIR, AnchorEvent.TERMINATION, Optional.empty(), "sealed")));
     assertThat(executed()).contains(PgRetention.RECORD_SQL);
     // the same triple with another date and class is
-    SqlSpy second = new SqlSpy();
+    SqlSpy second = new SqlSpy().strictBinds();
     PgRetention strict = new PgRetention(second.over(null), clock, config);
     assertThatThrownBy(
             () ->
@@ -746,7 +1003,7 @@ class PgRetentionTest {
             "bind 3=sealed/ab/c",
             "bind long 4=" + RetentionLedger.MAX_RETENTION_ROWS_PER_CALL);
 
-    SqlSpy second = new SqlSpy().recordingTypedBinds();
+    SqlSpy second = new SqlSpy().recordingTypedBinds().strictBinds();
     new PgRetention(second.over(null), clock, config).retentionRows("", Optional.empty(), 7);
     assertThat(second.events()).contains("bind 1=", "bind 2=" + DEL, "bind 3=", "bind long 4=7");
   }
@@ -826,8 +1083,9 @@ class PgRetentionTest {
   /**
    * T11-5: {@code retain_until} is a {@code timestamptz} bound as an {@code OffsetDateTime} at UTC
    * from {@link PgTime#timestamp} (an open anchor as a typed null), never as text and never through
-   * {@code to_char} or a cast in the statement. The server round trip of year 0000 and of the last
-   * microsecond of 9999 is a recollection of the driver and is shown at CP-1 by {@code
+   * {@code to_char} or a cast in the statement. The server round trip of year 0000 (the driver
+   * sends it as a BC date, which the server accepts as timestamp input) and of the last microsecond
+   * of 9999 is not run here; CP-1 shows it with {@code
    * RetentionLedgerContract#aRecordedClaimIsReadBackWithTheLedgerClock}.
    */
   @Test
@@ -865,6 +1123,7 @@ class PgRetentionTest {
     Instant born = Instant.parse("2026-01-02T03:04:05.678901Z");
     SqlSpy answering =
         new SqlSpy()
+            .strictBinds()
             .answering(
                 (sql, events) ->
                     sql.equals(PgRetention.ROWS_SQL)
@@ -913,16 +1172,17 @@ class PgRetentionTest {
                 false,
                 NOW));
     for (Object[] row : bad) {
-      SqlSpy answering = new SqlSpy().answering((sql, events) -> List.<Object[]>of(row));
+      SqlSpy answering =
+          new SqlSpy().strictBinds().answering((sql, events) -> List.<Object[]>of(row));
       PgRetention retention = new PgRetention(answering.over(null), clock, config);
       assertThatThrownBy(() -> retention.retentionRows("", Optional.empty(), 10))
           .as("retentionRows of %s", List.of(row))
           .isInstanceOf(LedgerException.class)
-          .hasMessage("stored row is malformed");
+          .hasMessage("stored retention row is malformed");
       assertThatThrownBy(() -> retention.expiredRetention(NOW, Optional.empty(), 10))
           .as("expiredRetention of %s", List.of(row))
           .isInstanceOf(LedgerException.class)
-          .hasMessage("stored row is malformed");
+          .hasMessage("stored retention row is malformed");
     }
   }
 
@@ -930,6 +1190,7 @@ class PgRetentionTest {
   void anExpiredRowIsMappedLikeAnyOtherRow() {
     SqlSpy answering =
         new SqlSpy()
+            .strictBinds()
             .answering(
                 (sql, events) ->
                     sql.equals(PgRetention.EXPIRED_SQL)
@@ -948,7 +1209,7 @@ class PgRetentionTest {
   @Test
   void aFailureOfTheServerIsALedgerExceptionWithItsStateAndTheUnitIsRolledBack() {
     SQLException trigger = new SQLException("retention rows are extend-only", "55000");
-    SqlSpy failing = new SqlSpy().failStatementWith("INSERT INTO retention", trigger);
+    SqlSpy failing = new SqlSpy().strictBinds().failStatementWith("INSERT INTO retention", trigger);
     PgRetention retention = new PgRetention(failing.over(null), clock, config);
 
     assertThatThrownBy(() -> retention.recordRetention(List.of(claim("sealed/a", MIFIR, D2031))))
@@ -961,7 +1222,7 @@ class PgRetentionTest {
   @Test
   void aFailureOfTheLockIsALedgerExceptionAndNothingIsWritten() {
     SQLException timeout = new SQLException("lock timeout", "55P03");
-    SqlSpy failing = new SqlSpy().failStatementWith("pg_advisory_xact_lock", timeout);
+    SqlSpy failing = new SqlSpy().strictBinds().failStatementWith("pg_advisory_xact_lock", timeout);
     PgRetention retention = new PgRetention(failing.over(null), clock, config);
 
     assertThatThrownBy(() -> retention.setRetentionHold(new EvidenceKey("sealed/a"), true))
@@ -970,7 +1231,8 @@ class PgRetentionTest {
     assertThat(failing.events()).noneMatch(e -> e.equals("execute: " + PgRetention.HOLD_SQL));
     assertThat(failing.events()).contains("rollback").doesNotContain("commit");
 
-    SqlSpy failingRecord = new SqlSpy().failStatementWith("pg_advisory_xact_lock", timeout);
+    SqlSpy failingRecord =
+        new SqlSpy().strictBinds().failStatementWith("pg_advisory_xact_lock", timeout);
     assertThatThrownBy(
             () ->
                 new PgRetention(failingRecord.over(null), clock, config)
@@ -983,14 +1245,20 @@ class PgRetentionTest {
 
   /**
    * The one honest limit of the artifact lock: two artifacts whose {@code hashtext} values collide
-   * share one lock, and two calls that took a colliding pair in different orders can wait for each
-   * other. The server detects that and ends one of them with SQLSTATE 40P01, which comes out as the
-   * ledger exception of any statement failure: the unit is rolled back and nothing is written.
+   * share one lock, and two calls that took a colliding pair of artifacts in different orders can
+   * wait for each other. The server detects that and ends one of them, on the lock of the second
+   * artifact of its call, with SQLSTATE 40P01, which comes out as the ledger exception of any
+   * statement failure. Here the first lock runs and the second fails: the write is never sent, the
+   * unit is rolled back and nothing is written.
    */
   @Test
-  void aDeadlockOnTheLockIsALedgerExceptionWithItsStateAndNothingIsWritten() {
+  void aDeadlockOnTheSecondLockIsALedgerExceptionWithItsStateAndNothingIsWritten() {
     SQLException deadlock = new SQLException("deadlock detected", "40P01");
-    SqlSpy failing = new SqlSpy().failStatementWith("pg_advisory_xact_lock", deadlock, 2);
+    SqlSpy failing =
+        new SqlSpy()
+            .recordingTypedBinds()
+            .strictBinds()
+            .failStatementAfter("pg_advisory_xact_lock", 1, deadlock, 1);
     PgRetention retention = new PgRetention(failing.over(null), clock, config);
 
     assertThatThrownBy(
@@ -999,7 +1267,11 @@ class PgRetentionTest {
                     List.of(claim("sealed/a", MIFIR, D2031), claim("sealed/b", MIFIR, D2031))))
         .isInstanceOf(LedgerException.class)
         .hasMessage("ledger statement failed: sqlstate=40P01 constraint=none");
-    assertThat(statements(failing)).doesNotContain(PgRetention.RECORD_SQL);
+    assertThat(statements(failing))
+        .as("both locks were sent, the write was not")
+        .containsExactly(PgRetention.ARTIFACT_LOCK_SQL, PgRetention.ARTIFACT_LOCK_SQL);
+    assertThat(locksTaken(failing))
+        .containsExactly(PURPOSE + "|t42_7:sealed/a", PURPOSE + "|t42_7:sealed/b");
     assertThat(failing.events()).contains("rollback").doesNotContain("commit");
     assertThat(failing.openConnections()).isZero();
   }

@@ -419,16 +419,18 @@ public interface RetentionLedgerContract {
    * for the artifact lock of a ledger on a real server.
    *
    * <p>A fresh artifact for each of the 40 rounds. Bounded: every wait, the retries of the hold
-   * included, ends within one deadline of 30 seconds for the whole test, and then the test fails
-   * instead of hanging.
+   * included, ends within a deadline of 30 seconds for each of the 40 rounds, and then the test
+   * fails instead of hanging.
    */
   @Test
   default void aHoldRacingTheFirstClaimsOfANewArtifactLeavesNoRowUnheld() throws Exception {
     Instant t = at("2030-01-01T00:00:00Z");
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
     ExecutorService pool = Executors.newFixedThreadPool(3);
     try {
       for (int round = 0; round < 40; round++) {
+        // a deadline for each round: the rounds add up, and a slow server must not turn a correct
+        // ledger red by the total time alone
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         String key = String.format(Locale.ROOT, "race/new/%03d", round);
         CyclicBarrier together = new CyclicBarrier(3);
         Future<?> first =
@@ -454,7 +456,8 @@ public interface RetentionLedgerContract {
                       ledger().setRetentionHold(new EvidenceKey(key), true);
                       return null;
                     } catch (IllegalArgumentException e) {
-                      // only the refusal of an artifact that has no row yet is tried again
+                      // only the refusal of an artifact that has no row yet is tried again: the
+                      // text is the one that aHoldOnAnUnknownArtifactIsRefused pins
                       if (!"the artifact has no retention row".equals(e.getMessage())) {
                         throw e;
                       }
@@ -515,16 +518,19 @@ public interface RetentionLedgerContract {
   default void aHoldOnAnUnknownArtifactIsRefused() {
     for (boolean hold : List.of(true, false)) {
       assertThatThrownBy(() -> ledger().setRetentionHold(new EvidenceKey("sealed/none"), hold))
-          .isInstanceOf(IllegalArgumentException.class);
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("the artifact has no retention row");
     }
     assertThat(every()).isEmpty();
 
     // a known artifact does not make its neighbour known
     ledger().recordRetention(List.of(claim("sealed/known", "emir.eu", at("2030-01-01T00:00:00Z"))));
     assertThatThrownBy(() -> ledger().setRetentionHold(new EvidenceKey("sealed/know"), true))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("the artifact has no retention row");
     assertThatThrownBy(() -> ledger().setRetentionHold(new EvidenceKey("sealed/known/x"), true))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("the artifact has no retention row");
     assertThat(every()).extracting(RetentionRow::legalHold).containsExactly(false);
   }
 
@@ -564,7 +570,8 @@ public interface RetentionLedgerContract {
     // limit 0 lists nothing, a negative limit is refused
     assertThat(ledger().retentionRows("p/", Optional.empty(), 0)).isEmpty();
     assertThatThrownBy(() -> ledger().retentionRows("p/", Optional.empty(), -1))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("limit must not be negative");
 
     // after is an artifact, exclusive, and need not exist; a prefix need not end at a segment
     assertThat(artifacts(ledger().retentionRows("p/", Optional.of(new EvidenceKey("p/a")), 10)))
@@ -740,7 +747,8 @@ public interface RetentionLedgerContract {
         .containsExactlyElementsOf(dueAt2030.subList(0, 2));
     assertThat(ledger().expiredRetention(d2030, Optional.empty(), 0)).isEmpty();
     assertThatThrownBy(() -> ledger().expiredRetention(d2030, Optional.empty(), -1))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("limit must not be negative");
 
     // after: strictly after the (date, artifact, regime, anchor) of the row, which need not be
     // stored
@@ -764,7 +772,8 @@ public interface RetentionLedgerContract {
             false,
             clock().now());
     assertThatThrownBy(() -> ledger().expiredRetention(d2030, Optional.of(open), 100))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("a row without a retain-until is not in the expiry list");
   }
 
   @Test
@@ -960,7 +969,8 @@ public interface RetentionLedgerContract {
                 claim("sealed/fresh", "emir.eu", AnchorEvent.OBJECT_WRITTEN, Optional.empty(), "x"),
                 later))) {
       assertThatThrownBy(() -> ledger().recordRetention(call))
-          .isInstanceOf(IllegalArgumentException.class);
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("two claims of one call have one artifact and anchor");
       assertThat(every()).containsExactly(row(stored, false, storedAt));
     }
     // the same artifact under two regimes, or two anchors, is not a duplicate

@@ -127,6 +127,12 @@ public final class RetentionEngine implements RetentionRegistrar {
    * leaves a crash between the two as a hold that the rows have and the store lost, which {@link
    * RetentionVerifier} reports as {@code HOLD_MISSING}.
    *
+   * <p>Two concurrent calls for one artifact with opposite values can leave the rows and the store
+   * with opposite values (the ledger unit and the store call are not one step): {@link
+   * RetentionVerifier} reports it as {@code HOLD_MISSING} (rows held, store not) or {@code
+   * HOLD_NOT_RECORDED}. An operator serialises the holds and releases of one artifact, and the
+   * destruction job of P4 runs the verifier first (note P4-1).
+   *
    * @throws IllegalArgumentException the artifact has no row (the store is not touched), or the
    *     store has no such object
    */

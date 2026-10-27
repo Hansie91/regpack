@@ -1307,20 +1307,24 @@ public final class InMemoryLedgerStore implements LedgerStore {
     synchronized (lock) {
       Instant now = clock.now();
       for (RetentionClaim claim : copy) {
-        TreeMap<RetentionSlot, RetentionRow> slots =
-            retention.computeIfAbsent(claim.artifact().path(), path -> new TreeMap<>());
+        String path = claim.artifact().path();
+        // the map of an artifact is created with its first row, never before
+        TreeMap<RetentionSlot, RetentionRow> existing = retention.get(path);
         RetentionSlot slot = new RetentionSlot(claim.regime().id(), claim.anchor());
-        RetentionRow stored = slots.get(slot);
+        RetentionRow stored = existing == null ? null : existing.get(slot);
         if (stored == null) {
           // test double only: deliberate flaw for ContractSuiteTeethTest
           boolean held =
               flaw != Flaw.RETENTION_NEW_ROW_UNHELD
-                  && slots.values().stream().anyMatch(RetentionRow::legalHold);
-          slots.put(slot, new RetentionRow(claim, held, now));
+                  && existing != null
+                  && existing.values().stream().anyMatch(RetentionRow::legalHold);
+          retention
+              .computeIfAbsent(path, key -> new TreeMap<>())
+              .put(slot, new RetentionRow(claim, held, now));
         } else {
           RetentionClaim kept = stored.claim();
           Optional<Instant> merged = mergedRetainUntil(kept.retainUntil(), claim.retainUntil());
-          slots.put(
+          existing.put(
               slot,
               new RetentionRow(
                   new RetentionClaim(
