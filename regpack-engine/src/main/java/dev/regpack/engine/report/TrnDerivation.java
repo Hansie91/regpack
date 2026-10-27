@@ -5,8 +5,10 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.Leg;
 import dev.regpack.model.Regime;
+import dev.regpack.ports.security.KeyPurpose;
 import dev.regpack.ports.security.KeyRef;
 import dev.regpack.ports.security.Kms;
+import dev.regpack.ports.security.KmsAccessDeniedException;
 import java.util.Objects;
 
 /**
@@ -42,8 +44,8 @@ public final class TrnDerivation {
    *
    * @param length number of base32 characters, 1 to 52
    * @throws IllegalArgumentException if {@code length} is outside 1..52
-   * @throws dev.regpack.ports.security.KmsAccessDeniedException if the key may not be used for the
-   *     MAC (purpose or identity); the {@link Kms} port enforces it
+   * @throws KmsAccessDeniedException if the key is not a {@code TRN_HMAC} key, or the identity may
+   *     not use it
    */
   public static Derived derive(
       Kms kms, KeyRef key, Regime regime, EventIdentity identity, Leg leg, int length) {
@@ -52,6 +54,9 @@ public final class TrnDerivation {
     Objects.requireNonNull(regime, "regime");
     Objects.requireNonNull(identity, "identity");
     Objects.requireNonNull(leg, "leg");
+    if (key.purpose() != KeyPurpose.TRN_HMAC) {
+      throw new KmsAccessDeniedException("a TRN needs a TRN_HMAC key");
+    }
     if (length < MIN_LENGTH || length > MAX_LENGTH) {
       throw new IllegalArgumentException("TRN length must be 1 to 52: " + length);
     }

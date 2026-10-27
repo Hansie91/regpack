@@ -107,6 +107,10 @@ public final class InMemoryKms {
    * nothing. This is an administrative path, not a method of the {@link Kms} port, and a fake: it
    * models neither a pending-deletion window nor replicas or backups of the key.
    *
+   * <p>Every method that names the id (sign, verify and hmac too) reports a destroyed KEK as
+   * destroyed, before purpose and identity are checked; the {@link Kms} port promises this for wrap
+   * and unwrap only, and an adapter need not do it for a caller that is not authorised.
+   *
    * @throws IllegalArgumentException if the id is unknown or names a key that is not a KEK
    */
   public InMemoryKms destroy(KeyRef kek) {
@@ -116,7 +120,7 @@ public final class InMemoryKms {
     }
     Entry entry = keys.get(kek.keyId());
     if (entry == null || entry.purpose() != KeyPurpose.ENVELOPE_KEK) {
-      throw new IllegalArgumentException("unknown KEK: " + kek.keyId());
+      throw new IllegalArgumentException("unknown KEK");
     }
     keys.replace(kek.keyId(), entry, new Entry(entry.purpose(), new Destroyed(), Set.of()));
     return this;

@@ -9,6 +9,7 @@ import dev.regpack.ports.security.KeyPurpose;
 import dev.regpack.ports.security.KeyRef;
 import dev.regpack.ports.security.Kms;
 import dev.regpack.ports.security.KmsKeyDestroyedException;
+import dev.regpack.ports.security.KmsSignature;
 import dev.regpack.ports.security.WrappedKey;
 import dev.regpack.testkit.contract.KmsContract;
 import java.util.HexFormat;
@@ -125,11 +126,26 @@ class InMemoryKmsContractTest implements KmsContract {
   }
 
   @Test
-  void destroyIsIdempotentAndRefusesWhatIsNotAKek() {
+  void aDestroyedKekIsReportedByEveryMethodThatNamesIt() {
     kms.destroy(kek());
+    byte[] data = "data".getBytes(UTF_8);
+    KmsSignature signature = new KmsSignature("kek-1", "Ed25519", new byte[64]);
+
+    assertThatThrownBy(() -> signer().sign(kek(), data))
+        .isInstanceOf(KmsKeyDestroyedException.class);
+    assertThatThrownBy(() -> signer().verify(kek(), data, signature))
+        .isInstanceOf(KmsKeyDestroyedException.class);
+    assertThatThrownBy(() -> application().hmac(kek(), data))
+        .isInstanceOf(KmsKeyDestroyedException.class);
+  }
+
+  @Test
+  void destroyIsIdempotentAndRefusesWhatIsNotAKek() {
+    assertThat(kms.destroy(kek())).isSameAs(kms);
     kms.destroy(kek());
     assertThatThrownBy(() -> kms.destroy(new KeyRef("nope", KeyPurpose.ENVELOPE_KEK)))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("nope");
     assertThatThrownBy(() -> kms.destroy(trnKey())).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> kms.destroy(indexKey())).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> kms.destroy(packKey())).isInstanceOf(IllegalArgumentException.class);
@@ -140,19 +156,28 @@ class InMemoryKmsContractTest implements KmsContract {
   }
 
   @Test
+  void aKekNamedWithAnotherPurposeIsNotDestroyed() {
+    byte[] data = "data".getBytes(UTF_8);
+
+    assertThatThrownBy(() -> kms.destroy(new KeyRef(kek().keyId(), KeyPurpose.TRN_HMAC)))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(application().unwrap(kek(), application().wrap(kek(), data, data), data))
+        .isEqualTo(data);
+  }
+
+  @Test
   void hmacKeysAcceptOnlyTheTwoHmacPurposes() {
-    assertThatThrownBy(
-            () ->
-                InMemoryKms.create()
-                    .createHmacKey(
-                        new KeyRef("k", KeyPurpose.ENVELOPE_KEK), new byte[] {1}, Set.of()))
-        .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(
-            () ->
-                InMemoryKms.create()
-                    .createHmacKey(
-                        new KeyRef("k", KeyPurpose.MANIFEST_SIGNING), new byte[] {1}, Set.of()))
-        .isInstanceOf(IllegalArgumentException.class);
+    for (KeyPurpose purpose : KeyPurpose.values()) {
+      if (purpose == KeyPurpose.TRN_HMAC || purpose == KeyPurpose.INDEX_HMAC) {
+        continue;
+      }
+      assertThatThrownBy(
+              () ->
+                  InMemoryKms.create()
+                      .createHmacKey(new KeyRef("k", purpose), new byte[] {1}, Set.of()))
+          .as("purpose %s", purpose)
+          .isInstanceOf(IllegalArgumentException.class);
+    }
   }
 
   @Test

@@ -1,5 +1,6 @@
 package dev.regpack.ports.security;
 
+import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -23,7 +24,7 @@ public record WrappedKey(String keyId, byte[] ciphertext) {
   public boolean equals(Object other) {
     return other instanceof WrappedKey that
         && keyId.equals(that.keyId)
-        && Arrays.equals(ciphertext, that.ciphertext);
+        && MessageDigest.isEqual(ciphertext, that.ciphertext);
   }
 
   @Override

@@ -44,7 +44,9 @@ public final class ObjectCipher {
   }
 
   /**
-   * Seals {@code plaintext} for the evidence object at {@code key}.
+   * Seals {@code plaintext} for the evidence object at {@code key}. A RuntimeException of the
+   * Entropy or the Clock passes through unchanged: it is a fault of the host, not of the key
+   * service; nothing is wrapped and the drawn key is zeroed.
    *
    * @return an envelope of kind {@code OBJECT}
    * @throws KeyUnavailableException when the KEK cannot be chosen or the KMS cannot wrap the key
@@ -55,10 +57,10 @@ public final class ObjectCipher {
     Instant at = clock.now();
     KeyRef kek = DataKeys.select(selector, at);
     byte[] wrapAad = Envelope.wrapAad(Envelope.Kind.OBJECT, kek.keyId(), key.path());
-    byte[] dataKey = new byte[DataKeys.KEY_BYTES];
+    byte[] dataKey = new byte[AesGcm.KEY_BYTES];
     try {
       entropy.fill(dataKey);
-      byte[] nonce = new byte[DataKeys.NONCE_BYTES];
+      byte[] nonce = new byte[AesGcm.NONCE_BYTES];
       entropy.fill(nonce);
       byte[] wrapped = DataKeys.wrap(kms, kek, dataKey, wrapAad);
       return Envelope.seal(

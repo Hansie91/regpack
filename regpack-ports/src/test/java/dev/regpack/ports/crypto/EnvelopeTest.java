@@ -7,11 +7,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.regpack.ports.crypto.Envelope.AuthenticationException;
 import dev.regpack.ports.crypto.Envelope.Header;
 import dev.regpack.ports.crypto.Envelope.Kind;
+import dev.regpack.ports.security.KeyPurpose;
+import dev.regpack.ports.security.KeyRef;
 import java.io.ByteArrayOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /** The envelope format of D-K1: golden bytes (V3, V4, V9), refusals and the header rules. */
@@ -109,9 +118,22 @@ class EnvelopeTest {
     return raw(1, 1, id.length, id, wrappedLength, new byte[wrappedLength]);
   }
 
+  /** Whether header succeeds; isEnvelope must give the same answer and must never throw. */
   private static boolean headerSucceeds(byte[] bytes) {
+    boolean ok;
     try {
       Envelope.header(bytes);
+      ok = true;
+    } catch (IllegalArgumentException e) {
+      ok = false;
+    }
+    assertThat(Envelope.isEnvelope(bytes)).as("isEnvelope agrees with header").isEqualTo(ok);
+    return ok;
+  }
+
+  private static boolean accepts(Runnable action) {
+    try {
+      action.run();
       return true;
     } catch (IllegalArgumentException e) {
       return false;
@@ -338,6 +360,89 @@ class EnvelopeTest {
   }
 
   @Test
+  void theKekIdAlphabetIsTheSameInTheHeaderTheSelectorsAndTheWrapAad() {
+    for (int c = 0; c < 256; c++) {
+      boolean allowed =
+          (c >= 'A' && c <= 'Z')
+              || (c >= 'a' && c <= 'z')
+              || (c >= '0' && c <= '9')
+              || c == '.'
+              || c == '_'
+              || c == '-';
+      String id = "k" + (char) c;
+      int at = c;
+      byte[] inHeader = raw(1, 1, 2, new byte[] {'k', (byte) c}, 8, new byte[8]);
+
+      assertThat(headerSucceeds(inHeader)).as("header byte %d", at).isEqualTo(allowed);
+      assertThat(accepts(() -> KekSelector.single(new KeyRef(id, KeyPurpose.ENVELOPE_KEK))))
+          .as("single %d", at)
+          .isEqualTo(allowed);
+      assertThat(accepts(() -> KekSelector.perUtcYear(id)))
+          .as("perUtcYear %d", at)
+          .isEqualTo(allowed);
+      assertThat(accepts(() -> Envelope.wrapAad(Kind.OBJECT, id, "x")))
+          .as("wrapAad %d", at)
+          .isEqualTo(allowed);
+      assertThat(accepts(() -> new Header(Kind.OBJECT, id, new byte[] {1})))
+          .as("Header %d", at)
+          .isEqualTo(allowed);
+    }
+  }
+
+  @Test
+  void wrappedKeysOfEverySizeClassRoundTripThroughTheHeader() {
+    for (Kind kind : Kind.values()) {
+      for (int size :
+          new int[] {1, 2, 127, 128, 129, 255, 256, 257, 384, 511, 512, 1000, 1023, 1024}) {
+        byte[] wrapped = new byte[size];
+        for (int i = 0; i < size; i++) {
+          wrapped[i] = (byte) (i * 31 + 7);
+        }
+        byte[] envelope =
+            Envelope.seal(new Header(kind, "kek-2026", wrapped), DATA_KEY, NONCE, CONTEXT, HELLO);
+
+        assertThat(Envelope.isEnvelope(envelope)).as("%s %d", kind, size).isTrue();
+        Header header = Envelope.header(envelope);
+        assertThat(header.kind()).as("%s %d", kind, size).isEqualTo(kind);
+        assertThat(header.wrappedKey()).as("%s %d", kind, size).isEqualTo(wrapped);
+        assertThat(Envelope.open(envelope, DATA_KEY, CONTEXT))
+            .as("%s %d", kind, size)
+            .isEqualTo(HELLO);
+      }
+    }
+  }
+
+  @Test
+  void sealAndOpenGiveTheGoldenResultFromManyThreads() throws Exception {
+    byte[] golden = goldenObject();
+    ExecutorService pool = Executors.newFixedThreadPool(8);
+    CountDownLatch start = new CountDownLatch(1);
+    try {
+      List<Future<Boolean>> futures = new ArrayList<>();
+      for (int t = 0; t < 8; t++) {
+        futures.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  for (int i = 0; i < 200; i++) {
+                    if (!Arrays.equals(goldenObject(), golden)
+                        || !Arrays.equals(Envelope.open(golden, DATA_KEY, CONTEXT), HELLO)) {
+                      return false;
+                    }
+                  }
+                  return true;
+                }));
+      }
+      start.countDown();
+      for (Future<Boolean> future : futures) {
+        assertThat(future.get(60, TimeUnit.SECONDS)).isTrue();
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
   void headerFailuresUseOneFixedMessage() {
     byte[] bad = wellFormed("kek 2026", 8);
 
@@ -375,6 +480,22 @@ class EnvelopeTest {
 
     assertThat(Envelope.isEnvelope(goldenObject())).isTrue();
     assertThat(Envelope.isEnvelope(goldenBody())).isTrue();
+  }
+
+  @Test
+  void aWrongMagicByteIsNotAnEnvelope() {
+    byte[] golden = goldenObject();
+    for (int position = 0; position < 4; position++) {
+      for (int mask : new int[] {0x01, 0x20, 0x80}) {
+        byte[] changed = golden.clone();
+        changed[position] ^= (byte) mask;
+        int at = position;
+        assertThat(Envelope.isEnvelope(changed)).as("magic byte %d", at).isFalse();
+        assertThatThrownBy(() -> Envelope.header(changed))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("not an envelope");
+      }
+    }
   }
 
   @Test

@@ -17,10 +17,6 @@ import java.util.Objects;
  * without the original as its cause, so no text of the service travels on.
  */
 final class DataKeys {
-  static final int KEY_BYTES = 32;
-  static final int NONCE_BYTES = 12;
-  private static final int MAX_WRAPPED_BYTES = 1024;
-
   private DataKeys() {}
 
   /**
@@ -30,7 +26,7 @@ final class DataKeys {
   static KeyRef select(KekSelector selector, Instant at) {
     try {
       KeyRef kek = Objects.requireNonNull(selector.kekAt(at), "kek");
-      if (!KekSelector.KEK_ID.matcher(kek.keyId()).matches()) {
+      if (!Envelope.isKekId(kek.keyId())) {
         throw new IllegalArgumentException("not a KEK id of an envelope header");
       }
       return kek;
@@ -53,7 +49,7 @@ final class DataKeys {
     } catch (RuntimeException e) {
       throw new KeyUnavailableException();
     }
-    if (wrapped.length < 1 || wrapped.length > MAX_WRAPPED_BYTES) {
+    if (wrapped.length < 1 || wrapped.length > Envelope.MAX_WRAPPED_BYTES) {
       throw new KeyUnavailableException();
     }
     return wrapped;
@@ -84,7 +80,7 @@ final class DataKeys {
     } catch (RuntimeException e) {
       throw new KeyUnavailableException();
     }
-    if (dataKey == null || dataKey.length != KEY_BYTES) {
+    if (dataKey == null || dataKey.length != AesGcm.KEY_BYTES) {
       if (dataKey != null) {
         zero(dataKey);
       }

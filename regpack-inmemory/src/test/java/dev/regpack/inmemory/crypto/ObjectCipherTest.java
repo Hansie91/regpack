@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 import dev.regpack.inmemory.InMemoryKms;
+import dev.regpack.inmemory.crypto.CryptoFixtures.AnsweringKms;
 import dev.regpack.inmemory.crypto.CryptoFixtures.FailingKms;
 import dev.regpack.inmemory.crypto.CryptoFixtures.RecordingKms;
 import dev.regpack.inmemory.crypto.CryptoFixtures.StubKms;
@@ -31,6 +32,7 @@ import dev.regpack.ports.crypto.Envelope.Kind;
 import dev.regpack.ports.crypto.KekSelector;
 import dev.regpack.ports.crypto.ObjectCipher;
 import dev.regpack.ports.evidence.EvidenceKey;
+import dev.regpack.ports.security.Entropy;
 import dev.regpack.ports.security.KeyPurpose;
 import dev.regpack.ports.security.KeyRef;
 import dev.regpack.ports.security.Kms;
@@ -45,6 +47,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 
@@ -175,9 +179,22 @@ class ObjectCipherTest {
 
     assertThat(thrown).isInstanceOf(DataShreddedException.class).hasMessage(SHREDDED_MESSAGE);
     assertThat(thrown).hasNoCause();
+    thrown.addSuppressed(new RuntimeException("probe"));
     assertThat(thrown.getSuppressed()).isEmpty();
     assertThat(thrown).isNotInstanceOf(AuthenticationException.class);
     assertThat(thrown).isNotInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void aSealIntoADestroyedKekIsKeyUnavailableNotShredded() {
+    InMemoryKms raw = kms();
+    raw.destroy(kek(2026));
+
+    Throwable thrown =
+        catchThrowable(() -> cipher(raw.as(APPLICATION), clockAt(IN_2026)).seal(K1, HELLO));
+
+    assertKeyUnavailable(thrown);
+    assertThat(thrown).isNotInstanceOf(DataShreddedException.class);
   }
 
   @Test
@@ -250,6 +267,94 @@ class ObjectCipherTest {
   }
 
   @Test
+  void theDrawnKeyIsZeroedWhenTheWrapFails() {
+    RecordingKms kms = new RecordingKms(kms().as(STRANGER));
+
+    assertKeyUnavailable(catchThrowable(() -> cipher(kms, clockAt(IN_2026)).seal(K1, HELLO)));
+
+    assertThat(kms.wraps).hasSize(1);
+    assertThat(kms.wraps.get(0).dataKey()).isNotEqualTo(new byte[32]);
+    assertThat(kms.wraps.get(0).live()).isEqualTo(new byte[32]);
+  }
+
+  @Test
+  void anEntropyFailureIsNotMappedAndTheDrawnKeyIsZeroed() {
+    Kms kms = kms().as(APPLICATION);
+    AtomicReference<byte[]> keyArray = new AtomicReference<>();
+    Entropy failsAfterWritingTheKey =
+        out -> {
+          keyArray.set(out);
+          Arrays.fill(out, (byte) 7);
+          throw new IllegalStateException("entropy");
+        };
+
+    assertThatThrownBy(
+            () ->
+                new ObjectCipher(
+                        kms,
+                        KekSelector.perUtcYear("kek"),
+                        failsAfterWritingTheKey,
+                        clockAt(IN_2026))
+                    .seal(K1, HELLO))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(keyArray.get()).isEqualTo(new byte[32]);
+
+    AtomicInteger draws = new AtomicInteger();
+    AtomicReference<byte[]> drawnKey = new AtomicReference<>();
+    Entropy failsOnTheNonce =
+        out -> {
+          if (draws.getAndIncrement() == 0) {
+            drawnKey.set(out);
+            Arrays.fill(out, (byte) 7);
+          } else {
+            throw new IllegalStateException("entropy");
+          }
+        };
+
+    assertThatThrownBy(
+            () ->
+                new ObjectCipher(
+                        kms, KekSelector.perUtcYear("kek"), failsOnTheNonce, clockAt(IN_2026))
+                    .seal(K1, HELLO))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(drawnKey.get()).isEqualTo(new byte[32]);
+  }
+
+  @Test
+  void aWrappedKeyThatNoHeaderCanCarryIsKeyUnavailableAndTheDrawnKeyIsZeroed() {
+    for (int size : new int[] {0, 1025, 4096}) {
+      AnsweringKms kms = new AnsweringKms(new byte[size], null);
+
+      assertKeyUnavailable(catchThrowable(() -> cipher(kms, clockAt(IN_2026)).seal(K1, HELLO)));
+
+      assertThat(kms.lastDataKey).as("size %d", size).isEqualTo(new byte[32]);
+    }
+    for (int size : new int[] {1, 1024}) {
+      byte[] envelope =
+          cipher(new AnsweringKms(new byte[size], null), clockAt(IN_2026)).seal(K1, HELLO);
+
+      assertThat(Envelope.header(envelope).wrappedKey()).as("size %d", size).hasSize(size);
+    }
+  }
+
+  @Test
+  void anUnwrapThatIsNotA32ByteKeyIsKeyUnavailableAndTheAnswerIsZeroed() {
+    byte[] envelope = cipher(kms().as(APPLICATION), clockAt(IN_2026)).seal(K1, HELLO);
+    for (int size : new int[] {0, 1, 16, 31, 33, 64}) {
+      byte[] answer = new byte[size];
+      Arrays.fill(answer, (byte) 7);
+      Kms kms = new AnsweringKms(null, answer);
+
+      assertKeyUnavailable(catchThrowable(() -> cipher(kms, clockAt(IN_2026)).open(K1, envelope)));
+
+      assertThat(answer).as("size %d", size).isEqualTo(new byte[size]);
+    }
+    Kms nothing = new AnsweringKms(null, null);
+    assertKeyUnavailable(
+        catchThrowable(() -> cipher(nothing, clockAt(IN_2026)).open(K1, envelope)));
+  }
+
+  @Test
   void noMessageHoldsAKeyAKekIdOrAPath() {
     InMemoryKms raw = kms();
     ObjectCipher cipher = cipher(raw.as(APPLICATION), clockAt(IN_2026));
@@ -300,9 +405,14 @@ class ObjectCipherTest {
     IllegalStateException backend =
         new IllegalStateException("backend failure for kek-2026 landing/k1 and a key");
     Kms broken = new FailingKms(backend);
+    InMemoryKms destroyed = kms();
+    destroyed.destroy(kek(2026));
     byte[] sealed = cipher(application, clockAt(IN_2026)).seal(K1, HELLO);
     Map<String, ThrowingCallable> cases = new LinkedHashMap<>();
     cases.put("seal, access denied", () -> cipher(denied, clockAt(IN_2026)).seal(K1, HELLO));
+    cases.put(
+        "seal, destroyed KEK",
+        () -> cipher(destroyed.as(APPLICATION), clockAt(IN_2026)).seal(K1, HELLO));
     cases.put(
         "seal, unknown KEK",
         () -> cipher(application, clockAt("2030-01-01T00:00:00Z")).seal(K1, HELLO));

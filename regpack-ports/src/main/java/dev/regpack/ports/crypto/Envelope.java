@@ -94,7 +94,7 @@ public final class Envelope {
   private static final byte[] MAGIC = {'R', 'P', 'E', 'N'};
   private static final int VERSION = 1;
   private static final int MAX_KEK_ID_CHARS = 100;
-  private static final int MAX_WRAPPED_BYTES = 1024;
+  static final int MAX_WRAPPED_BYTES = 1024;
   private static final int KEK_ID_OFFSET = MAGIC.length + 1 + 1 + 1; // magic, version, kind, length
   private static final int WRAPPED_LENGTH_BYTES = 2;
   private static final String NOT_AN_ENVELOPE = "not an envelope";
@@ -190,7 +190,8 @@ public final class Envelope {
     return new IllegalArgumentException(NOT_AN_ENVELOPE);
   }
 
-  private static boolean isKekId(String id) {
+  /** The one definition of a KEK id: 1 to 100 characters of {@code [A-Za-z0-9._-]}. */
+  static boolean isKekId(String id) {
     if (id.isEmpty() || id.length() > MAX_KEK_ID_CHARS) {
       return false;
     }

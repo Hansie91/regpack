@@ -94,6 +94,8 @@ final class CryptoFixtures {
         .isInstanceOf(KeyUnavailableException.class)
         .hasMessage(KEY_UNAVAILABLE_MESSAGE)
         .hasNoCause();
+    // the probe: a type that hardens itself against suppression keeps this empty
+    thrown.addSuppressed(new RuntimeException("probe"));
     assertThat(thrown.getSuppressed()).isEmpty();
   }
 
@@ -174,6 +176,47 @@ final class CryptoFixtures {
     @Override
     public byte[] unwrap(KeyRef kek, WrappedKey wrapped, byte[] aad) {
       throw new UnsupportedOperationException();
+    }
+  }
+
+  /**
+   * Answers wrap with the given bytes and unwrap with the given array itself (so that its zeroing
+   * is observable); keeps the data key array that the cipher handed to wrap.
+   */
+  static final class AnsweringKms implements Kms {
+    private final byte[] wrapped;
+    private final byte[] unwrapped;
+    byte[] lastDataKey;
+
+    AnsweringKms(byte[] wrapped, byte[] unwrapped) {
+      this.wrapped = wrapped;
+      this.unwrapped = unwrapped;
+    }
+
+    @Override
+    public KmsSignature sign(KeyRef key, byte[] message) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean verify(KeyRef key, byte[] message, KmsSignature signature) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public byte[] hmac(KeyRef key, byte[] message) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public WrappedKey wrap(KeyRef kek, byte[] dataKey, byte[] aad) {
+      lastDataKey = dataKey;
+      return new WrappedKey(kek.keyId(), wrapped);
+    }
+
+    @Override
+    public byte[] unwrap(KeyRef kek, WrappedKey wrapped, byte[] aad) {
+      return unwrapped;
     }
   }
 

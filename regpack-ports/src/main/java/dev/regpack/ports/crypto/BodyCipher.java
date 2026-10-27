@@ -11,9 +11,10 @@ import java.util.Objects;
 
 /**
  * Seals and opens report bodies (D-K2). One random 256-bit data key serves the bodies of one UTC
- * day under one KEK: it is wrapped once, and the wrapped key is embedded in every body of that day.
- * The key rotates when the UTC day or the KEK changes, and after {@link #MAX_SEALS_PER_KEY} seals
- * (NIST allows 2^32 random 96-bit nonces under one key [R: SP 800-38D 8.3]).
+ * day under one KEK for this instance: it is wrapped once, and the wrapped key is embedded in every
+ * body of that day. The key rotates when the UTC day or the KEK changes, and after {@link
+ * #MAX_SEALS_PER_KEY} seals (NIST allows 2^32 random 96-bit nonces under one key [R: SP 800-38D
+ * 8.3]).
  *
  * <p>Each {@link #seal} reads the clock once; the day, the KEK and the rotation test use that one
  * instant. The wrap AAD is {@code regpack/dek/v1|BODY|<kek id>|body}; the context of the body is
@@ -67,21 +68,28 @@ public final class BodyCipher {
     this(kms, selector, entropy, clock, MAX_SEALS_PER_KEY);
   }
 
-  /** The seal limit is a parameter for tests; production uses {@link #MAX_SEALS_PER_KEY}. */
+  /**
+   * The seal limit is between 1 and {@link #MAX_SEALS_PER_KEY}; the argument is for tests, and
+   * production uses {@link #MAX_SEALS_PER_KEY}.
+   *
+   * @throws IllegalArgumentException when the limit is outside that range
+   */
   public BodyCipher(
       Kms kms, KekSelector selector, Entropy entropy, Clock clock, long maxSealsPerKey) {
     this.kms = Objects.requireNonNull(kms, "kms");
     this.selector = Objects.requireNonNull(selector, "selector");
     this.entropy = Objects.requireNonNull(entropy, "entropy");
     this.clock = Objects.requireNonNull(clock, "clock");
-    if (maxSealsPerKey < 1) {
-      throw new IllegalArgumentException("the seal limit must be positive");
+    if (maxSealsPerKey < 1 || maxSealsPerKey > MAX_SEALS_PER_KEY) {
+      throw new IllegalArgumentException("the seal limit must be between 1 and MAX_SEALS_PER_KEY");
     }
     this.maxSealsPerKey = maxSealsPerKey;
   }
 
   /**
-   * Seals a report body.
+   * Seals a report body. A RuntimeException of the Entropy or the Clock passes through unchanged:
+   * it is a fault of the host, not of the key service; nothing is wrapped and the drawn key is
+   * zeroed.
    *
    * @return an envelope of kind {@code BODY}
    * @throws KeyUnavailableException when the KEK cannot be chosen or the KMS cannot wrap the key
@@ -99,7 +107,7 @@ public final class BodyCipher {
     if (current == null) {
       current = newGeneration(day, kek);
     }
-    byte[] nonce = new byte[DataKeys.NONCE_BYTES];
+    byte[] nonce = new byte[AesGcm.NONCE_BYTES];
     entropy.fill(nonce);
     current.seals++;
     return Envelope.seal(current.header, current.dataKey, nonce, context.bytes(), plaintext);
@@ -134,7 +142,7 @@ public final class BodyCipher {
 
   /** Draws the key first, then wraps it; a failure leaves no generation and no key in memory. */
   private Generation newGeneration(LocalDate day, KeyRef kek) {
-    byte[] dataKey = new byte[DataKeys.KEY_BYTES];
+    byte[] dataKey = new byte[AesGcm.KEY_BYTES];
     boolean kept = false;
     try {
       entropy.fill(dataKey);

@@ -39,6 +39,20 @@ class SubjectHasherTest {
   private static final String V8_E_ACUTE =
       "be8ee7afe18dcc26fa236d92460e827a4119f78fe6ae473548620f0ed6941713";
 
+  // Written as Java Unicode escapes only: composed and decomposed texts look alike in an editor,
+  // and
+  // a tool that normalises text would make the NFC tests vacuous without a failure.
+  private static final String E_DECOMPOSED = "e\u0301";
+  private static final String E_COMPOSED = "\u00e9";
+  private static final String A_RING_DECOMPOSED = "A\u030a";
+  private static final String ANGSTROM_SIGN = "\u212b";
+  private static final String A_RING_COMPOSED = "\u00c5";
+
+  /** Compatibility forms that NFC leaves alone (NFKC would fold them). */
+  private static final String FI_LIGATURE = "\ufb01";
+
+  private static final String FULLWIDTH_A = "\uff21";
+
   private static InMemoryKms raw() {
     return InMemoryKms.create()
         .createHmacKey(INDEX, range(1, 32), Set.of(APPLICATION))
@@ -54,20 +68,41 @@ class SubjectHasherTest {
     SubjectHasher hasher = hasher();
 
     assertThat(hasher.hash("NATIONAL_ID", VALUE).hex()).isEqualTo(V8_ID);
-    assertThat(hasher.hash("NATIONAL_ID", "é").hex()).isEqualTo(V8_E_ACUTE);
-    assertThat(hasher.hash("NATIONAL_ID", "é").hex()).isEqualTo(V8_E_ACUTE);
+    assertThat(hasher.hash("NATIONAL_ID", E_DECOMPOSED).hex()).isEqualTo(V8_E_ACUTE);
+    assertThat(hasher.hash("NATIONAL_ID", E_COMPOSED).hex()).isEqualTo(V8_E_ACUTE);
   }
 
   @Test
   void nfcVariantsHashAlike() {
     SubjectHasher hasher = hasher();
 
-    assertThat(hasher.hash("NATIONAL_ID", "é")).isEqualTo(hasher.hash("NATIONAL_ID", "é"));
+    assertThat(hasher.hash("NATIONAL_ID", E_DECOMPOSED))
+        .isEqualTo(hasher.hash("NATIONAL_ID", E_COMPOSED));
     // U+212B (the angstrom sign) and A with a ring above both normalise to U+00C5
-    SubjectHash angstrom = hasher.hash("NATIONAL_ID", "Å");
-    assertThat(angstrom).isEqualTo(hasher.hash("NATIONAL_ID", "Å"));
-    assertThat(angstrom).isEqualTo(hasher.hash("NATIONAL_ID", "Å"));
+    SubjectHash angstrom = hasher.hash("NATIONAL_ID", ANGSTROM_SIGN);
+    assertThat(angstrom).isEqualTo(hasher.hash("NATIONAL_ID", A_RING_DECOMPOSED));
+    assertThat(angstrom).isEqualTo(hasher.hash("NATIONAL_ID", A_RING_COMPOSED));
     assertThat(angstrom).isNotEqualTo(hasher.hash("NATIONAL_ID", "A"));
+  }
+
+  /** The premise of the two tests above: the inputs differ as text, whatever an editor did. */
+  @Test
+  void theNfcTestInputsReallyDifferAsText() {
+    assertThat(E_DECOMPOSED).isNotEqualTo(E_COMPOSED).hasSize(2);
+    assertThat(E_COMPOSED).hasSize(1);
+    assertThat(ANGSTROM_SIGN).isNotEqualTo(A_RING_COMPOSED).hasSize(1);
+    assertThat(A_RING_DECOMPOSED).isNotEqualTo(A_RING_COMPOSED).hasSize(2);
+    assertThat(A_RING_DECOMPOSED).isNotEqualTo(ANGSTROM_SIGN);
+  }
+
+  @Test
+  void onlyCanonicalFormsAreFolded() {
+    SubjectHasher hasher = hasher();
+
+    assertThat(hasher.hash("NATIONAL_ID", FI_LIGATURE))
+        .isNotEqualTo(hasher.hash("NATIONAL_ID", "fi"));
+    assertThat(hasher.hash("NATIONAL_ID", FULLWIDTH_A))
+        .isNotEqualTo(hasher.hash("NATIONAL_ID", "A"));
   }
 
   @Test
@@ -156,7 +191,8 @@ class SubjectHasherTest {
             raw.as(STRANGER),
             new FailingKms(new IllegalStateException("backend failure for " + VALUE)),
             new FixedMacKms(new byte[16]),
-            new FixedMacKms(new byte[0]));
+            new FixedMacKms(new byte[0]),
+            new FixedMacKms(null));
 
     for (Kms kms : brokenKms) {
       assertKeyUnavailable(
@@ -187,6 +223,17 @@ class SubjectHasherTest {
   }
 
   @Test
+  void theIdentifierBytesAreZeroedWhenTheKmsFails() {
+    RecordingMacKms kms = new RecordingMacKms(raw().as(STRANGER));
+
+    assertKeyUnavailable(
+        catchThrowable(() -> new SubjectHasher(kms, INDEX).hash("NATIONAL_ID", VALUE)));
+
+    assertThat(kms.copy).isEqualTo("regpack/subject/v1\0NATIONAL_ID\0AB123456C".getBytes(UTF_8));
+    assertThat(kms.live).isEqualTo(new byte[kms.copy.length]);
+  }
+
+  @Test
   void aSubjectHashIsSixtyFourLowercaseHexDigits() {
     String valid = "0123456789abcdef".repeat(4);
 
@@ -211,6 +258,7 @@ class SubjectHasherTest {
         .doesNotContain(hash.hex())
         .doesNotContain(hash.hex().substring(0, 8));
     assertThat(hash.toString()).doesNotContain(VALUE);
+    assertThat(hash.toString()).isEqualTo("SubjectHash[hidden]");
   }
 
   /** Answers every hmac with the given bytes. */
@@ -218,7 +266,7 @@ class SubjectHasherTest {
     private final byte[] mac;
 
     FixedMacKms(byte[] mac) {
-      this.mac = mac.clone();
+      this.mac = mac == null ? null : mac.clone();
     }
 
     @Override
@@ -233,7 +281,7 @@ class SubjectHasherTest {
 
     @Override
     public byte[] hmac(KeyRef key, byte[] message) {
-      return mac.clone();
+      return mac == null ? null : mac.clone();
     }
 
     @Override

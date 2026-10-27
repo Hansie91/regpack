@@ -9,8 +9,8 @@ package dev.regpack.ports.security;
  * and {@link #unwrap} of a destroyed KEK throw {@link KmsKeyDestroyedException}, a {@link
  * RuntimeException} that is not an {@link IllegalArgumentException}. An adapter must answer a KEK
  * that the destruction job destroyed, a pending deletion included, that way and not as unknown;
- * otherwise {@code verify} reports every shredded object as corrupt. Destruction itself is an
- * administrative act and not a method of this port.
+ * otherwise the evidence verifier reports every shredded object as corrupt. Destruction itself is
+ * an administrative act and not a method of this port.
  */
 public interface Kms {
   /** PACK_SIGNING or MANIFEST_SIGNING keys only. */

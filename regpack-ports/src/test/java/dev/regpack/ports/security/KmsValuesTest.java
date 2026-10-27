@@ -52,6 +52,23 @@ class KmsValuesTest {
   }
 
   @Test
+  void aMutatedReturnedArrayDoesNotChangeTheValue() {
+    WrappedKey wrapped = new WrappedKey("kek-1", "0123456789abcdef".getBytes(UTF_8));
+    KmsSignature signature =
+        new KmsSignature("key-1", "Ed25519", "0123456789abcdef".getBytes(UTF_8));
+    int wrappedHash = wrapped.hashCode();
+    int signatureHash = signature.hashCode();
+
+    wrapped.ciphertext()[0] ^= 1;
+    signature.value()[0] ^= 1;
+
+    assertThat(wrapped.ciphertext()[0]).isEqualTo((byte) '0');
+    assertThat(signature.value()[0]).isEqualTo((byte) '0');
+    assertThat(wrapped.hashCode()).isEqualTo(wrappedHash);
+    assertThat(signature.hashCode()).isEqualTo(signatureHash);
+  }
+
+  @Test
   void toStringShowsLengthsOnly() {
     byte[] bytes = "SECRETSECRETSECRETSECRET".getBytes(UTF_8);
     String wrapped = new WrappedKey("kek-secret-id", bytes).toString();

@@ -18,6 +18,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 import dev.regpack.inmemory.InMemoryKms;
+import dev.regpack.inmemory.crypto.CryptoFixtures.AnsweringKms;
 import dev.regpack.inmemory.crypto.CryptoFixtures.FailingKms;
 import dev.regpack.inmemory.crypto.CryptoFixtures.RecordingKms;
 import dev.regpack.inmemory.crypto.CryptoFixtures.SteppingClock;
@@ -36,19 +37,23 @@ import dev.regpack.ports.crypto.Envelope.Header;
 import dev.regpack.ports.crypto.Envelope.Kind;
 import dev.regpack.ports.crypto.KekSelector;
 import dev.regpack.ports.ledger.ReportLedger;
+import dev.regpack.ports.security.Entropy;
 import dev.regpack.ports.security.KeyRef;
 import dev.regpack.ports.security.Kms;
+import dev.regpack.ports.security.KmsSignature;
 import dev.regpack.ports.security.WrappedKey;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -213,6 +218,167 @@ class BodyCipherTest {
   }
 
   @Test
+  void theSealLimitCannotExceedTheDocumentedCeiling() {
+    Kms kms = kms().as(APPLICATION);
+    KekSelector selector = KekSelector.perUtcYear("kek");
+
+    assertThat(
+            new BodyCipher(
+                kms, selector, entropy(), clockAt(MORNING), BodyCipher.MAX_SEALS_PER_KEY))
+        .isNotNull();
+    assertThatThrownBy(
+            () ->
+                new BodyCipher(
+                    kms, selector, entropy(), clockAt(MORNING), BodyCipher.MAX_SEALS_PER_KEY + 1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () -> new BodyCipher(kms, selector, entropy(), clockAt(MORNING), Long.MAX_VALUE))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void aLimitOfOneWrapsANewKeyForEverySeal() {
+    RecordingKms kms = new RecordingKms(kms().as(APPLICATION));
+    BodyCipher cipher =
+        new BodyCipher(kms, KekSelector.perUtcYear("kek"), entropy(), clockAt(MORNING), 1);
+
+    byte[] first = cipher.seal(context(), BODY);
+    byte[] second = cipher.seal(context(), BODY);
+
+    assertThat(kms.wraps).hasSize(2);
+    assertThat(Envelope.header(first).wrappedKey())
+        .isNotEqualTo(Envelope.header(second).wrappedKey());
+  }
+
+  @Test
+  void theEntropyIsDrawnKeyFirstThenOneNoncePerSeal() {
+    RecordingKms kms = new RecordingKms(kms().as(APPLICATION));
+    ManualClock clock = clockAt(MORNING);
+    BodyCipher cipher = cipher(kms, clock);
+    byte[] stream = stream(100);
+
+    byte[] first = cipher.seal(context(), BODY);
+    byte[] second = cipher.seal(context(), BODY);
+    clock.advance(Duration.ofDays(1));
+    byte[] third = cipher.seal(context(), BODY);
+
+    assertThat(kms.wraps).hasSize(2);
+    assertThat(kms.wraps.get(0).dataKey()).isEqualTo(Arrays.copyOfRange(stream, 0, 32));
+    assertThat(nonceOf(first)).isEqualTo(Arrays.copyOfRange(stream, 32, 44));
+    assertThat(nonceOf(second)).isEqualTo(Arrays.copyOfRange(stream, 44, 56));
+    assertThat(kms.wraps.get(1).dataKey()).isEqualTo(Arrays.copyOfRange(stream, 56, 88));
+    assertThat(nonceOf(third)).isEqualTo(Arrays.copyOfRange(stream, 88, 100));
+  }
+
+  @Test
+  void aFailedWrapZeroesTheDrawnKeyAndLeavesNoGeneration() {
+    RecordingKms denied = new RecordingKms(kms().as(STRANGER));
+    BodyCipher cipher = cipher(denied, clockAt(MORNING));
+
+    assertKeyUnavailable(catchThrowable(() -> cipher.seal(context(), BODY)));
+
+    assertThat(denied.wraps).hasSize(1);
+    assertThat(denied.wraps.get(0).dataKey()).isNotEqualTo(new byte[32]);
+    assertThat(denied.wraps.get(0).live()).isEqualTo(new byte[32]);
+
+    assertKeyUnavailable(catchThrowable(() -> cipher.seal(context(), BODY)));
+
+    assertThat(denied.wraps).hasSize(2);
+    assertThat(denied.wraps.get(1).dataKey()).isNotEqualTo(denied.wraps.get(0).dataKey());
+  }
+
+  @Test
+  void anEntropyFailureIsNotMappedAndTheDrawnKeyIsZeroed() {
+    AtomicReference<byte[]> keyArray = new AtomicReference<>();
+    Entropy failsAfterWritingTheKey =
+        out -> {
+          keyArray.set(out);
+          Arrays.fill(out, (byte) 7);
+          throw new IllegalStateException("entropy");
+        };
+
+    assertThatThrownBy(
+            () ->
+                new BodyCipher(
+                        kms().as(APPLICATION),
+                        KekSelector.perUtcYear("kek"),
+                        failsAfterWritingTheKey,
+                        clockAt(MORNING))
+                    .seal(context(), BODY))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(keyArray.get()).isEqualTo(new byte[32]);
+  }
+
+  @Test
+  void aWrappedKeyThatNoHeaderCanCarryIsKeyUnavailableAndTheDrawnKeyIsZeroed() {
+    for (int size : new int[] {0, 1025, 4096}) {
+      AnsweringKms kms = new AnsweringKms(new byte[size], null);
+
+      assertKeyUnavailable(
+          catchThrowable(() -> cipher(kms, clockAt(MORNING)).seal(context(), BODY)));
+
+      assertThat(kms.lastDataKey).as("size %d", size).isEqualTo(new byte[32]);
+    }
+  }
+
+  @Test
+  void anUnwrapThatIsNotA32ByteKeyIsKeyUnavailableAndTheAnswerIsZeroed() {
+    byte[] envelope = cipher(kms().as(APPLICATION), clockAt(MORNING)).seal(context(), BODY);
+    for (int size : new int[] {0, 1, 16, 31, 33, 64}) {
+      byte[] answer = new byte[size];
+      Arrays.fill(answer, (byte) 7);
+      Kms kms = new AnsweringKms(null, answer);
+
+      assertKeyUnavailable(
+          catchThrowable(() -> cipher(kms, clockAt(MORNING)).open(context(), envelope)));
+
+      assertThat(answer).as("size %d", size).isEqualTo(new byte[size]);
+    }
+    Kms nothing = new AnsweringKms(null, null);
+    assertKeyUnavailable(
+        catchThrowable(() -> cipher(nothing, clockAt(MORNING)).open(context(), envelope)));
+  }
+
+  @Test
+  void aSealIntoADestroyedKekIsKeyUnavailableNotShredded() {
+    InMemoryKms raw = kms();
+    raw.destroy(kek(2026));
+
+    Throwable thrown =
+        catchThrowable(() -> cipher(raw.as(APPLICATION), clockAt(MORNING)).seal(context(), BODY));
+
+    assertKeyUnavailable(thrown);
+    assertThat(thrown).isNotInstanceOf(DataShreddedException.class);
+  }
+
+  @Test
+  void theBodyDayIsUtcInAnyDefaultZone() {
+    TimeZone saved = TimeZone.getDefault();
+    try {
+      for (String zone : List.of("Pacific/Auckland", "America/Los_Angeles", "UTC")) {
+        TimeZone.setDefault(TimeZone.getTimeZone(zone));
+        RecordingKms boundary = new RecordingKms(kms().as(APPLICATION));
+        ManualClock clock = clockAt("2026-06-15T23:59:59.999999Z");
+        BodyCipher overMidnight = cipher(boundary, clock);
+        overMidnight.seal(context(), BODY);
+        clock.advance(Duration.ofNanos(1000));
+        overMidnight.seal(context(), BODY);
+        assertThat(boundary.wraps).as("UTC midnight, zone %s", zone).hasSize(2);
+
+        RecordingKms sameDay = new RecordingKms(kms().as(APPLICATION));
+        ManualClock midday = clockAt("2026-06-15T10:00:00Z");
+        BodyCipher withinTheDay = cipher(sameDay, midday);
+        withinTheDay.seal(context(), BODY);
+        midday.advance(Duration.ofHours(10));
+        withinTheDay.seal(context(), BODY);
+        assertThat(sameDay.wraps).as("one UTC day, zone %s", zone).hasSize(1);
+      }
+    } finally {
+      TimeZone.setDefault(saved);
+    }
+  }
+
+  @Test
   void aBodyMovedToAnotherSubjectOrHashIsRefused() {
     BodyCipher cipher = cipher(kms().as(APPLICATION), clockAt(MORNING));
     byte[] envelope = cipher.seal(context(), BODY);
@@ -246,6 +412,7 @@ class BodyCipherTest {
     Throwable thrown = catchThrowable(() -> cipher.open(context(), envelope));
     assertThat(thrown).isInstanceOf(DataShreddedException.class).hasMessage(SHREDDED_MESSAGE);
     assertThat(thrown).hasNoCause();
+    thrown.addSuppressed(new RuntimeException("probe"));
     assertThat(thrown.getSuppressed()).isEmpty();
   }
 
@@ -287,6 +454,69 @@ class BodyCipherTest {
   }
 
   @Test
+  void twoThreadsNeverCreateTwoGenerations() throws Exception {
+    RecordingKms recording = new RecordingKms(kms().as(APPLICATION));
+    CountDownLatch bothInside = new CountDownLatch(2);
+    // Holds the first wrap open for 300 ms. A second thread that got past the lock would reach its
+    // own wrap in that time; with the lock it waits, and exactly one wrap happens.
+    Kms gated =
+        new Kms() {
+          @Override
+          public KmsSignature sign(KeyRef key, byte[] message) {
+            return recording.sign(key, message);
+          }
+
+          @Override
+          public boolean verify(KeyRef key, byte[] message, KmsSignature signature) {
+            return recording.verify(key, message, signature);
+          }
+
+          @Override
+          public byte[] hmac(KeyRef key, byte[] message) {
+            return recording.hmac(key, message);
+          }
+
+          @Override
+          public WrappedKey wrap(KeyRef kek, byte[] dataKey, byte[] aad) {
+            bothInside.countDown();
+            try {
+              bothInside.await(300, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            return recording.wrap(kek, dataKey, aad);
+          }
+
+          @Override
+          public byte[] unwrap(KeyRef kek, WrappedKey wrapped, byte[] aad) {
+            return recording.unwrap(kek, wrapped, aad);
+          }
+        };
+    BodyCipher cipher = cipher(gated, clockAt(MORNING));
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    CountDownLatch start = new CountDownLatch(1);
+    try {
+      List<Future<byte[]>> futures = new ArrayList<>();
+      for (int t = 0; t < 2; t++) {
+        futures.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  return cipher.seal(context(), BODY);
+                }));
+      }
+      start.countDown();
+      for (Future<byte[]> future : futures) {
+        future.get(30, TimeUnit.SECONDS);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+
+    assertThat(recording.wraps).as("one generation for two concurrent first seals").hasSize(1);
+  }
+
+  @Test
   void bodyContextBytesArePinned() {
     assertThat(new String(context().bytes(), UTF_8)).isEqualTo(V4_CONTEXT);
     ReportLedger.NewVersion version =
@@ -300,6 +530,32 @@ class BodyCipherTest {
 
     assertThat(BodyContext.of(version)).isEqualTo(context());
     assertThat(BodyContext.of(version).bytes()).isEqualTo(context().bytes());
+  }
+
+  @Test
+  void bodyContextOfCopiesEveryComponentOfTheVersion() {
+    for (Leg leg : Leg.values()) {
+      for (String[] parts :
+          new String[][] {{"mifir.eu.rts22", "EXEC9", "x"}, {"emir.eu.refit", "TRADE7", "y"}}) {
+        ReportLedger.NewVersion version =
+            LedgerFixtures.newVersion(
+                new ReportLedger.SubjectKey(
+                    new Regime(parts[0]), EventIdentity.of("FIRM2", parts[1]), leg),
+                "LEI1",
+                Optional.empty(),
+                "NEW",
+                parts[2]);
+        BodyContext expected =
+            new BodyContext(
+                new Regime(parts[0]),
+                EventIdentity.of("FIRM2", parts[1]),
+                leg,
+                Sha256.ofUtf8(parts[2]));
+
+        assertThat(BodyContext.of(version)).isEqualTo(expected);
+        assertThat(BodyContext.of(version).bytes()).isEqualTo(expected.bytes());
+      }
+    }
   }
 
   @Test
@@ -339,6 +595,7 @@ class BodyCipherTest {
         .doesNotContain("EXEC9")
         .doesNotContain("MARKET")
         .doesNotContain(Sha256.ofUtf8("x").hex().substring(0, 8));
+    assertThat(shown).isEqualTo("BodyContext[hidden]");
   }
 
   @Test
@@ -433,6 +690,7 @@ class BodyCipherTest {
     doomedKms.destroy(kek(2026));
     failures.add(() -> doomedCipher.open(context(), doomed));
 
+    // theEntropyIsDrawnKeyFirstThenOneNoncePerSeal pins that these bytes are the data key
     List<String> needles =
         List.of(
             HEX.formatHex(stream(32)),
@@ -464,9 +722,12 @@ class BodyCipherTest {
     IllegalStateException backend =
         new IllegalStateException("backend failure for kek-2026 FIRM1 EXEC9 and a key");
     Kms broken = new FailingKms(backend);
+    InMemoryKms destroyed = kms();
+    destroyed.destroy(kek(2026));
     byte[] sealed = cipher(application, clockAt(MORNING)).seal(context(), BODY);
     return List.of(
         () -> cipher(denied, clockAt(MORNING)).seal(context(), BODY),
+        () -> cipher(destroyed.as(APPLICATION), clockAt(MORNING)).seal(context(), BODY),
         () -> cipher(application, clockAt("2030-01-01T00:00:00Z")).seal(context(), BODY),
         () -> cipher(broken, clockAt(MORNING)).seal(context(), BODY),
         () ->

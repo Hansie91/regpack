@@ -1,5 +1,6 @@
 package dev.regpack.ports.security;
 
+import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -24,7 +25,7 @@ public record KmsSignature(String keyId, String algorithm, byte[] value) {
     return other instanceof KmsSignature that
         && keyId.equals(that.keyId)
         && algorithm.equals(that.algorithm)
-        && Arrays.equals(value, that.value);
+        && MessageDigest.isEqual(value, that.value);
   }
 
   @Override
