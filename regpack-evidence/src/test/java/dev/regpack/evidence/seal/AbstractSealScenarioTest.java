@@ -1,10 +1,13 @@
 package dev.regpack.evidence.seal;
 
+import dev.regpack.evidence.retention.RetentionEngine;
 import dev.regpack.inmemory.InMemoryLedgerStore;
+import dev.regpack.model.Regime;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import dev.regpack.ports.evidence.seal.Sealing;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.SealScenarioContract;
 import java.io.IOException;
@@ -68,5 +71,21 @@ abstract class AbstractSealScenarioTest implements SealScenarioContract {
   @Override
   public Sealing sealing(LedgerStore ledger, EvidenceStore evidence, boolean productionGate) {
     return create(ledger, evidence, gate(productionGate));
+  }
+
+  /**
+   * The sealer with the retention registrar (SEAL-1): the policy of {@link #RETENTION}, a gate that
+   * asks nothing and a {@link RetentionEngine} for {@code regime} over the given ports. Until
+   * {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is cast.
+   */
+  @Override
+  public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
+    return new DurableSeal(
+        ledger,
+        evidence,
+        clock,
+        RETENTION,
+        gate(false),
+        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
   }
 }

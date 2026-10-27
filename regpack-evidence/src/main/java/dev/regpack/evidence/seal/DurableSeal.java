@@ -13,6 +13,7 @@ import dev.regpack.ports.evidence.journal.JournalSchemas;
 import dev.regpack.ports.evidence.journal.JournalScope;
 import dev.regpack.ports.evidence.journal.JournalType;
 import dev.regpack.ports.evidence.journal.JournalWriter;
+import dev.regpack.ports.evidence.seal.RetentionRegistrar;
 import dev.regpack.ports.evidence.seal.Sealing;
 import dev.regpack.ports.ledger.DeliveryLedger;
 import dev.regpack.ports.ledger.LeaseLedger;
@@ -36,9 +37,10 @@ import java.util.Optional;
  *       intent object), before the gate, an attempt id and any put;
  *   <li>the send gate ({@link #gateResult()}); a closed gate writes nothing;
  *   <li>an attempt id from the ledger;
- *   <li>put the sealed bytes ({@link #putSealedBytes}), then the {@code DeliveryIntent} journal
- *       object ({@link #putIntentObject}); each is acknowledged by the evidence store before the
- *       next step (for P-SEALED: fsynced on two volumes);
+ *   <li>put the sealed bytes ({@link #putSealedBytes}), register their retention ({@link
+ *       #registerSealedObject}, SEAL-1, a no-op without a {@link RetentionRegistrar}), then put the
+ *       {@code DeliveryIntent} journal object ({@link #putIntentObject}); each is acknowledged by
+ *       the evidence store before the next step (for P-SEALED: fsynced on two volumes);
  *   <li>one ledger unit ({@link #commitSending}): the delivery to {@code SENDING} under the lease
  *       token, the attempt row and the manifest rows of both objects.
  * </ol>
@@ -51,6 +53,13 @@ import java.util.Optional;
  * before the first put, so that the one-line teeth of the shared suite (D-E10) can reorder the
  * steps. The class is not final for the same reason: the template methods are overridden by test
  * subclasses, one each.
+ *
+ * <p>Retention (SEAL-1, P3c1 D-K4). The sealed key is content-addressed, so a later delivery of the
+ * same bytes shares the object and its put keeps the retention of the first one. With a {@link
+ * RetentionRegistrar} (the six-argument constructor) every seal tells the registrar, right after
+ * the sealed put and before the intent put, which retention it used, so that the shared object is
+ * extended to the end of the retention of the latest delivery that names it. A registrar failure
+ * before the SENDING commit fails the seal closed. The five-argument constructor registers nothing.
  *
  * <p>{@link #beforeFirstByte} is the commit gate of the transport. It checks the attempt it is
  * given and not only the lease: the token of the attempt row, the endpoint and the state of its
@@ -91,18 +100,34 @@ public class DurableSeal implements Sealing {
   private final SendGate gate;
   private final JournalWriter journal;
   private final EpochMarker marker;
+  private final RetentionRegistrar registrar;
 
+  /** A sealer that registers no retention: a shared sealed object keeps its first retention. */
   public DurableSeal(
       LedgerStore ledger,
       EvidenceStore evidence,
       Clock clock,
       RetentionPolicy retention,
       SendGate gate) {
+    this(ledger, evidence, clock, retention, gate, RetentionRegistrar.NONE);
+  }
+
+  /**
+   * A sealer that registers the retention of every sealed object with {@code registrar} (SEAL-1).
+   */
+  public DurableSeal(
+      LedgerStore ledger,
+      EvidenceStore evidence,
+      Clock clock,
+      RetentionPolicy retention,
+      SendGate gate,
+      RetentionRegistrar registrar) {
     this.ledger = Objects.requireNonNull(ledger, "ledger");
     this.evidence = Objects.requireNonNull(evidence, "evidence");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.retention = Objects.requireNonNull(retention, "retention");
     this.gate = Objects.requireNonNull(gate, "gate");
+    this.registrar = Objects.requireNonNull(registrar, "registrar");
     this.journal = new JournalWriter(evidence, retention);
     this.marker = new EpochMarker(evidence, retention, clock);
   }
@@ -151,6 +176,17 @@ public class DurableSeal implements Sealing {
           SealStatus.EVIDENCE_UNAVAILABLE,
           Optional.empty(),
           "the evidence store could not acknowledge the sealed bytes; the ledger is unchanged");
+    }
+    try {
+      registerSealedObject(context);
+    } catch (EvidenceUnavailableException e) {
+      // before the intent object and the SENDING commit, so the delivery stays queued and the
+      // same request seals again; the sealed object is an orphan until then
+      return new SealOutcome(
+          SealStatus.EVIDENCE_UNAVAILABLE,
+          Optional.empty(),
+          "the evidence store could not extend the retention of the sealed bytes;"
+              + " the ledger is unchanged");
     }
     try {
       putIntentObject(context);
@@ -249,9 +285,9 @@ public class DurableSeal implements Sealing {
    *
    * <p>The key is content-addressed, so every delivery with the same bytes shares the object, and a
    * put of an existing key keeps the retention of the first put (the contract of {@link
-   * EvidenceStore#put}); the outcome is not looked at and nothing extends the retention here. The
-   * extension to the longest retention of all deliveries that name the object is a hand-off to the
-   * retention rows of P3c (extend-only, spec 5.4 and 11.6).
+   * EvidenceStore#put}); the outcome is not looked at and this method extends nothing. The
+   * extension to the longest retention of all deliveries that name the object is {@link
+   * #registerSealedObject} (SEAL-1, extend-only, spec 5.4 and 11.6).
    */
   protected void putSealedBytes(SealContext c) {
     SealRequest request = c.request();
@@ -260,7 +296,31 @@ public class DurableSeal implements Sealing {
             SealedKeys.of(request.intent().artifactSha256()),
             request.bytes(),
             request.mediaType(),
-            retention.retentionFor(SEALED_RETENTION_CLASS, c.intent().clockInstant())));
+            sealedRetention(c)));
+  }
+
+  /**
+   * The retention that a seal gives to its sealed object: the class {@value
+   * #SEALED_RETENTION_CLASS} from the clock instant of the seal. A policy is a function of its two
+   * arguments, so the put and the registration of one seal see the same value.
+   */
+  protected EvidenceStore.Retention sealedRetention(SealContext c) {
+    return retention.retentionFor(SEALED_RETENTION_CLASS, c.intent().clockInstant());
+  }
+
+  /**
+   * SEAL-1 (P3c1 D-K4): tells the {@link RetentionRegistrar} which retention this seal used for the
+   * sealed object, right after the sealed put and before the intent object, so that a shared object
+   * (same bytes, later delivery) is extended to the end of the retention of each later seal and the
+   * {@code retention} row follows. The five-argument constructor registers nothing. An {@link
+   * EvidenceUnavailableException} of the registrar makes the seal answer {@code
+   * EVIDENCE_UNAVAILABLE} with the ledger unchanged; any other exception, a {@code LedgerException}
+   * among them, propagates, and the delivery stays queued. A row written for a seal that never
+   * commits only over-retains.
+   */
+  protected void registerSealedObject(SealContext c) {
+    registrar.sealedObject(
+        SealedKeys.of(c.request().intent().artifactSha256()), sealedRetention(c));
   }
 
   /**

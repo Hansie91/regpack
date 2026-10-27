@@ -4,6 +4,7 @@ import static dev.regpack.testkit.contract.SealScenarioContract.reportOf;
 import static dev.regpack.testkit.contract.SealScenarioContract.request;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.regpack.evidence.retention.RetentionEngine;
 import dev.regpack.evidence.s3.S3TestService.S3Settings;
 import dev.regpack.evidence.s3.WormConfig.Verification;
 import dev.regpack.evidence.s3.client.JdkTransport;
@@ -11,6 +12,7 @@ import dev.regpack.evidence.s3.client.S3Client;
 import dev.regpack.evidence.seal.DurableSeal;
 import dev.regpack.evidence.seal.SendGate;
 import dev.regpack.inmemory.InMemoryLedgerStore;
+import dev.regpack.model.Regime;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceStore.Durability;
@@ -26,6 +28,7 @@ import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerDurability;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
@@ -36,13 +39,14 @@ import org.junit.jupiter.api.Test;
 
 /**
  * T9: binds the shared seal-and-send scenarios ({@link SealScenarioContract}, the 24 scenarios,
- * unchanged) to a {@link DurableSeal} over an in-memory ledger and {@link WormEvidenceStore} on a
- * fresh object-lock bucket, as {@code AbstractSealScenarioTest} does for the other evidence stores.
- * The backend comes from the seam of T8a (four abstract methods): a {@code *Test} subclass
- * implements it over a fresh {@code FakeS3Server}, a {@code *IT} subclass over the real service.
- * The data clock is a {@link ManualClock} at {@code 2040-03-01T00:00:00Z} (D-W13), so that every
- * retain-until stays in the server's future. Methods that need a fault switch of the fake live in
- * the {@code *Test} subclass, never here.
+ * unchanged, and since P3c1 T9 the SEAL-1 scenario, through {@link #sealingWithRetention}) to a
+ * {@link DurableSeal} over an in-memory ledger and {@link WormEvidenceStore} on a fresh object-lock
+ * bucket, as {@code AbstractSealScenarioTest} does for the other evidence stores. The backend comes
+ * from the seam of T8a (four abstract methods): a {@code *Test} subclass implements it over a fresh
+ * {@code FakeS3Server}, a {@code *IT} subclass over the real service. The data clock is a {@link
+ * ManualClock} at {@code 2040-03-01T00:00:00Z} (D-W13), so that every retain-until stays in the
+ * server's future. Methods that need a fault switch of the fake live in the {@code *Test} subclass,
+ * never here.
  *
  * <p>A subclass creates its backend lazily (the first call of a seam method), because this class's
  * {@code @BeforeEach} runs before the one of a subclass.
@@ -114,6 +118,22 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
   @Override
   public Sealing sealing(LedgerStore ledger, EvidenceStore evidence, boolean productionGate) {
     return create(ledger, evidence, gate(productionGate));
+  }
+
+  /**
+   * The sealer with the retention registrar (SEAL-1): the policy of {@link #RETENTION}, a gate that
+   * asks nothing and a {@link RetentionEngine} for {@code regime} over the given ports. Until
+   * {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is cast.
+   */
+  @Override
+  public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
+    return new DurableSeal(
+        ledger,
+        evidence,
+        clock,
+        RETENTION,
+        gate(false),
+        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
   }
 
   /** The configuration of the store under test (its bucket and endpoint). */

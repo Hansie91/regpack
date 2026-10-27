@@ -4,11 +4,13 @@ import static dev.regpack.testkit.contract.SealScenarioContract.reportOf;
 import static dev.regpack.testkit.contract.SealScenarioContract.request;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.regpack.evidence.retention.RetentionEngine;
 import dev.regpack.evidence.s3.WormEvidenceStore;
 import dev.regpack.evidence.seal.DurableSeal;
 import dev.regpack.evidence.seal.SendGate;
 import dev.regpack.evidence.verify.EvidenceVerifier;
 import dev.regpack.evidence.verify.EvidenceVerifier.Report;
+import dev.regpack.model.Regime;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceStore.Durability;
 import dev.regpack.ports.evidence.RetentionPolicy;
@@ -23,6 +25,7 @@ import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.ports.ledger.LedgerStore;
+import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.postgres.PgWormSupport.S3Settings;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
@@ -36,13 +39,14 @@ import org.junit.jupiter.api.Test;
 
 /**
  * P3b2 T11: the I1 scenarios of {@link SealScenarioContract} (the crash-point harness, 24 inherited
- * scenarios) on a real PostgreSQL ledger and P-WORM on a real S3-compatible object-lock service:
- * the ledger half and the P-WORM half of "durable before effect" together. A real-store test of the
- * job {@code evidence-worm} (group {@code worm}); it is skipped without {@code REGPACK_PG_URL} and
- * {@code REGPACK_S3_ENDPOINT} (see {@link PgTestDatabase} and {@link PgWormSupport}) and excluded
- * from the module's own run by the group. Its twin with P-SEALED is {@link PgSealScenarioIT}; the
- * one with an in-memory ledger is {@code WormSealScenariosIT} of the module {@code
- * regpack-evidence-s3}. The source-file limb of I1 is P7a.
+ * scenarios, and since P3c1 T9 the SEAL-1 scenario) on a real PostgreSQL ledger and P-WORM on a
+ * real S3-compatible object-lock service: the ledger half and the P-WORM half of "durable before
+ * effect" together. A real-store test of the job {@code evidence-worm} (group {@code worm}); it is
+ * skipped without {@code REGPACK_PG_URL} and {@code REGPACK_S3_ENDPOINT} (see {@link
+ * PgTestDatabase} and {@link PgWormSupport}) and excluded from the module's own run by the group.
+ * Its twin with P-SEALED is {@link PgSealScenarioIT}; the one with an in-memory ledger is {@code
+ * WormSealScenariosIT} of the module {@code regpack-evidence-s3}. The source-file limb of I1 is
+ * P7a.
  *
  * <p><b>Clock.</b> The shared {@code ManualClock} is set to {@value #START_TEXT} before the store
  * is opened (D-W13), so that every retain-until date (1,826 days later, in 2045) lies in the
@@ -88,6 +92,24 @@ class PgWormSealScenarioIT extends AbstractPgStoreTest implements SealScenarioCo
         RetentionPolicy.fixedDays(1826),
         new SendGate(
             productionGate ? SendGate.Requirement.production() : SendGate.Requirement.none()));
+  }
+
+  /**
+   * The sealer with the retention registrar (SEAL-1) over the PostgreSQL ledger and P-WORM: the
+   * policy of 1,826 days, a gate that asks nothing and a {@link RetentionEngine} for {@code
+   * regime}. Until {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is
+   * cast. NOT RUN LOCALLY: the class skips without {@code REGPACK_PG_URL} and {@code
+   * REGPACK_S3_ENDPOINT}; the first run is CP-1.
+   */
+  @Override
+  public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
+    return new DurableSeal(
+        ledger,
+        evidence,
+        clock(),
+        RetentionPolicy.fixedDays(1826),
+        new SendGate(SendGate.Requirement.none()),
+        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
   }
 
   // ---------------------------------------------------------------------------------------------

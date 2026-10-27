@@ -64,6 +64,8 @@ class SealingTeethTest {
       "aMarkerCommitThatNoStandbyConfirmedIsNeverClearAndNoByteLeaves";
   private static final String UNCONFIRMED_SENDING =
       "aSendingCommitThatNoStandbyConfirmedIsNeverSealed";
+  private static final String SHARED_RETENTION =
+      "theSameBytesSealedLaterExtendTheSharedObjectAndKeepOneRow";
   // the scenarios that only the P-SEALED binding has (they need real directories)
   private static final String SURVIVES_LOSS_OF_A =
       "whatTheSealAcknowledgedSurvivesTheLossOfVolumeA";
@@ -125,6 +127,9 @@ class SealingTeethTest {
     // the intent object states the identity of the delivery (I10): a constant for either field
     expected.put(HardCodedVersionScenarioTest.class, Set.of(ORDER, CRASH_BYTE, RACE));
     expected.put(HardCodedActionScenarioTest.class, Set.of(ORDER, CRASH_BYTE, RACE));
+    // SEAL-1 (P3c1 D-K4): a shared sealed object keeps the retention of its first put and no
+    // retention row exists when the sealer registers nothing
+    expected.put(ForgetsSharedRetentionScenarioTest.class, Set.of(SHARED_RETENTION));
     // P-SEALED on real directories: a store that acknowledges and loses the intent object, and a
     // volume that acknowledges and keeps nothing (each of the two, one scenario of the loss of a
     // volume), and the two wrong sealers in front of a store that has lost a volume

@@ -4,6 +4,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.model.json.Json;
 import dev.regpack.ports.connector.Transport;
@@ -41,6 +42,9 @@ import dev.regpack.ports.ledger.ManifestLedger.ManifestRow;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectEntry;
 import dev.regpack.ports.ledger.ManifestLedger.Provenance;
+import dev.regpack.ports.ledger.RetentionLedger;
+import dev.regpack.ports.ledger.RetentionLedger.AnchorEvent;
+import dev.regpack.ports.ledger.RetentionLedger.RetentionRow;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.fault.FaultInjector;
 import dev.regpack.testkit.fault.FaultPlan;
@@ -50,6 +54,7 @@ import dev.regpack.testkit.sim.Scenario;
 import dev.regpack.testkit.sim.ScenarioContext;
 import dev.regpack.testkit.sim.Scenarios;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -132,6 +137,18 @@ public interface SealScenarioContract {
    * is true and with no requirement when it is false, and with a retention policy of 1,826 days.
    */
   Sealing sealing(LedgerStore ledger, EvidenceStore evidence, boolean productionGate);
+
+  /**
+   * The sealer that also records the retention rows of what it seals (SEAL-1, spec 11.6, P3c1
+   * D-K4): after the sealed put it records the claim of the retention it used for that put, for
+   * {@code regime}, and extends the stored object to the latest date of all claims of the object.
+   * The binding builds a {@code DurableSeal} with a retention policy of 1,826 days, a gate that
+   * asks nothing and a retention registrar over the given ports. The suite passes its own ledger
+   * and evidence store, not the proxies of {@code wire} (a JDK proxy implements only {@code
+   * LedgerStore}, and the registrar needs the {@link RetentionLedger} side of the ledger); the
+   * binding casts the ledger to {@link RetentionLedger} until {@code LedgerStore} extends it.
+   */
+  Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime);
 
   // ---------------------------------------------------------------------------------------------
   // fixtures, public so that a binding can add scenarios of its own
@@ -1365,5 +1382,75 @@ public interface SealScenarioContract {
     assertThat(send(w, b, second).status()).isEqualTo(SendStatus.DELIVERED);
     assertI1(a, destination);
     assertI1(b, destination);
+  }
+
+  /**
+   * SEAL-1 (spec 5.4 and 11.6, P3c1 D-K4): the sealed key is content-addressed, so a later delivery
+   * of the same bytes shares the object, and a put of an existing key keeps the retention of the
+   * first put. The retention of the shared object must still reach the end of the retention of the
+   * LATEST delivery that names it; otherwise the object could expire (and its key could be
+   * destroyed) while a later delivery still depends on it. The later seal extends the stored object
+   * through the evidence store port and the one {@code retention} row of the object takes the later
+   * date; the manifest keeps its one sealed row. Delivery A is sealed at t0 and delivery B, with
+   * identical bytes, 30 days later, both with the policy of 1,826 days.
+   */
+  @Test
+  default void theSameBytesSealedLaterExtendTheSharedObjectAndKeepOneRow() {
+    EndpointKey endpoint = LedgerFixtures.endpoint("RETAIN1");
+    LeaseToken token = lease(ledger(), endpoint, "A");
+    byte[] bytes = reportOf("one report for two deliveries thirty days apart");
+    Case a = newDelivery(endpoint, token, "BK-RETAIN-A", bytes);
+    Case b = newDelivery(endpoint, token, "BK-RETAIN-B", bytes);
+    Regime regime = new Regime("mifir.eu.rts22");
+    // the suite's own stores: the retention side of the ledger is not on the proxies of wire()
+    Sealing sealing = sealingWithRetention(ledger(), evidence(), regime);
+    RetentionLedger rows = (RetentionLedger) ledger();
+    EvidenceKey sealedKey = sealedKeyOf(Sha256.of(bytes));
+    Duration policy = Duration.ofDays(1826);
+    Instant t0 = clock().now();
+
+    SealOutcome first = sealing.seal(a.request());
+    assertThat(first.status()).as("seal A: " + first.detail()).isEqualTo(SealStatus.SEALED);
+
+    // delivery A: the object has the retention of its put, and one row says so
+    assertThat(evidence().get(sealedKey).orElseThrow().retention().retainUntil())
+        .as("the retain-until of the object after A")
+        .isEqualTo(t0.plus(policy));
+    List<RetentionRow> afterA = rows.retentionRows("sealed/", Optional.empty(), 100);
+    assertThat(afterA).as("the retention rows of sealed objects after A").hasSize(1);
+    RetentionRow rowA = afterA.get(0);
+    assertThat(rowA.claim().artifact()).isEqualTo(sealedKey);
+    assertThat(rowA.claim().regime()).isEqualTo(regime);
+    assertThat(rowA.claim().anchor()).isEqualTo(AnchorEvent.OBJECT_WRITTEN);
+    assertThat(rowA.claim().retentionClass()).isEqualTo("sealed");
+    assertThat(rowA.claim().retainUntil()).contains(t0.plus(policy));
+    assertThat(rowA.legalHold()).isFalse();
+
+    clock().advance(Duration.ofDays(30));
+    Instant later = clock().now().plus(policy);
+    SealOutcome second = sealing.seal(b.request());
+    assertThat(second.status()).as("seal B: " + second.detail()).isEqualTo(SealStatus.SEALED);
+
+    // delivery B: the object is extended to the end of B's retention, and the one row follows
+    assertThat(evidence().get(sealedKey).orElseThrow().retention().retainUntil())
+        .as("the retain-until of the shared object after B (SEAL-1)")
+        .isEqualTo(later);
+    List<RetentionRow> afterB = rows.retentionRows("sealed/", Optional.empty(), 100);
+    assertThat(afterB).as("still one retention row for the shared object").hasSize(1);
+    assertThat(afterB.get(0).claim().artifact()).isEqualTo(sealedKey);
+    assertThat(afterB.get(0).claim().retainUntil()).contains(later);
+    assertThat(afterB.get(0).recordedAt()).as("the first row, merged").isEqualTo(rowA.recordedAt());
+    assertThat(rows.retentionRows("", Optional.empty(), 100))
+        .as("journal objects get no row in this slice")
+        .hasSize(1);
+
+    // the manifest is not touched by the extension: one sealed row, and it names A
+    List<ManifestRow> sealedRows =
+        manifest().stream()
+            .filter(row -> row.entry().objectClass() == ObjectClass.SEALED_FILE)
+            .toList();
+    assertThat(sealedRows).as("one manifest row for the shared sealed object").hasSize(1);
+    assertThat(sealedRows.get(0).attempt()).contains(first.attempt().orElseThrow());
+    assertThat(unrecorded()).isEmpty();
   }
 }

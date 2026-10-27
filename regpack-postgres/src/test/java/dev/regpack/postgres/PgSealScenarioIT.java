@@ -5,12 +5,14 @@ import static dev.regpack.testkit.contract.SealScenarioContract.request;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import dev.regpack.evidence.retention.RetentionEngine;
 import dev.regpack.evidence.seal.DurableSeal;
 import dev.regpack.evidence.seal.SealedKeys;
 import dev.regpack.evidence.seal.SendGate;
 import dev.regpack.evidence.sealed.SealedEvidenceStore;
 import dev.regpack.evidence.verify.EvidenceVerifier;
 import dev.regpack.evidence.verify.EvidenceVerifier.Report;
+import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
@@ -31,6 +33,7 @@ import dev.regpack.ports.ledger.ManifestLedger.ManifestRow;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectEntry;
 import dev.regpack.ports.ledger.ManifestLedger.Provenance;
+import dev.regpack.ports.ledger.RetentionLedger;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
 import java.io.IOException;
@@ -124,6 +127,23 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
         RetentionPolicy.fixedDays(1826),
         new SendGate(
             productionGate ? SendGate.Requirement.production() : SendGate.Requirement.none()));
+  }
+
+  /**
+   * The sealer with the retention registrar (SEAL-1) over the PostgreSQL ledger and P-SEALED: the
+   * policy of 1,826 days, a gate that asks nothing and a {@link RetentionEngine} for {@code
+   * regime}. Until {@code LedgerStore} extends {@code RetentionLedger} (P3c1 T11) the ledger is
+   * cast. NOT RUN LOCALLY: the class skips without {@code REGPACK_PG_URL}; the first run is CP-1.
+   */
+  @Override
+  public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
+    return new DurableSeal(
+        ledger,
+        evidence,
+        clock(),
+        RetentionPolicy.fixedDays(1826),
+        new SendGate(SendGate.Requirement.none()),
+        new RetentionEngine((RetentionLedger) ledger, evidence, regime));
   }
 
   // ---------------------------------------------------------------------------------------------
