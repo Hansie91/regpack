@@ -9,6 +9,7 @@ import dev.regpack.model.Sha256;
 import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.crypto.SubjectHash;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.LedgerStore;
 import java.time.Duration;
@@ -29,11 +30,12 @@ import javax.sql.DataSource;
  * and deliveries; T18 reports (subjects, the TRN, versions and the reportable unit of work); P3b1
  * T12 the object manifest; P3b1 T17 the durability query of {@link
  * dev.regpack.ports.ledger.LedgerDurability} ({@link PgLedgerDurability}); P3c1 T11 the {@code
- * retention} rows ({@link PgRetention}). No method is left unbuilt: {@code NoStubsLeftTest} scans
- * this module's main sources for the exception of an unbuilt method and for the placeholder text of
- * an unbuilt task. The integrity queries of T19 are not part of the {@link LedgerStore} port:
- * {@link LedgerIntegrity} reads the same schema through a {@link DataSource} and the schema name of
- * the {@link Config}.
+ * retention} rows ({@link PgRetention}); P3c1 T12 the data-subject index ({@link PgSubjectIndex})
+ * and the envelope bodies of {@link PgReports}. No method is left unbuilt: {@code NoStubsLeftTest}
+ * scans this module's main sources for the exception of an unbuilt method and for the placeholder
+ * text of an unbuilt task. The integrity queries of T19 are not part of the {@link LedgerStore}
+ * port: {@link LedgerIntegrity} reads the same schema through a {@link DataSource} and the schema
+ * name of the {@link Config}.
  */
 public final class PgLedgerStore implements LedgerStore {
   /**
@@ -50,13 +52,18 @@ public final class PgLedgerStore implements LedgerStore {
    *     on}
    * @param lockTimeout {@code lock_timeout} of every unit, a positive whole number of milliseconds
    * @param statementTimeout {@code statement_timeout} of every unit, likewise
+   * @param requireEnvelopeBodies whether {@code commitReportable} refuses a report body for which
+   *     {@code Envelope.isEnvelope} does not hold ({@code IllegalArgumentException}, before any
+   *     statement); false in {@link #forSchema} (a plain body is still stored, with {@code
+   *     body_encoding} 0), true in {@link #production} (P3c1 A6, D-K6)
    */
   public record Config(
       String schema,
       boolean partitionsOnDemand,
       boolean forceSynchronousCommit,
       Duration lockTimeout,
-      Duration statementTimeout) {
+      Duration statementTimeout,
+      boolean requireEnvelopeBodies) {
     public static final Duration DEFAULT_LOCK_TIMEOUT = Duration.ofSeconds(5);
     public static final Duration DEFAULT_STATEMENT_TIMEOUT = Duration.ofSeconds(60);
 
@@ -66,26 +73,61 @@ public final class PgLedgerStore implements LedgerStore {
       requirePositiveWholeMillis(statementTimeout, "statementTimeout");
     }
 
-    /** The defaults: partitions on demand, synchronous commit forced, timeouts of 5 and 60 s. */
+    /**
+     * The defaults: partitions on demand, synchronous commit forced, timeouts of 5 and 60 s, plain
+     * bodies accepted.
+     */
     public static Config forSchema(String schema) {
-      return new Config(schema, true, true, DEFAULT_LOCK_TIMEOUT, DEFAULT_STATEMENT_TIMEOUT);
+      return new Config(schema, true, true, DEFAULT_LOCK_TIMEOUT, DEFAULT_STATEMENT_TIMEOUT, false);
+    }
+
+    /**
+     * The defaults of {@link #forSchema} with envelope bodies required: the configuration of a
+     * ledger that may hold production data (P3c1 C6; the wiring and gate G8 are not part of the
+     * slice).
+     */
+    public static Config production(String schema) {
+      return forSchema(schema).withEnvelopeBodiesRequired(true);
     }
 
     public Config withPartitionsOnDemand(boolean value) {
-      return new Config(schema, value, forceSynchronousCommit, lockTimeout, statementTimeout);
+      return new Config(
+          schema,
+          value,
+          forceSynchronousCommit,
+          lockTimeout,
+          statementTimeout,
+          requireEnvelopeBodies);
     }
 
     public Config withForceSynchronousCommit(boolean value) {
-      return new Config(schema, partitionsOnDemand, value, lockTimeout, statementTimeout);
+      return new Config(
+          schema, partitionsOnDemand, value, lockTimeout, statementTimeout, requireEnvelopeBodies);
     }
 
     public Config withLockTimeout(Duration value) {
       return new Config(
-          schema, partitionsOnDemand, forceSynchronousCommit, value, statementTimeout);
+          schema,
+          partitionsOnDemand,
+          forceSynchronousCommit,
+          value,
+          statementTimeout,
+          requireEnvelopeBodies);
     }
 
     public Config withStatementTimeout(Duration value) {
-      return new Config(schema, partitionsOnDemand, forceSynchronousCommit, lockTimeout, value);
+      return new Config(
+          schema,
+          partitionsOnDemand,
+          forceSynchronousCommit,
+          lockTimeout,
+          value,
+          requireEnvelopeBodies);
+    }
+
+    public Config withEnvelopeBodiesRequired(boolean value) {
+      return new Config(
+          schema, partitionsOnDemand, forceSynchronousCommit, lockTimeout, statementTimeout, value);
     }
 
     private static void requirePositiveWholeMillis(Duration duration, String name) {
@@ -116,6 +158,7 @@ public final class PgLedgerStore implements LedgerStore {
   private final PgReports reports;
   private final PgManifest manifest;
   private final PgRetention retention;
+  private final PgSubjectIndex subjectIndex;
   private final PgLedgerDurability durability;
 
   public PgLedgerStore(DataSource dataSource, Clock clock, Config config) {
@@ -132,6 +175,7 @@ public final class PgLedgerStore implements LedgerStore {
     this.reports = new PgReports(dataSource, clock, config, decisions);
     this.manifest = new PgManifest(dataSource, clock, config);
     this.retention = new PgRetention(dataSource, clock, config);
+    this.subjectIndex = new PgSubjectIndex(dataSource, clock, config);
     this.durability = new PgLedgerDurability(dataSource, config);
   }
 
@@ -320,6 +364,23 @@ public final class PgLedgerStore implements LedgerStore {
   public List<RetentionRow> expiredRetention(
       Instant asOf, Optional<RetentionRow> after, int limit) {
     return retention.expiredRetention(asOf, after, limit);
+  }
+
+  // SubjectIndexLedger (P3c1 T12)
+
+  @Override
+  public void indexSubjects(List<SubjectEntry> entries) {
+    subjectIndex.indexSubjects(entries);
+  }
+
+  @Override
+  public List<SubjectRef> subjectRefs(SubjectHash hash, Optional<SubjectRef> after, int limit) {
+    return subjectIndex.subjectRefs(hash, after, limit);
+  }
+
+  @Override
+  public int removeSubjectRefs(SubjectRef ref) {
+    return subjectIndex.removeSubjectRefs(ref);
   }
 
   // LedgerDurability (P3b1 T17)

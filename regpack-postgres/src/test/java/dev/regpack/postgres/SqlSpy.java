@@ -11,6 +11,7 @@ import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -178,9 +179,10 @@ final class SqlSpy {
   /**
    * Also records the binds that are not text, as {@code bind <kind> <index>=<value>} with the kind
    * {@code short}, {@code int}, {@code long}, {@code boolean}, {@code object} (the {@code
-   * toString()} of the value, for an {@code OffsetDateTime} its ISO text) or {@code null} (the SQL
-   * type code). Off by default: a recorded text bind is {@code bind <index>=<value>} and no other
-   * test sees the new events.
+   * toString()} of the value, for an {@code OffsetDateTime} its ISO text), {@code bytes} (the
+   * lower-case hex of a {@code setBytes} value) or {@code null} (the SQL type code). Off by
+   * default: a recorded text bind is {@code bind <index>=<value>} and no other test sees the new
+   * events.
    */
   SqlSpy recordingTypedBinds() {
     this.typedBinds = true;
@@ -301,6 +303,11 @@ final class SqlSpy {
             }
           } else if (name.equals("setString")) {
             events.add("bind " + args[0] + "=" + args[1]);
+          } else if (typedBinds
+              && name.equals("setBytes")
+              && args != null
+              && args[1] instanceof byte[] bytes) {
+            events.add("bind bytes " + args[0] + "=" + HexFormat.of().formatHex(bytes));
           } else if (typedBinds && TYPED_SETTERS.contains(name) && args != null) {
             events.add(
                 "bind "

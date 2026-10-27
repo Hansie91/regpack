@@ -6,6 +6,7 @@ import dev.regpack.postgres.mutants.NoInFlightIndexPgLedgerContractIT;
 import dev.regpack.postgres.mutants.NoIngestKeyPgLedgerContractIT;
 import dev.regpack.postgres.mutants.NoManifestKeyPgLedgerContractIT;
 import dev.regpack.postgres.mutants.NoRetentionKeyPgLedgerContractIT;
+import dev.regpack.postgres.mutants.NoSubjectIndexKeyPgLedgerContractIT;
 import dev.regpack.postgres.mutants.NoSubjectKeyPgLedgerContractIT;
 import dev.regpack.postgres.mutants.NoTrnLeiKeyPgLedgerContractIT;
 import dev.regpack.postgres.mutants.SchemaMutantLedgerContract;
@@ -17,17 +18,17 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * The schema mutants of T20 (six), T12 (the seventh, {@code object_manifest_pk}) and P3c1 T11 (the
- * eighth, {@code retention_pk}) and the contract tests that must fail on each (the table of the
- * plan). Only methods of the contract suites can be named: {@code PgDecisionsIT}, {@code
- * PgConstraintsIT} and {@code PgFencingIT} methods are not part of a mutant class. The
- * cross-partition test has no schema mutant; its teeth is the characterisation {@code
- * PgDecisionsIT#theUniqueIndexesAloneCannotSeeAcrossPartitions}. For a constraint that the adapter
- * uses as an {@code ON CONFLICT} arbiter ({@code decision_idem_key}, {@code report_subject_key},
- * {@code ingest_pk}, {@code decision_head_pk}, {@code object_manifest_pk}, {@code retention_pk})
- * the mutant fails with a missing-arbiter SQL error, which proves that the adapter relies on the
- * named constraint; {@code delivery_in_flight} and {@code trn_assignment_lei_trn_key} give
- * behavioural teeth.
+ * The schema mutants of T20 (six), T12 (the seventh, {@code object_manifest_pk}), P3c1 T11 (the
+ * eighth, {@code retention_pk}) and P3c1 T12 (the ninth, {@code subject_index_pk}) and the contract
+ * tests that must fail on each (the table of the plan). Only methods of the contract suites can be
+ * named: {@code PgDecisionsIT}, {@code PgConstraintsIT} and {@code PgFencingIT} methods are not
+ * part of a mutant class. The cross-partition test has no schema mutant; its teeth is the
+ * characterisation {@code PgDecisionsIT#theUniqueIndexesAloneCannotSeeAcrossPartitions}. For a
+ * constraint that the adapter uses as an {@code ON CONFLICT} arbiter ({@code decision_idem_key},
+ * {@code report_subject_key}, {@code ingest_pk}, {@code decision_head_pk}, {@code
+ * object_manifest_pk}, {@code retention_pk}, {@code subject_index_pk}) the mutant fails with a
+ * missing-arbiter SQL error, which proves that the adapter relies on the named constraint; {@code
+ * delivery_in_flight} and {@code trn_assignment_lei_trn_key} give behavioural teeth.
  */
 final class SchemaMutants {
   /**
@@ -106,6 +107,12 @@ final class SchemaMutants {
             NoRetentionKeyPgLedgerContractIT.MUTATION,
             Set.of("twoRegimesGiveTwoRowsAndOneRegimeTwiceGivesOne"),
             // the upsert names retention_pk as its arbiter, as the manifest insert does
+            MISSING_ARBITER),
+        new Entry(
+            NoSubjectIndexKeyPgLedgerContractIT.class,
+            NoSubjectIndexKeyPgLedgerContractIT.MUTATION,
+            Set.of("indexingTheSameEntryTwiceIsOneRow"),
+            // the insert names subject_index_pk as its arbiter, as the manifest insert does
             MISSING_ARBITER));
   }
 

@@ -287,7 +287,7 @@ final class PgManifest {
    * answer that makes the caller add the barrier: a barrier that was not needed costs one lock, a
    * barrier that was missing costs an acknowledgement.
    */
-  private static boolean anyRowInserted(int[] counts) {
+  static boolean anyRowInserted(int[] counts) {
     for (int count : counts) {
       if (count > 0) {
         return true;

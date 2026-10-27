@@ -232,7 +232,8 @@ class UnitTest {
           .as("statementTimeout %s", tooLong)
           .isInstanceOf(IllegalArgumentException.class)
           .hasMessageContaining("statementTimeout");
-      assertThatThrownBy(() -> new Config("t1_1", true, true, tooLong, Duration.ofSeconds(1)))
+      assertThatThrownBy(
+              () -> new Config("t1_1", true, true, tooLong, Duration.ofSeconds(1), false))
           .isInstanceOf(IllegalArgumentException.class);
     }
   }
@@ -255,8 +256,28 @@ class UnitTest {
     assertThatThrownBy(() -> CONFIG.withLockTimeout(Duration.ofNanos(1_500_000)))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(
-            () -> new Config(null, true, true, Duration.ofSeconds(1), Duration.ofDays(1)))
+            () -> new Config(null, true, true, Duration.ofSeconds(1), Duration.ofDays(1), false))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  /**
+   * P3c1 T12: the sixth component, {@code requireEnvelopeBodies}, is false for every configuration
+   * but the production one, and the production one is {@code forSchema} with it on.
+   */
+  @Test
+  void theProductionConfigRequiresEnvelopeBodiesAndNoOtherConfigDoes() {
+    assertThat(Config.production(SCHEMA).requireEnvelopeBodies()).isTrue();
+    assertThat(CONFIG.requireEnvelopeBodies()).isFalse();
+    assertThat(
+            new Config(SCHEMA, true, true, Duration.ofSeconds(5), Duration.ofSeconds(60), true)
+                .requireEnvelopeBodies())
+        .isTrue();
+    assertThat(
+            new Config(SCHEMA, true, true, Duration.ofSeconds(5), Duration.ofSeconds(60), false)
+                .requireEnvelopeBodies())
+        .isFalse();
+    assertThat(Config.production(SCHEMA).withEnvelopeBodiesRequired(false)).isEqualTo(CONFIG);
+    assertThat(CONFIG.withEnvelopeBodiesRequired(true)).isEqualTo(Config.production(SCHEMA));
   }
 
   // ------------------------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.crypto.Envelope;
 import dev.regpack.ports.ledger.DecisionLedger.BatchCommit;
 import dev.regpack.ports.ledger.DecisionLedger.CommitStatus;
 import dev.regpack.ports.ledger.DecisionLedger.Committed;
@@ -109,10 +110,30 @@ import javax.sql.DataSource;
  * <p>Nothing is checked in Java that the schema can decide (D-L3); the Java checks are the argument
  * rules of rule 2, which need no row, and the stored-TRN cases, which the port defines as {@link
  * IllegalArgumentException}.
+ *
+ * <p><b>Envelope bodies (P3c1 D-K6, A6).</b> A body is opaque bytes. It is stored with {@code
+ * body_encoding} {@value #ENVELOPE_ENCODING} when {@code Envelope.isEnvelope} holds and with
+ * {@value #BODY_ENCODING} otherwise, per version. A ledger built with {@code
+ * Config.requireEnvelopeBodies} refuses every other body, the empty one included, with an {@link
+ * IllegalArgumentException} whose text holds nothing of the body, for every version of every
+ * decision of the request and before any connection is opened: the check is part of the validation
+ * that {@link #commitReportable} and {@link #commitReportableIn} share, the only two writers of
+ * {@code report_version.body}, and it runs before the per-version decisions of the unit (a
+ * redelivered decision, an unchanged version), so a plain body is refused also when the version
+ * exists. The reads accept both encodings.
  */
 final class PgReports {
-  /** {@code report_version.body_encoding}: 0 is the plain body until the key hierarchy of P3c. */
+  /** {@code report_version.body_encoding}: 0 is a body that is not an envelope (a plain body). */
   static final short BODY_ENCODING = 0;
+
+  /**
+   * {@code report_version.body_encoding}: 1 is a body for which {@code Envelope.isEnvelope} holds
+   * (P3c1 D-K6). The ledger decides by that test alone: it holds no key and does not authenticate.
+   */
+  static final short ENVELOPE_ENCODING = 1;
+
+  /** The text of the refusal of a plain body; it is also that of the in-memory ledger. */
+  static final String PLAIN_BODY_REFUSED = "a report body must be an envelope";
 
   /** Rule 7: a version whose latest delivery is in one of these states is not compared against. */
   static final Set<DeliveryState> DEAD =
@@ -278,9 +299,10 @@ final class PgReports {
   private record Plan(ReportableCommit commit, Prepared prepared, Set<EndpointKey> endpoints) {}
 
   /**
-   * Validates the whole request before any connection is opened (rule 2 and the decision rules).
+   * Validates the whole request before any connection is opened (rule 2, the decision rules and the
+   * envelope rule of the configuration).
    */
-  private static Plan plan(ReportableCommit commit) {
+  private Plan plan(ReportableCommit commit) {
     Objects.requireNonNull(commit, "commit");
     List<NewDecision> newDecisions = new ArrayList<>(commit.decisions().size());
     for (ReportableDecision reportable : commit.decisions()) {
@@ -290,7 +312,7 @@ final class PgReports {
         PgDecisions.prepare(new BatchCommit(newDecisions, commit.completesOutbox()));
     Set<EndpointKey> endpoints = new LinkedHashSet<>();
     for (ReportableDecision reportable : commit.decisions()) {
-      validateVersions(reportable);
+      validateVersions(reportable, config.requireEnvelopeBodies());
       for (NewVersion version : reportable.versions()) {
         endpoints.add(version.endpoint());
       }
@@ -298,12 +320,20 @@ final class PgReports {
     return new Plan(commit, prepared, Collections.unmodifiableSet(endpoints));
   }
 
-  /** Rule 2: a version needs a REPORT decision, a leg of it, once, and its own chain. */
-  private static void validateVersions(ReportableDecision reportable) {
+  /**
+   * Rule 2: a version needs a REPORT decision, a leg of it, once, and its own chain; and, when the
+   * configuration requires envelopes, a body that is one (the single test of the ledger, D-K6; the
+   * message holds nothing of the body). The envelope check comes first for each version, as in the
+   * in-memory ledger.
+   */
+  private static void validateVersions(ReportableDecision reportable, boolean requireEnvelopes) {
     DecisionBody body = reportable.decision().body();
     Set<Leg> seen = EnumSet.noneOf(Leg.class);
     for (NewVersion version : reportable.versions()) {
       SubjectKey subject = version.subject();
+      if (requireEnvelopes && !Envelope.isEnvelope(version.body())) {
+        throw new IllegalArgumentException(PLAIN_BODY_REFUSED);
+      }
       if (body.outcome() != Outcome.REPORT) {
         throw new IllegalArgumentException("a version needs a REPORT decision: " + body.outcome());
       }
@@ -618,8 +648,9 @@ final class PgReports {
       statement.setObject(4, written.day());
       statement.setString(5, version.action());
       statement.setString(6, version.logicalHash().hex());
-      statement.setBytes(7, version.body());
-      statement.setShort(8, BODY_ENCODING);
+      byte[] body = version.body();
+      statement.setBytes(7, body);
+      statement.setShort(8, Envelope.isEnvelope(body) ? ENVELOPE_ENCODING : BODY_ENCODING);
       statement.setShort(9, Codes.of(version.origin()));
       statement.setObject(10, PgTime.timestamp(now));
       statement.executeUpdate();
@@ -722,7 +753,8 @@ final class PgReports {
             try (ResultSet rows = statement.executeQuery()) {
               List<StoredVersion> stored = new ArrayList<>();
               while (rows.next()) {
-                if (rows.getShort(6) != BODY_ENCODING) {
+                short encoding = rows.getShort(6);
+                if (encoding != BODY_ENCODING && encoding != ENVELOPE_ENCODING) {
                   throw new LedgerException("a stored report version has an unknown body encoding");
                 }
                 long delivery = rows.getLong(8);

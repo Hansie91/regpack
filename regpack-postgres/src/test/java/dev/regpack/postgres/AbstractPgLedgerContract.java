@@ -11,6 +11,7 @@ import dev.regpack.testkit.contract.ManifestLedgerContract;
 import dev.regpack.testkit.contract.ReportLedgerContract;
 import dev.regpack.testkit.contract.RetentionLedgerContract;
 import dev.regpack.testkit.contract.StorableValuesLedgerContract;
+import dev.regpack.testkit.contract.SubjectIndexLedgerContract;
 
 /**
  * The binding of the ledger contract suites to the PostgreSQL adapter (Convention 4): every test
@@ -19,7 +20,8 @@ import dev.regpack.testkit.contract.StorableValuesLedgerContract;
  * contexts; T17: leases, deliveries and the fencing scenarios; T18: the report suites and the exit
  * fixtures; P3b1 T12: the object manifest; P3b1 T17: {@code LedgerDurabilityContract}, bound once
  * the placeholder of the durability query was replaced by {@link PgLedgerDurability}; P3c1 T11:
- * {@code RetentionLedgerContract}, the 24 methods of the retention rows). Without a server every
+ * {@code RetentionLedgerContract}, the 24 methods of the retention rows; P3c1 T12: {@code
+ * SubjectIndexLedgerContract}, the 11 methods of the data-subject index). Without a server every
  * test of a subclass is skipped by an assumption. The class is public so that the schema mutants of
  * T20 (package {@code mutants}) can bind the same suites.
  *
@@ -39,6 +41,7 @@ public abstract class AbstractPgLedgerContract extends AbstractPgStoreTest
         StorableValuesLedgerContract,
         ManifestLedgerContract,
         RetentionLedgerContract,
+        SubjectIndexLedgerContract,
         LedgerDurabilityContract {
   @Override
   public LedgerStore ledger() {

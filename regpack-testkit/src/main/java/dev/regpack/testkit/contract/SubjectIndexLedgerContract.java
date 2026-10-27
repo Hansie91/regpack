@@ -20,7 +20,6 @@ import org.junit.jupiter.api.Test;
  * Contract of the data-subject index of a {@link LedgerStore} (spec 11.6; P3c1 A9, D4, D-K5 and D6
  * of the V003 document): rows of (keyed hash, kind, reference), added idempotently and all or
  * nothing, listed by hash in the order (kind, reference) with strict paging, deleted by reference.
- * The port is reached by a cast of {@link #ledger()} until {@code LedgerStore} extends it.
  *
  * <p>Every order below is a hand-written literal in code point order (the order of the UTF-8
  * bytes), never the order an adapter happens to hold the rows in: on PostgreSQL a column with the
@@ -31,7 +30,7 @@ public interface SubjectIndexLedgerContract {
   LedgerStore ledger();
 
   private SubjectIndexLedger index() {
-    return (SubjectIndexLedger) ledger();
+    return ledger();
   }
 
   /** A subject hash of 64 lowercase hex digits that differs for each {@code n}. */

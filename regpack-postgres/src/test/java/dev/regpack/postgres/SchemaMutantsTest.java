@@ -27,8 +27,8 @@ import org.junit.jupiter.api.Test;
  * Checks that the schema mutants of T20 are what the plan's table says, without a server: a typo in
  * a constraint name or in a test name would make {@link PgSchemaTeethIT} fail (or, worse, pass
  * vacuously) only on a server: the six mutants of P3a first ran at P3a CP-3, the seventh (T12) at
- * P3b1 CP-1, the eighth (P3c1 T11) first runs at P3c1 CP-1. The real-store behaviour of the mutants
- * is proven by that class.
+ * P3b1 CP-1, the eighth (P3c1 T11) and the ninth (P3c1 T12) first run at P3c1 CP-1. The real-store
+ * behaviour of the mutants is proven by that class.
  */
 class SchemaMutantsTest {
   private static final Set<String> PLANNED_OBJECTS =
@@ -40,31 +40,32 @@ class SchemaMutantsTest {
           "decision_head_pk",
           "ingest_pk",
           "object_manifest_pk",
-          "retention_pk");
+          "retention_pk",
+          "subject_index_pk");
 
   @Test
-  void theEightMutationsOfThePlanAreRegisteredOnceEach() {
+  void theNineMutationsOfThePlanAreRegisteredOnceEach() {
     List<String> objects = SchemaMutants.all().stream().map(e -> e.mutation().name()).toList();
 
     assertThat(objects).containsExactlyInAnyOrderElementsOf(PLANNED_OBJECTS);
     assertThat(objects).doesNotHaveDuplicates();
-    assertThat(SchemaMutants.all().stream().map(Entry::type).distinct().count()).isEqualTo(8);
+    assertThat(SchemaMutants.all().stream().map(Entry::type).distinct().count()).isEqualTo(9);
     for (Entry entry : SchemaMutants.all()) {
       assertThat(entry.caughtBy()).as(entry.type().getSimpleName()).isNotEmpty();
     }
   }
 
   /**
-   * The mutants of the two constraints that an insert names as its arbiter ({@code
-   * object_manifest_pk} of T12, {@code retention_pk} of P3c1 T11) are caught by a failure that says
-   * what it proves: the insert names the constraint, so without it the server answers 42704 and the
-   * adapter writes {@code sqlstate=42704}. A run in which the same test fails for another reason (a
-   * typo in the insert, a wrong parameter type) is a miss. The six mutants of P3a expect any
-   * failure.
+   * The mutants of the three constraints that an insert names as its arbiter ({@code
+   * object_manifest_pk} of T12, {@code retention_pk} of P3c1 T11, {@code subject_index_pk} of P3c1
+   * T12) are caught by a failure that says what it proves: the insert names the constraint, so
+   * without it the server answers 42704 and the adapter writes {@code sqlstate=42704}. A run in
+   * which the same test fails for another reason (a typo in the insert, a wrong parameter type) is
+   * a miss. The six mutants of P3a expect any failure.
    */
   @Test
-  void theTwoArbiterMutantsExpectTheMissingArbiterAndTheSixOfP3aAnyFailure() {
-    Set<String> arbiterBased = Set.of("object_manifest_pk", "retention_pk");
+  void theThreeArbiterMutantsExpectTheMissingArbiterAndTheSixOfP3aAnyFailure() {
+    Set<String> arbiterBased = Set.of("object_manifest_pk", "retention_pk", "subject_index_pk");
     for (Entry entry : SchemaMutants.all()) {
       if (arbiterBased.contains(entry.mutation().name())) {
         assertThat(entry.expectedFailure())
