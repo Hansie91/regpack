@@ -24,6 +24,7 @@
     <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
     <dependency><groupId>org.checkerframework</groupId><artifactId>checker-qual</artifactId><version>${checker-qual.version}</version></dependency>
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-testkit</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>dev.regpack</groupId><artifactId>regpack-inmemory</artifactId><scope>test</scope></dependency>
     <!-- T14b: P-SEALED and the sealer for the I1 scenarios on real PostgreSQL; test scope only, in this direction only -->
     <dependency><groupId>dev.regpack</groupId><artifactId>regpack-evidence</artifactId><scope>test</scope></dependency>
     <!-- P3b2 T11: P-WORM and its S3 client for the PostgreSQL-plus-S3 integration tests (group worm); test scope only, in this direction only -->

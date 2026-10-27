@@ -214,6 +214,7 @@ public interface EnvelopeBodyLedgerContract {
       assertThatThrownBy(() -> ledger.commitReportable(refused))
           .as("refused unit %d", i)
           .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope")
           .satisfies(
               e -> {
                 assertThat(String.valueOf(e.getMessage())).doesNotContain("SECRET-PLAIN-TEXT");
