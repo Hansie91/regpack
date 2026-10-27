@@ -10,7 +10,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.EventIdentity;
 import dev.regpack.model.Leg;
+import dev.regpack.model.Outcome;
 import dev.regpack.model.Regime;
+import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.ports.crypto.Envelope;
 import dev.regpack.ports.crypto.Envelope.Header;
 import dev.regpack.ports.crypto.Envelope.Kind;
@@ -22,6 +24,7 @@ import dev.regpack.ports.ledger.ReportLedger.ReportableCommitted;
 import dev.regpack.ports.ledger.ReportLedger.ReportableDecision;
 import dev.regpack.ports.ledger.ReportLedger.StoredVersion;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -285,6 +288,44 @@ public interface EnvelopeBodyLedgerContract {
     assertThat(versions).hasSize(1);
     assertThat(versions.get(0).body()).isEqualTo(envelopeBody());
     assertThat(commitOneVersion(ledger, envelopeBody()).versions()).hasSize(1);
+  }
+
+  /**
+   * The envelope rule is the first check of each version: a request that breaks it and another rule
+   * (here a version of a decision that is not a REPORT) is refused for its body, and the same
+   * request with an envelope is refused for the other rule. A ledger that checks the envelope after
+   * the other rules gives another text for the same request.
+   */
+  @Test
+  default void theEnvelopeRuleIsCheckedBeforeTheOtherRulesOfAVersion() {
+    LedgerStore ledger = ledgerRequiringEnvelopes();
+    DecisionBody doNotReport =
+        LedgerFixtures.body(
+            "E1",
+            MIFIR_REGIME,
+            "ctx",
+            "d1",
+            Outcome.DO_NOT_REPORT,
+            Instant.parse("2026-10-09T10:00:00Z"));
+
+    assertThatThrownBy(
+            () ->
+                ledger.commitReportable(
+                    unit(
+                        with(
+                            new NewDecision(doNotReport, 0),
+                            version("E1", Leg.MARKET, "TRNE1M", plainBody())))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("a report body must be an envelope");
+    assertThatThrownBy(
+            () ->
+                ledger.commitReportable(
+                    unit(
+                        with(
+                            new NewDecision(doNotReport, 0),
+                            version("E1", Leg.MARKET, "TRNE1M", envelopeBody())))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageStartingWith("a version needs a REPORT decision");
   }
 
   /**

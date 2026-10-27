@@ -16,9 +16,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -102,35 +104,53 @@ public interface RetentionLedgerContract {
 
   /**
    * The pages of {@code retentionRows} with {@code limit}, walked with the artifact of the last
-   * row.
+   * row. A page that repeats a row of an earlier page ends the walk at once: a keyset that does not
+   * move past its bound would otherwise ask for the same page until the guard, one connection a
+   * page on a real server.
    */
   private List<List<RetentionRow>> walkRetentionRows(String prefix, int limit) {
     List<List<RetentionRow>> pages = new ArrayList<>();
+    Set<RetentionRow> seen = new HashSet<>();
     Optional<EvidenceKey> after = Optional.empty();
     for (int guard = 0; guard < 2_000; guard++) {
       List<RetentionRow> page = ledger().retentionRows(prefix, after, limit);
       if (page.isEmpty()) {
         return pages;
       }
+      requireNew(seen, page, "retentionRows");
       pages.add(page);
       after = Optional.of(page.get(page.size() - 1).claim().artifact());
     }
     throw new AssertionError("the walk of retentionRows does not end");
   }
 
-  /** The pages of {@code expiredRetention} with {@code limit}, walked with the last row. */
+  /**
+   * The pages of {@code expiredRetention} with {@code limit}, walked with the last row (and, like
+   * the walk above, ended at once by a page that repeats a row).
+   */
   private List<List<RetentionRow>> walkExpired(Instant asOf, int limit) {
     List<List<RetentionRow>> pages = new ArrayList<>();
+    Set<RetentionRow> seen = new HashSet<>();
     Optional<RetentionRow> after = Optional.empty();
     for (int guard = 0; guard < 2_000; guard++) {
       List<RetentionRow> page = ledger().expiredRetention(asOf, after, limit);
       if (page.isEmpty()) {
         return pages;
       }
+      requireNew(seen, page, "expiredRetention");
       pages.add(page);
       after = Optional.of(page.get(page.size() - 1));
     }
     throw new AssertionError("the walk of expiredRetention does not end");
+  }
+
+  private static void requireNew(Set<RetentionRow> seen, List<RetentionRow> page, String read) {
+    for (RetentionRow each : page) {
+      if (!seen.add(each)) {
+        throw new AssertionError(
+            "the walk of " + read + " does not advance: a page repeats a row of an earlier page");
+      }
+    }
   }
 
   private static List<RetentionRow> flatten(List<List<RetentionRow>> pages) {
@@ -361,6 +381,49 @@ public interface RetentionLedgerContract {
             tuple("sealed/x", false),
             tuple("sealed/x/z", false),
             tuple("sealed/xy", true));
+  }
+
+  /**
+   * The hold of an artifact is the hold of that exact key. A new artifact whose key a held artifact
+   * matches as a pattern ({@code _} is a character of the key alphabet) or as a prefix does not
+   * take its hold, and the hold or the release of one such key does not reach the other.
+   */
+  @Test
+  default void aHoldAndTheHoldOfANewRowCompareTheKeyAsTextAndNotAsAPatternOrAPrefix() {
+    Instant t = at("2030-01-01T00:00:00Z");
+    ledger().recordRetention(List.of(claim("sealed/axb", "emir.eu", t)));
+    ledger().setRetentionHold(new EvidenceKey("sealed/axb"), true);
+    ledger().recordRetention(List.of(claim("sealed/a_b", "emir.eu", t)));
+    assertThat(heldRows()).as("a_b is a new artifact").containsExactly("sealed/axb|emir.eu");
+
+    // nor does a new key that is the beginning of a held key take its hold
+    ledger().recordRetention(List.of(claim("sealed/xy", "emir.eu", t)));
+    ledger().setRetentionHold(new EvidenceKey("sealed/xy"), true);
+    ledger().recordRetention(List.of(claim("sealed/x", "emir.eu", t)));
+    assertThat(heldRows())
+        .as("sealed/x is a new artifact")
+        .containsExactly("sealed/axb|emir.eu", "sealed/xy|emir.eu");
+
+    // the hold of the key with the underscore does not reach the key that it matches as a pattern
+    ledger().setRetentionHold(new EvidenceKey("sealed/axb"), false);
+    ledger().setRetentionHold(new EvidenceKey("sealed/xy"), false);
+    ledger().setRetentionHold(new EvidenceKey("sealed/a_b"), true);
+    assertThat(heldRows()).containsExactly("sealed/a_b|emir.eu");
+    // and the release of it does not release the other one
+    ledger().setRetentionHold(new EvidenceKey("sealed/axb"), true);
+    ledger().setRetentionHold(new EvidenceKey("sealed/a_b"), false);
+    assertThat(heldRows()).containsExactly("sealed/axb|emir.eu");
+  }
+
+  /** The held rows as artifact|regime, in the order of the read. */
+  private List<String> heldRows() {
+    List<String> held = new ArrayList<>();
+    for (RetentionRow each : every()) {
+      if (each.legalHold()) {
+        held.add(each.claim().artifact().path() + "|" + each.claim().regime().id());
+      }
+    }
+    return held;
   }
 
   /**
@@ -616,6 +679,35 @@ public interface RetentionLedgerContract {
     assertThat(walkRetentionRows("", 1)).extracting(List::size).containsExactly(1, 1, 1, 1);
     assertThat(artifacts(flatten(walkRetentionRows("", 1))))
         .containsExactly("p/a", "p/b", "q/p/a", "sealed/p/b");
+  }
+
+  /**
+   * A prefix is a range of the key order: the keys that continue with the last characters of the
+   * alphabet ({@code z}, {@code _}) are inside it, whatever bound an adapter derives from the
+   * prefix.
+   */
+  @Test
+  default void aPrefixListsTheKeysThatContinueWithTheLastCharactersOfTheAlphabet() {
+    Instant t = at("2030-01-01T00:00:00Z");
+    List<String> keys = List.of("p/_", "p/a", "p/z", "p/z.b", "p/zz", "p/zz_z");
+    List<RetentionClaim> claims = new ArrayList<>();
+    for (String key : keys) {
+      claims.add(claim(key, "emir.eu", t));
+    }
+    claims.add(claim("q/a", "emir.eu", t));
+    ledger().recordRetention(claims);
+
+    assertThat(artifacts(ledger().retentionRows("p/", Optional.empty(), 100)))
+        .containsExactlyElementsOf(keys);
+    assertThat(artifacts(ledger().retentionRows("p/z", Optional.empty(), 100)))
+        .containsExactly("p/z", "p/z.b", "p/zz", "p/zz_z");
+    assertThat(artifacts(ledger().retentionRows("p/zz", Optional.empty(), 100)))
+        .containsExactly("p/zz", "p/zz_z");
+    assertThat(artifacts(ledger().retentionRows("p/zz_", Optional.empty(), 100)))
+        .containsExactly("p/zz_z");
+    assertThat(artifacts(ledger().retentionRows("p/zz_z", Optional.empty(), 100)))
+        .containsExactly("p/zz_z");
+    assertThat(ledger().retentionRows("", Optional.empty(), 100)).hasSize(7);
   }
 
   /** No key has a NUL or a character outside the key alphabet, so such a prefix lists nothing. */

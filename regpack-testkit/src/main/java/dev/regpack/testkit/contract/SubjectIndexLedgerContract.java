@@ -10,9 +10,11 @@ import dev.regpack.ports.ledger.SubjectIndexLedger.SubjectEntry;
 import dev.regpack.ports.ledger.SubjectIndexLedger.SubjectRef;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -55,14 +57,27 @@ public interface SubjectIndexLedgerContract {
     return ledger().subjectRefs(hash(hash), Optional.empty(), 1_000);
   }
 
-  /** The pages of {@code subjectRefs} with {@code limit}, walked with the last reference. */
+  /**
+   * The pages of {@code subjectRefs} with {@code limit}, walked with the last reference. A page
+   * that repeats a reference of an earlier page ends the walk at once: a keyset that does not move
+   * past its bound would otherwise ask for the same page until the guard, one connection a page on
+   * a real server.
+   */
   private List<List<SubjectRef>> walk(int hash, int limit) {
     List<List<SubjectRef>> pages = new ArrayList<>();
+    Set<SubjectRef> seen = new HashSet<>();
     Optional<SubjectRef> after = Optional.empty();
     for (int guard = 0; guard < 5_000; guard++) {
       List<SubjectRef> page = ledger().subjectRefs(hash(hash), after, limit);
       if (page.isEmpty()) {
         return pages;
+      }
+      for (SubjectRef each : page) {
+        if (!seen.add(each)) {
+          throw new AssertionError(
+              "the walk of subjectRefs does not advance: a page repeats a reference of an earlier"
+                  + " page");
+        }
       }
       pages.add(page);
       after = Optional.of(page.get(page.size() - 1));
@@ -268,6 +283,33 @@ public interface SubjectIndexLedgerContract {
     // a removed reference can be indexed again
     ledger().indexSubjects(List.of(entry(1, object("sealed/a"))));
     assertThat(refsOf(1)).containsExactly(object("sealed/a"), object("sealed/b"));
+  }
+
+  /**
+   * A reference is matched whole and as it is: {@code _} and {@code %} are characters of a
+   * reference, not wildcards, so an adapter that compares as a pattern would remove more than the
+   * named row.
+   */
+  @Test
+  default void removeMatchesTheTextOfTheRefAndNotAPattern() {
+    ledger()
+        .indexSubjects(
+            List.of(
+                entry(1, object("w/a_b")),
+                entry(1, object("w/aXb")),
+                entry(1, object("w/a%")),
+                entry(1, object("w/abc")),
+                entry(1, report("w/a_b")),
+                entry(2, object("w/a_b"))));
+
+    // two hashes name the reference; the underscore is no wildcard
+    assertThat(ledger().removeSubjectRefs(object("w/a_b"))).isEqualTo(2);
+    assertThat(refsOf(1))
+        .containsExactly(report("w/a_b"), object("w/a%"), object("w/aXb"), object("w/abc"));
+    assertThat(refsOf(2)).isEmpty();
+    // the percent sign is no wildcard
+    assertThat(ledger().removeSubjectRefs(object("w/a%"))).isEqualTo(1);
+    assertThat(refsOf(1)).containsExactly(report("w/a_b"), object("w/aXb"), object("w/abc"));
   }
 
   @Test

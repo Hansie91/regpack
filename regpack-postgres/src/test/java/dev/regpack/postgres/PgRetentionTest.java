@@ -795,6 +795,39 @@ class PgRetentionTest {
   }
 
   /**
+   * The same with rows in the answers: a read that locked the artifacts it found would pass the
+   * test above (its fake server answers no rows, so there is nothing to lock) and still make every
+   * reader wait for a writer.
+   */
+  @Test
+  void theReadsTakeNoLockEvenWhenTheyReturnRows() {
+    RetentionRow after = new RetentionRow(claim("sealed/a", MIFIR, D2031), false, NOW);
+    SqlSpy answering =
+        new SqlSpy()
+            .recordingTypedBinds()
+            .strictBinds()
+            .answering(
+                (sql, events) ->
+                    sql.equals(PgRetention.ROWS_SQL)
+                            || sql.equals(PgRetention.EXPIRED_SQL)
+                            || sql.equals(PgRetention.EXPIRED_AFTER_SQL)
+                        ? List.<Object[]>of(
+                            stored("sealed/a", "emir.eu", 1, "sealed", D2031, false, NOW),
+                            stored("sealed/b", "mifir.eu.rts22", 1, "sealed", D2031, false, NOW))
+                        : List.of());
+    PgRetention retention = new PgRetention(answering.over(null), clock, config);
+
+    assertThat(retention.retentionRows("sealed/", Optional.empty(), 10)).hasSize(2);
+    assertThat(retention.expiredRetention(D2033, Optional.empty(), 10)).hasSize(2);
+    assertThat(retention.expiredRetention(D2033, Optional.of(after), 10)).hasSize(2);
+
+    assertThat(statements(answering))
+        .containsExactly(
+            PgRetention.ROWS_SQL, PgRetention.EXPIRED_SQL, PgRetention.EXPIRED_AFTER_SQL);
+    assertThat(locksTaken(answering)).isEmpty();
+  }
+
+  /**
    * The key of the lock holds the schema (Convention 12), so two ledgers in two schemas of one
    * database never wait for each other, and the artifact, so that two artifacts of one schema do
    * not. It is one text bound as a string, with a separator that no schema name holds.
@@ -944,6 +977,38 @@ class PgRetentionTest {
     assertThat(events().stream().filter(e -> e.equals("bind object 7=" + utc(NOW))).count())
         .as("one ledger time for every row of the call")
         .isEqualTo(3);
+  }
+
+  /**
+   * The ledger time is read before the unit, that is before the connection is opened and so before
+   * any wait for the artifact lock (class comment of {@code PgRetention}): a claim that waits for a
+   * slow writer is not born later than it was made. A clock read inside the unit, after the locks,
+   * would keep every other statement-order test green.
+   */
+  @Test
+  void theLedgerTimeIsReadBeforeAnyConnectionIsOpened() {
+    List<Integer> eventsSeenAtEachRead = new ArrayList<>();
+    Clock reading =
+        new Clock() {
+          @Override
+          public Instant now() {
+            eventsSeenAtEachRead.add(spy.events().size());
+            return NOW;
+          }
+
+          @Override
+          public long monotonicNanos() {
+            return 0;
+          }
+        };
+
+    new PgRetention(spy.over(null), reading, config)
+        .recordRetention(List.of(claim("sealed/a", MIFIR, D2031)));
+
+    assertThat(eventsSeenAtEachRead)
+        .as("one read, before the first event of the connection")
+        .containsExactly(0);
+    assertThat(events()).isNotEmpty();
   }
 
   @Test
