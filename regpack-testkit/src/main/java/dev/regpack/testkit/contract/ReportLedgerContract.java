@@ -490,6 +490,37 @@ public interface ReportLedgerContract {
     assertThat(ledger().decisionChain(mifir(), event("E1"))).hasSize(2);
   }
 
+  /**
+   * D33 (1) for a redelivery: when a new decision of the same unit has already moved the head past
+   * the redelivered decision, the conflict carries the head that is STORED. The unit is rolled
+   * back, so the head that the new decision would have made never becomes current.
+   */
+  @Test
+  default void aRedeliveryBehindANewDecisionOfTheSameUnitReportsTheStoredHead() {
+    NewDecision first = reportDecision(0, "E1", "ctx", "d1", MARKET);
+    ledger().commitDecisions(new BatchCommit(List.of(first), Optional.empty()));
+
+    ReportableCommit unit =
+        new ReportableCommit(
+            List.of(
+                new ReportableDecision(reportDecision(1, "E1", "ctx", "d2", MARKET), List.of()),
+                new ReportableDecision(
+                    first, List.of(newVersion("E1", MARKET, "EXEC1", "TRN1", "NEWT", "h1")))),
+            Optional.empty(),
+            Optional.empty());
+    assertThatThrownBy(() -> ledger().commitReportable(unit))
+        .isInstanceOfSatisfying(
+            DecisionHeadConflictException.class,
+            e -> {
+              assertThat(e.eventIdentity()).isEqualTo(event("E1"));
+              assertThat(e.currentHeadSeq()).isEqualTo(1);
+              assertThat(e)
+                  .hasMessage("decision head conflict for " + event("E1").value() + ": head is 1");
+            });
+    assertThat(ledger().decisionChain(mifir(), event("E1"))).hasSize(1);
+    assertThat(ledger().subject(key("E1", MARKET))).isEmpty();
+  }
+
   @Test
   default void logicalHashSuppressionComparesOnlyWithTheLatestNonRejectedVersion() {
     // A then A: the second is suppressed; the decision itself is still inserted

@@ -321,7 +321,8 @@ public interface ReportLedger {
 
   /**
    * Commits the decisions and the requested versions in one unit and returns one result per
-   * decision, in input order.
+   * decision, in input order. When a unit has several defects, which refusal is raised is
+   * unspecified, and the unit writes nothing.
    *
    * @throws DecisionHeadConflictException a decision's expected head is stale, or a version is
    *     requested for a redelivered decision that is no longer the head

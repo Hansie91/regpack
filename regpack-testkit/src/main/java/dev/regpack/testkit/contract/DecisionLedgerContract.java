@@ -156,6 +156,51 @@ public interface DecisionLedgerContract {
     assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1"))).hasSize(1);
   }
 
+  /**
+   * D33 (1): a unit of two decisions of one chain whose second decision expects the head from
+   * before the unit is refused with the head that is STORED. The first decision of the unit would
+   * have moved the head, but the unit is rolled back, so that head never becomes current and a
+   * loser that re-reads could not find it. Shown on an empty chain and on a chain that already has
+   * a decision.
+   */
+  @Test
+  default void aStaleHeadInAUnitOfTwoDecisionsOfOneChainReportsTheStoredHead() {
+    // an empty chain: the first decision of the unit would make the head 1, the stored head is 0
+    assertThatThrownBy(
+            () ->
+                ledger()
+                    .commitDecisions(
+                        batch(
+                            decision(body("E1", "ctx", "d1", Outcome.REPORT), 0),
+                            decision(body("E1", "ctx", "d2", Outcome.REPORT), 0))))
+        .isInstanceOfSatisfying(
+            DecisionHeadConflictException.class,
+            e -> {
+              assertThat(e.eventIdentity()).isEqualTo(event("E1"));
+              assertThat(e.currentHeadSeq()).isZero();
+              assertThat(e)
+                  .hasMessage("decision head conflict for " + event("E1").value() + ": head is 0");
+            });
+
+    // a chain of one stored decision: the first decision of the unit would make the head 2
+    commitOne(body("E2", "ctx", "d1", Outcome.REPORT), 0);
+    assertThatThrownBy(
+            () ->
+                ledger()
+                    .commitDecisions(
+                        batch(
+                            decision(body("E2", "ctx", "d2", Outcome.REPORT), 1),
+                            decision(body("E2", "ctx", "d3", Outcome.REPORT), 1))))
+        .isInstanceOfSatisfying(
+            DecisionHeadConflictException.class,
+            e -> {
+              assertThat(e.eventIdentity()).isEqualTo(event("E2"));
+              assertThat(e.currentHeadSeq()).isEqualTo(1);
+              assertThat(e)
+                  .hasMessage("decision head conflict for " + event("E2").value() + ": head is 1");
+            });
+  }
+
   @Test
   default void abaSameOutcomeThirdDecisionIsNewRow() {
     Committed a = commitOne(body("E1", "ctx", "dA", Outcome.REPORT), 0);

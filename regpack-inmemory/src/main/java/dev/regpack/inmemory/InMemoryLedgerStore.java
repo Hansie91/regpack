@@ -518,13 +518,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
       ChainKey chainKey = new ChainKey(body.regime(), body.eventIdentity());
       List<DecisionRecord> chain = chains.getOrDefault(chainKey, List.of());
       List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
-      long headSeq = chain.size() + added.size();
+      long storedHeadSeq = chain.size();
+      long headSeq = storedHeadSeq + added.size();
       if (decision.expectedHeadSeq() != headSeq) {
         // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
         if (flaw == Flaw.NON_ATOMIC_DECISIONS) {
           publishDecisions();
         }
-        throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
+        // The conflict carries the STORED head, as PostgreSQL does: the unit is rolled back, so a
+        // head that only an earlier decision of this unit would have made never becomes current,
+        // and a loser that re-reads could not find it (D33 (1)).
+        throw new DecisionHeadConflictException(body.eventIdentity(), storedHeadSeq);
       }
       Optional<DecisionId> supersedes = Optional.empty();
       if (!added.isEmpty()) {
@@ -719,10 +723,11 @@ public final class InMemoryLedgerStore implements LedgerStore {
             VersionStatus.EXISTING,
             Optional.of(existing.delivery()));
       }
-      long head =
-          stage.headSeq(new ChainKey(decision.body().regime(), decision.body().eventIdentity()));
-      if (decision.decisionSeq() != head) {
-        throw new DecisionHeadConflictException(decision.body().eventIdentity(), head);
+      ChainKey chainKey = new ChainKey(decision.body().regime(), decision.body().eventIdentity());
+      if (decision.decisionSeq() != stage.headSeq(chainKey)) {
+        // the STORED head, as in DecisionStage.stage (D33 (1))
+        throw new DecisionHeadConflictException(
+            decision.body().eventIdentity(), chains.getOrDefault(chainKey, List.of()).size());
       }
     }
     if (subject == null) {
