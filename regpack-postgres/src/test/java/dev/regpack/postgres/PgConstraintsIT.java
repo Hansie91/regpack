@@ -17,6 +17,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -1143,6 +1144,70 @@ class PgConstraintsIT extends AbstractPgStoreTest {
         .contains("WHERE")
         .contains("retain_until IS NOT NULL")
         .contains("NOT legal_hold");
+  }
+
+  /**
+   * Task note T14-3 (D18, CP1-R): the byte-order tests of the manifest, retention and subject-index
+   * contracts tell the clause {@code COLLATE "C"} from the default collation only on a cluster
+   * whose default collation is NOT byte order. This test says which cluster the run is on: it is
+   * skipped, with the values it read, when the default collation of the database orders bytes, so
+   * that a green tally with no skipped test means the order tests ran where they can fail. Two
+   * observations must both say "not byte order": the catalogue (a libc database whose {@code
+   * datcollate} is {@code C}, {@code POSIX} or {@code C.UTF-8}, or a database of the builtin
+   * provider, sorts by code point) and the behaviour (the default collation puts {@code a} before
+   * {@code B}; byte order puts {@code B}, 0x42, before {@code a}, 0x61). The values are in the
+   * message of the skip; a green run prints nothing, and a run with {@code skipped=0} is the proof.
+   */
+  @Test
+  void theDefaultCollationOfTheDatabaseIsNotByteOrderSoTheOrderTestsCanFail() throws SQLException {
+    String collate;
+    String ctype;
+    String provider;
+    String locale;
+    try (Connection connection = raw();
+        Statement statement = connection.createStatement();
+        ResultSet rows =
+            statement.executeQuery(
+                "SELECT datcollate::text, datctype::text, datlocprovider::text, datlocale::text"
+                    + " FROM pg_database WHERE datname = current_database()")) {
+      assertThat(rows.next()).as("the row of the current database").isTrue();
+      collate = rows.getString(1);
+      ctype = rows.getString(2);
+      provider = rows.getString(3);
+      locale = rows.getString(4);
+    }
+    boolean aBeforeUpperB;
+    try (Connection connection = raw();
+        Statement statement = connection.createStatement();
+        ResultSet rows =
+            statement.executeQuery(
+                "SELECT 'a'::text COLLATE \"default\" < 'B'::text COLLATE \"default\"")) {
+      assertThat(rows.next()).isTrue();
+      aBeforeUpperB = rows.getBoolean(1);
+    }
+    boolean catalogueSaysByteOrder =
+        "b".equals(provider)
+            || ("c".equals(provider)
+                && collate != null
+                && List.of("C", "POSIX", "C.UTF-8", "C.utf8").contains(collate));
+    String found =
+        "datcollate="
+            + collate
+            + " datctype="
+            + ctype
+            + " datlocprovider="
+            + provider
+            + " datlocale="
+            + locale
+            + " 'a' < 'B' is "
+            + aBeforeUpperB;
+    Assumptions.assumeTrue(
+        !catalogueSaysByteOrder && aBeforeUpperB,
+        () ->
+            "the default collation of this database orders bytes ("
+                + found
+                + "), so the byte-order tests of the contracts cannot tell the clause COLLATE \"C\""
+                + " from the default here");
   }
 
   // ------------------------------------------------------------------------------------------
