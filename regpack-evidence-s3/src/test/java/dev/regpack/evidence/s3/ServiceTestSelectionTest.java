@@ -58,9 +58,20 @@ class ServiceTestSelectionTest {
           "WormVerifyIT",
           "WormVersionsIT");
 
-  /** True when the source has the annotation {@code @Tag("worm")} as a line of its own. */
+  /**
+   * A comment of either kind, the leftmost first (so that a {@code //} inside a block comment and a
+   * block opener inside a line comment are read as the text of that comment).
+   */
+  private static final Pattern COMMENT = Pattern.compile("/\\*.*?\\*/|//[^\\n]*", Pattern.DOTALL);
+
+  /**
+   * True when the code of the source (its comments taken out) has the annotation
+   * {@code @Tag("worm")} as a line of its own. Each comment is replaced by an empty block comment
+   * and not by nothing, so that an annotation followed by a comment is still not a line of its own.
+   */
   private static boolean hasTheTagLine(String source) {
-    return TAG_LINE.matcher(source).find();
+    String code = COMMENT.matcher(source).replaceAll(Matcher.quoteReplacement("/**/"));
+    return TAG_LINE.matcher(code).find();
   }
 
   private static String sourceOf(Path root, String className) throws IOException {
@@ -161,6 +172,12 @@ class ServiceTestSelectionTest {
           .as("%s carries the line @Tag(\"worm\") at the start of a line", name)
           .isTrue();
     }
+    // PgEncryptedSealScenarioIT is NOT tagged worm, on purpose: it needs PostgreSQL and no S3
+    // service, the job ledger-pg excludes the group worm (below), so a tag would silently stop it
+    // running there, and the job evidence-worm selects classes by the name pattern, never this one
+    assertThat(hasTheTagLine(sourceOf(root, "PgEncryptedSealScenarioIT")))
+        .as("PgEncryptedSealScenarioIT carries no line @Tag(\"worm\")")
+        .isFalse();
     // the module's own run (job ledger-pg, the build jobs) leaves the group out
     String pom = Files.readString(repo.resolve("regpack-postgres/pom.xml"), UTF_8);
     Matcher excluded = EXCLUDED_GROUPS.matcher(pom);
@@ -201,6 +218,13 @@ class ServiceTestSelectionTest {
     Files.writeString(windows, "@Tag(\"worm\")  \r\n" + declaration, UTF_8);
     assertThat(hasTheTagLine(Files.readString(real, UTF_8))).isTrue();
     assertThat(hasTheTagLine(Files.readString(windows, UTF_8))).isTrue();
+    // a comment before the annotation, and a block comment elsewhere, do not hide it
+    Path commented = dir.resolve("Commented.java");
+    Files.writeString(
+        commented,
+        "/*\n * A comment.\n */\n// a line comment\n@Tag(\"worm\")\n" + declaration,
+        UTF_8);
+    assertThat(hasTheTagLine(Files.readString(commented, UTF_8))).isTrue();
 
     List<String> imposters =
         List.of(
@@ -211,6 +235,11 @@ class ServiceTestSelectionTest {
             "@Tag(\"worm\") " + declaration,
             "@Tag(\"probe\")\n" + declaration,
             "@Tag(\"worms\")\n" + declaration,
+            // a block comment without leading asterisks holds the annotation as a line of its own
+            "/*\n@Tag(\"worm\")\n*/\n" + declaration,
+            // the same after a line that closes another comment, and a trailing line comment
+            "/* old */\n/*\n@Tag(\"worm\")\n   */\n" + declaration,
+            "@Tag(\"worm\") // runs on the service\n" + declaration,
             declaration);
     for (int i = 0; i < imposters.size(); i++) {
       Path file = dir.resolve("Imposter" + i + ".java");

@@ -214,8 +214,7 @@ abstract class AbstractWormEncryptedVerifyTest {
     assertThatThrownBy(() -> tier.first.get(shreddedLater.sealedKey()))
         .isInstanceOf(DataShreddedException.class);
     // verify still passes: the two shredded objects are counted and not judged, the two of the
-    // other
-    // KEK are judged and clean, and every manifest row is still there
+    // other KEK are judged and clean, and every manifest row is still there
     assertThat(report.findings()).isEmpty();
     assertThat(report.clean()).isTrue();
     assertThat(report.objectsShredded())

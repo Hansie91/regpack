@@ -62,13 +62,13 @@ class DifferentialOpsTest {
             DifferentialOps.agree(
                 several, headConflict("E1", 1), DifferentialOps.REFUSED_WHILE_PROCESSING))
         .isTrue();
-    // two stale heads on two chains: the ledgers may name either chain
+    // two stale heads on two event identities: the ledgers may name either one
     assertThat(DifferentialOps.agree(several, headConflict("E1", 1), headConflict("E2", 0)))
         .isTrue();
   }
 
   @Test
-  void twoHeadConflictsOnOneChainMustNameTheSameHead() {
+  void twoHeadConflictsOnTheSameEventIdentityMustNameTheSameHead() {
     Commit several =
         unit(decision("E1", HeadMode.CURRENT, "d1"), decision("E1", HeadMode.CURRENT, "d2"));
 

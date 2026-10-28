@@ -181,6 +181,8 @@ public interface DecisionLedgerContract {
               assertThat(e)
                   .hasMessage("decision head conflict for " + event("E1").value() + ": head is 0");
             });
+    // the refused unit left nothing behind: not even its first decision
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E1"))).isEmpty();
 
     // a chain of one stored decision: the first decision of the unit would make the head 2
     commitOne(body("E2", "ctx", "d1", Outcome.REPORT), 0);
@@ -199,6 +201,8 @@ public interface DecisionLedgerContract {
               assertThat(e)
                   .hasMessage("decision head conflict for " + event("E2").value() + ": head is 1");
             });
+    // the chain is as it was before the unit: the one stored decision, without the unit's first
+    assertThat(ledger().decisionChain(new Regime(MIFIR), event("E2"))).hasSize(1);
   }
 
   @Test

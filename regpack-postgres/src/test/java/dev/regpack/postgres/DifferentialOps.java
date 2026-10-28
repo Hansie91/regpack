@@ -705,7 +705,9 @@ final class DifferentialOps {
 
   /**
    * The start of the answer to a unit of several decisions that was refused with a head conflict:
-   * the chain and the head that the exception carries follow, and {@link #agree} compares them.
+   * the event identity and the head that the exception carries follow, and {@link #agree} compares
+   * them. The exception names no regime, so "the same chain" is read as "the same event identity"
+   * (the case of one event name in two regimes, both stale, is not told apart: R1).
    */
   static final String HEAD_CONFLICT = "refused with a head conflict on ";
 
@@ -727,11 +729,11 @@ final class DifferentialOps {
   /**
    * Whether the two answers of the ledgers to {@code op} are the same answer: equal texts are, and
    * so are, in a unit of several decisions, two refusals of the course of the unit unless both are
-   * head conflicts on one chain. A unit can have several defects, the port leaves open which one
-   * the ledger reports (D33 (2)), and the two ledgers do not find them in the same order; but when
-   * both report the stale head of the same chain, the head they name must be the same (D33 (1)).
-   * With {@link #EXACT_UNITS} the answers of a unit are never reduced to a refusal, so only equal
-   * texts agree.
+   * head conflicts on the same event identity (the exception names no regime). A unit can have
+   * several defects, the port leaves open which one the ledger reports (D33 (2)), and the two
+   * ledgers do not find them in the same order; but when both report the stale head of the same
+   * event identity, the head they name must be the same (D33 (1)). With {@link #EXACT_UNITS} the
+   * answers of a unit are never reduced to a refusal, so only equal texts agree.
    */
   static boolean agree(Op op, String inMemory, String postgres) {
     if (inMemory.equals(postgres)) {
@@ -744,7 +746,7 @@ final class DifferentialOps {
         && isRefusedInTheUnit(postgres)
         && !(isHeadConflict(inMemory)
             && isHeadConflict(postgres)
-            && chainOf(inMemory).equals(chainOf(postgres)));
+            && eventIdentityOf(inMemory).equals(eventIdentityOf(postgres)));
   }
 
   private static boolean isRefusedInTheUnit(String answer) {
@@ -755,8 +757,8 @@ final class DifferentialOps {
     return answer.startsWith(HEAD_CONFLICT);
   }
 
-  /** The chain of a head conflict answer: the text before the head. */
-  private static String chainOf(String headConflict) {
+  /** The event identity of a head conflict answer: the text before the head. */
+  private static String eventIdentityOf(String headConflict) {
     return headConflict.substring(0, headConflict.lastIndexOf(HEAD_AT));
   }
 
@@ -781,7 +783,8 @@ final class DifferentialOps {
         // does not say which of them a ledger reports (the in-memory ledger takes the decisions in
         // the order of the request, PostgreSQL in the order of their chains): the answer is the
         // refusal, and agree() compares two of them by their kind. A head conflict also names its
-        // chain and head, and two conflicts on one chain must name the same head. The refusals
+        // event identity and head, and two conflicts on the same event identity must name the same
+        // head. The refusals
         // before the first write (an envelope body, a leg, an argument) are compared in full, in a
         // unit of any size
         if (e instanceof DecisionHeadConflictException conflict) {
