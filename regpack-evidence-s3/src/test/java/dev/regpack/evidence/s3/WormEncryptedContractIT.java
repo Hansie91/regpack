@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.crypto.Envelope;
+import dev.regpack.ports.evidence.EvidenceIntegrityException;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceStore.PutOutcome;
@@ -12,6 +13,16 @@ import dev.regpack.ports.evidence.EvidenceStore.Retention;
 import dev.regpack.ports.evidence.EvidenceStore.RetentionClass;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -67,5 +78,73 @@ class WormEncryptedContractIT extends WormEvidenceStoreContractIT {
         .isNotEqualTo(Sha256.of(plaintext));
     assertThat(store().get(key).orElseThrow().bytes()).isEqualTo(plaintext);
     assertThat(store().get(key).orElseThrow().sha256()).isEqualTo(Sha256.of(plaintext));
+  }
+
+  /**
+   * The shared racing method accepts any {@link EvidenceIntegrityException} from a loser, and a
+   * corruption alarm is one. A loser of a race on a decorated key must be told "other bytes" and
+   * never that a stored copy is damaged: the decorator reads the key before it puts, outside the
+   * stripe lock of the store, so on a real store it can meet a version that another thread's put is
+   * still writing. This method accepts exactly {@link EvidenceIntegrityException}.
+   */
+  @Test
+  void theLosersOfARaceOnADecoratedKeyAreToldOtherBytesAndNeverACorruptionAlarm() throws Exception {
+    int threads = 8;
+    ExecutorService pool = Executors.newFixedThreadPool(threads);
+    try {
+      for (int round = 0; round < 5; round++) {
+        EvidenceKey key = EvidenceKey.of("landing", "race-" + round);
+        Retention retention =
+            new Retention(new RetentionClass("landing"), clock().now().plus(Duration.ofDays(1826)));
+        CountDownLatch release = new CountDownLatch(1);
+        List<Future<PutOutcome>> futures = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+          byte[] bytes = ("writer-" + i).getBytes(StandardCharsets.UTF_8);
+          Callable<PutOutcome> task =
+              () -> {
+                release.await();
+                return store().put(new PutRequest(key, bytes, "text/plain", retention));
+              };
+          futures.add(pool.submit(task));
+        }
+        release.countDown();
+        int created = 0;
+        for (Future<PutOutcome> future : futures) {
+          try {
+            if (future.get() == PutOutcome.CREATED) {
+              created++;
+            }
+          } catch (ExecutionException e) {
+            assertThat(e.getCause()).isExactlyInstanceOf(EvidenceIntegrityException.class);
+          }
+        }
+        assertThat(created).as("round %d", round).isEqualTo(1);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * After every method, whichever method it is: each object that the method left in P-WORM is an
+   * envelope. This is what makes the claim that the inherited methods run through the encryption
+   * hold for every key they store and not for the one key of the binding check; a policy that skips
+   * a namespace, a key length or a class of keys, or a method that writes behind the decorator, is
+   * seen here.
+   */
+  @AfterEach
+  void everyObjectTheMethodStoredIsAnEnvelope() {
+    if (encrypted == null) {
+      // the service is missing and the test did not start: nothing was stored
+      return;
+    }
+    simulateOutage(false);
+    List<EvidenceKey> keys = super.store().list("", Optional.empty(), 1000);
+    assertThat(keys).as("the listing is one whole page").hasSizeLessThan(1000);
+    for (EvidenceKey key : keys) {
+      assertThat(Envelope.isEnvelope(super.store().get(key).orElseThrow().bytes()))
+          .as("%s is stored as an envelope", key.path())
+          .isTrue();
+    }
   }
 }

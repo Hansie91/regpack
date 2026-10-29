@@ -51,7 +51,10 @@ import org.junit.jupiter.params.provider.MethodSource;
  * <p>The sequences are generated from a seed ({@link DifferentialGenerator}), so a run is exactly
  * repeatable. At the first difference of a seed the sequence is shrunk ({@link
  * DifferentialShrinker}) to a few operations that still differ, and the failure names the seed, the
- * number of the sequence, the shrunk operations and the two answers, and how to run it again.
+ * number of the sequence, the shrunk operations and the two answers, and how to run it again. Its
+ * first line holds the seed, the options that run it again and both answers (cut), because that is
+ * the line a check-run annotation shows; a difference that does not recur when the sequence is run
+ * again is reported as it was found, with the line {@code NOT SHRUNK}.
  *
  * <p>System properties, with their defaults (the defaults are the run of the job {@code ledger-pg}:
  * one fixed seed, about two minutes on the development machine's local server; every sequence
@@ -66,7 +69,9 @@ import org.junit.jupiter.params.provider.MethodSource;
  *   <li>{@code regpack.differential.exactUnits}: {@code true} compares the refusals of a unit of
  *       several decisions in full, see {@link DifferentialOps#EXACT_UNITS}; the default compares
  *       them by their kind only, since the port leaves open which defect of a unit a ledger reports
- *       (D33 (2)); the head of a head conflict is compared in both modes (D33 (1))
+ *       (D33 (2)); a head conflict names its event identity and head: a unit of one decision always
+ *       compares both, a unit of several only when both ledgers name the same event identity (D33
+ *       (1), D35 (2))
  *   <li>{@code regpack.differential.all}: {@code true} goes on after a difference and reports each
  *       kind of difference once; the default stops a seed at its first
  *   <li>{@code regpack.differential.verbose}: {@code true} prints how often each kind of answer was
@@ -90,13 +95,13 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
   /** The default seed: fixed, so that a failure of the job can be run again from its message. */
   private static final String DEFAULT_SEEDS = "1";
 
-  /** 600 sequences of 60 operations took 102 s on the development machine (an idle server). */
+  /** 600 sequences of 60 operations take about 110 s on an idle development machine. */
   private static final int DEFAULT_SEQUENCES = 600;
 
   private static final int DEFAULT_OPERATIONS = 60;
 
   /** A run of this many sequences must have seen every kind of answer. */
-  private static final int COVERAGE_FROM = 100;
+  private static final int COVERAGE_FROM = 200;
 
   /** The most differences of one seed that are shrunk when the run goes on after the first. */
   private static final int MAX_SHRUNK = 6;
@@ -129,6 +134,9 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
           "commit.EXISTING",
           "commit.SUPPRESSED_UNCHANGED",
           "refused.Commit",
+          "unit.headConflict",
+          "unit.refusedWhileProcessing",
+          "refused.Remove",
           "read.encoding0",
           "read.encoding1");
 
@@ -191,7 +199,7 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
       }
       Divergence first = replay.divergence().get();
       if (kinds.add(kind(first)) && reports.size() < MAX_SHRUNK) {
-        reports.add(report(seed, sequence, ops.size(), shrink(ops)));
+        reports.add(report(seed, sequence, ops, first));
       }
       if (!all) {
         break;
@@ -205,6 +213,10 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
     }
     if (sequences >= COVERAGE_FROM) {
       for (String note : COVERED) {
+        if (note.startsWith("unit.") && Boolean.getBoolean(DifferentialOps.EXACT_UNITS)) {
+          // the units are compared in full and the refusal is not reduced to its kind
+          continue;
+        }
         assertThat(seen.getOrDefault(note, 0))
             .as("seed %d: how often '%s' was seen in %d sequences", seed, note, sequences)
             .isPositive();
@@ -321,20 +333,41 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
     return DifferentialShrinker.simplify(shorter, Op::simpler, differs);
   }
 
-  private String report(long seed, int sequence, int originalLength, List<Op> shrunk) {
-    Divergence divergence = replay(shrunk).divergence().orElseThrow();
+  /**
+   * The text of a failure. Its first line is what a check-run annotation shows (it keeps the first
+   * line, cut at 300 characters): the seed, the sequence, the options that run it again and both
+   * answers, each cut, so that the head of a head conflict survives. The sequence is run once more
+   * before it is shrunk, because a difference that does not recur (a fault of the server, a
+   * timeout) cannot be shrunk; it is then reported as it was found, with the line {@code NOT
+   * SHRUNK}.
+   */
+  private String report(long seed, int sequence, List<Op> ops, Divergence first) {
+    int originalLength = ops.size();
+    boolean again = replay(ops).divergence().isPresent();
+    List<Op> shrunk = again ? shrink(ops) : ops;
+    Optional<Divergence> afterShrinking = again ? replay(shrunk).divergence() : Optional.empty();
+    boolean notShrunk = afterShrinking.isEmpty();
+    if (notShrunk) {
+      shrunk = ops;
+    }
+    Divergence divergence = afterShrinking.orElse(first);
     StringBuilder out = new StringBuilder();
     out.append("seed ")
         .append(seed)
         .append(", sequence ")
         .append(sequence)
-        .append(": the in-memory ledger and PostgreSQL answer differently; shrunk from ")
-        .append(originalLength)
-        .append(" operations to ")
-        .append(shrunk.size())
-        .append(", the clock starts at ")
-        .append(START)
+        .append(", run again: ")
+        .append(runAgain(seed, sequence, originalLength))
+        .append(": in-memory ")
+        .append(oneLine(divergence.inMemory(), 60))
+        .append(" / postgres ")
+        .append(oneLine(divergence.postgres(), 60))
         .append('\n');
+    out.append(
+        notShrunk
+            ? "NOT SHRUNK, the second run did not differ; " + originalLength + " operations"
+            : "shrunk from " + originalLength + " operations to " + shrunk.size());
+    out.append(", the clock starts at ").append(START).append('\n');
     for (int i = 0; i < shrunk.size(); i++) {
       out.append("  ").append(i + 1).append(". ").append(shrunk.get(i).describe()).append('\n');
     }
@@ -349,21 +382,35 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
         .append(divergence.inMemory())
         .append("\n  postgres:  ")
         .append(divergence.postgres())
-        .append("\n  run again: -D")
-        .append(SEEDS)
-        .append('=')
-        .append(seed)
-        .append(" -D")
-        .append(SEQUENCES)
-        .append('=')
-        .append(sequence + 1)
-        .append(" -D")
-        .append(OPERATIONS)
-        .append('=')
-        .append(originalLength);
-    if (Boolean.getBoolean(DifferentialOps.EXACT_UNITS)) {
-      out.append(" -D").append(DifferentialOps.EXACT_UNITS).append("=true");
-    }
+        .append("\n  run again: ")
+        .append(runAgain(seed, sequence, originalLength));
     return out.append(" (the sequences before it are generated again from the seed)").toString();
+  }
+
+  /** The options that run the sequence again: the sequences before it are generated again. */
+  private static String runAgain(long seed, int sequence, int operations) {
+    StringBuilder options =
+        new StringBuilder("-D")
+            .append(SEEDS)
+            .append('=')
+            .append(seed)
+            .append(" -D")
+            .append(SEQUENCES)
+            .append('=')
+            .append(sequence + 1)
+            .append(" -D")
+            .append(OPERATIONS)
+            .append('=')
+            .append(operations);
+    if (Boolean.getBoolean(DifferentialOps.EXACT_UNITS)) {
+      options.append(" -D").append(DifferentialOps.EXACT_UNITS).append("=true");
+    }
+    return options.toString();
+  }
+
+  /** An answer on one line of at most {@code max} characters, with "..." when it was cut. */
+  private static String oneLine(String answer, int max) {
+    String line = answer.replace('\n', ' ').replace('\r', ' ');
+    return line.length() <= max ? line : line.substring(0, max) + "...";
   }
 }

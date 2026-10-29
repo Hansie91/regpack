@@ -70,6 +70,8 @@ public final class ForbiddenCallScan {
     r.add(new Rule(RuleSet.RANDOMNESS, "java/util/Random", "<init>", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/util/SplittableRandom", "<init>", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/security/SecureRandom", "<init>", ""));
+    r.add(new Rule(RuleSet.RANDOMNESS, "java/security/SecureRandom", "getInstance", ""));
+    r.add(new Rule(RuleSet.RANDOMNESS, "java/security/SecureRandom", "getInstanceStrong", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/util/concurrent/ThreadLocalRandom", "current", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/lang/Math", "random", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/util/UUID", "randomUUID", ""));

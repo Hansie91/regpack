@@ -9,7 +9,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -125,5 +129,38 @@ class ThirdPartyBoundaryTest {
     assertThat(offenders)
         .as("no spike package or spike artifact id in the POM or the sources of %s", THIS_MODULE)
         .isEmpty();
+  }
+
+  /**
+   * Of the modules of this repository only the model and the ports are compile dependencies of this
+   * module; every other one (the in-memory adapter, the evidence tier, the test kit) is test scope,
+   * in this direction only (AP-5). The enforcer lets {@code dev.regpack} through at every scope, so
+   * the scope is pinned here. The pattern reads the one-line form of the dependency elements, and
+   * the three entries asserted first make a reformatted POM fail loudly instead of passing with
+   * nothing read.
+   */
+  @Test
+  void everyRegpackDependencyBeyondModelAndPortsIsTestScope() {
+    String pom = text(repoRoot().resolve(THIS_MODULE).resolve("pom.xml"));
+    Matcher dependency =
+        Pattern.compile(
+                "<dependency><groupId>dev\\.regpack</groupId><artifactId>([^<]+)</artifactId>"
+                    + "(<scope>test</scope>)?</dependency>")
+            .matcher(pom);
+    Map<String, Boolean> isTestScope = new TreeMap<>();
+    while (dependency.find()) {
+      isTestScope.put(dependency.group(1), dependency.group(2) != null);
+    }
+
+    assertThat(isTestScope)
+        .containsEntry("regpack-inmemory", true)
+        .containsEntry("regpack-model", false)
+        .containsEntry("regpack-ports", false);
+    isTestScope.forEach(
+        (artifact, testScope) -> {
+          if (!artifact.equals("regpack-model") && !artifact.equals("regpack-ports")) {
+            assertThat(testScope).as(artifact + " is a test-scope dependency").isTrue();
+          }
+        });
   }
 }

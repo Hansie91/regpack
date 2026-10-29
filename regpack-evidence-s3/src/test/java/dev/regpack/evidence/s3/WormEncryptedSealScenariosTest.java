@@ -14,8 +14,16 @@ import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 
 /**
  * P3c1 T13: the 25 seal-and-send scenarios of {@code SealScenarioContract} (the 24 of P3b and the
@@ -67,5 +75,37 @@ class WormEncryptedSealScenariosTest extends WormSealScenariosTest {
     // and the ledger row names the hash of the plaintext
     assertThat(ledger().manifestRow(sealedKey).orElseThrow().entry().sha256())
         .isEqualTo(Sha256.of(report));
+  }
+
+  /**
+   * After every scenario: each object the scenario left in P-WORM is an envelope. The two own
+   * methods of {@link AbstractWormSealTest} build their sealer over the raw store on purpose and
+   * are left out; every other method, inherited or not, writes through {@link #evidence()}. Without
+   * this a policy that skips a namespace, a class of keys or a key length would leave the 25
+   * scenarios green.
+   */
+  @AfterEach
+  void everyObjectTheMethodStoredIsAnEnvelope(TestInfo info) {
+    if (encrypted == null) {
+      // the service is missing and the test did not start: nothing was stored
+      return;
+    }
+    Set<String> rawOnPurpose =
+        Arrays.stream(AbstractWormSealTest.class.getDeclaredMethods())
+            .filter(method -> method.isAnnotationPresent(Test.class))
+            .map(Method::getName)
+            .collect(Collectors.toSet());
+    assertThat(rawOnPurpose).as("the own test methods of AbstractWormSealTest").hasSize(2);
+    if (info.getTestMethod().map(method -> rawOnPurpose.contains(method.getName())).orElse(false)) {
+      return;
+    }
+    simulateOutage(false);
+    List<EvidenceKey> keys = super.evidence().list("", Optional.empty(), 1000);
+    assertThat(keys).as("the listing is one whole page").hasSizeLessThan(1000);
+    for (EvidenceKey key : keys) {
+      assertThat(Envelope.isEnvelope(super.evidence().get(key).orElseThrow().bytes()))
+          .as("%s is stored as an envelope", key.path())
+          .isTrue();
+    }
   }
 }

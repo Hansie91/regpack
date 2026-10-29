@@ -60,10 +60,12 @@ class DifferentialOpsTest {
         .isTrue();
     assertThat(
             DifferentialOps.agree(
-                several, headConflict("E1", 1), DifferentialOps.REFUSED_WHILE_PROCESSING))
+                several, headConflict("E2", 0), DifferentialOps.REFUSED_WHILE_PROCESSING))
         .isTrue();
     // two stale heads on two event identities: the ledgers may name either one
-    assertThat(DifferentialOps.agree(several, headConflict("E1", 1), headConflict("E2", 0)))
+    Commit twoStale =
+        unit(decision("E1", HeadMode.AHEAD, "d1"), decision("E2", HeadMode.AHEAD, "d1"));
+    assertThat(DifferentialOps.agree(twoStale, headConflict("E1", 1), headConflict("E2", 0)))
         .isTrue();
   }
 
@@ -116,5 +118,23 @@ class DifferentialOpsTest {
             side);
 
     assertThat(answer).isEqualTo(headConflict("E1", 0));
+  }
+
+  @Test
+  void aUnitOfTwoDecisionsOfOneChainNamesTheStoredHeadAlsoWhenItIsNotZero() {
+    ManualClock clock = new ManualClock(Instant.parse("2026-10-09T08:00:00Z"));
+    InMemoryLedgerStore ledger = new InMemoryLedgerStore(clock);
+    Side side = new Side(strict -> ledger, clock, (subject, versionSeq, body) -> 0, "Nt");
+
+    // the chain has one decision, so the stored head is 1
+    assertThat(DifferentialOps.outcome(unit(decision("E1", HeadMode.CURRENT, "d0")), side))
+        .startsWith("INSERTED");
+    // both decisions expect that head; the first would make it 2, and the answer names the stored 1
+    String answer =
+        DifferentialOps.outcome(
+            unit(decision("E1", HeadMode.CURRENT, "d1"), decision("E1", HeadMode.CURRENT, "d2")),
+            side);
+
+    assertThat(answer).isEqualTo(headConflict("E1", 1));
   }
 }

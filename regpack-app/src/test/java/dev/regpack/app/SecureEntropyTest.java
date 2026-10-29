@@ -1,17 +1,27 @@
 package dev.regpack.app;
 
-import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.ports.security.Entropy;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.classfile.ClassFile;
+import java.lang.classfile.ClassModel;
+import java.lang.classfile.Instruction;
+import java.lang.classfile.MethodModel;
+import java.lang.classfile.Opcode;
+import java.lang.classfile.constantpool.FieldRefEntry;
+import java.lang.classfile.constantpool.InterfaceMethodRefEntry;
+import java.lang.classfile.constantpool.MemberRefEntry;
+import java.lang.classfile.constantpool.MethodRefEntry;
+import java.lang.classfile.constantpool.PoolEntry;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
@@ -146,40 +156,85 @@ class SecureEntropyTest {
 
   @Test
   void holdsOneGeneratorForTheWholeProcessAndNothingElse() {
-    List<Field> secureRandoms = new ArrayList<>();
-    for (Field field : SecureEntropy.class.getDeclaredFields()) {
-      if (field.getType() == SecureRandom.class) {
-        secureRandoms.add(field);
-      }
-    }
+    List<Field> fields =
+        Arrays.stream(SecureEntropy.class.getDeclaredFields())
+            .filter(field -> !field.isSynthetic())
+            .toList();
 
-    assertThat(secureRandoms).hasSize(1);
-    int modifiers = secureRandoms.get(0).getModifiers();
+    // one field and no other: no instance state, so two instances cannot differ, and no second
+    // generator, counter or buffer next to the one generator
+    assertThat(fields).extracting(Field::getName).containsExactly("RANDOM");
+    Field random = fields.get(0);
+    assertThat(random.getType()).isEqualTo(SecureRandom.class);
+    int modifiers = random.getModifiers();
     assertThat(Modifier.isStatic(modifiers)).isTrue();
     assertThat(Modifier.isFinal(modifiers)).isTrue();
     assertThat(Modifier.isPrivate(modifiers)).isTrue();
-    // no instance state at all, so two instances cannot differ
-    for (Field field : SecureEntropy.class.getDeclaredFields()) {
-      if (!field.isSynthetic()) {
-        assertThat(Modifier.isStatic(field.getModifiers())).as(field.getName()).isTrue();
-      }
-    }
   }
 
   @Test
   void neverSeedsAndNeverAsksForTheBlockingGenerator() throws IOException {
-    // The names in the constant pool of the compiled class are the calls it can make; comments do
-    // not reach it.
-    String constants;
+    // The compiled class is read and not its source, because comments do not reach it. Its constant
+    // pool names every method and field it can touch, and the code of fill() has the kinds of
+    // instruction it can run: load, constant, stack, field access, invoke and return. So an adapter
+    // that draws from another generator, seeds this one, asks for a named or the strong instance,
+    // or changes the bytes after a correct draw (a store into the array, an operator, a branch, a
+    // loop, a second call) is not this class.
+    ClassModel model;
     try (InputStream in =
         SecureEntropy.class.getResourceAsStream(SecureEntropy.class.getSimpleName() + ".class")) {
       assertThat(in).isNotNull();
-      constants = new String(in.readAllBytes(), ISO_8859_1);
+      model = ClassFile.of().parse(in.readAllBytes());
+    }
+    List<String> methods = new ArrayList<>();
+    List<String> fields = new ArrayList<>();
+    for (PoolEntry entry : model.constantPool()) {
+      if (entry instanceof MethodRefEntry || entry instanceof InterfaceMethodRefEntry) {
+        MemberRefEntry ref = (MemberRefEntry) entry;
+        methods.add(
+            ref.owner().asInternalName()
+                + "."
+                + ref.name().stringValue()
+                + ref.type().stringValue());
+      } else if (entry instanceof FieldRefEntry ref) {
+        fields.add(ref.owner().asInternalName() + "." + ref.name().stringValue());
+      }
     }
 
-    assertThat(constants).contains("java/security/SecureRandom");
-    assertThat(constants).doesNotContain("setSeed");
-    assertThat(constants).doesNotContain("getInstanceStrong");
-    assertThat(constants).doesNotContain("generateSeed");
+    assertThat(methods)
+        .containsExactlyInAnyOrder(
+            "java/lang/Object.<init>()V",
+            "java/security/SecureRandom.<init>()V",
+            "java/security/SecureRandom.nextBytes([B)V",
+            "java/util/Objects.requireNonNull(Ljava/lang/Object;Ljava/lang/String;)"
+                + "Ljava/lang/Object;");
+    assertThat(fields).containsExactly("dev/regpack/app/SecureEntropy.RANDOM");
+    MethodModel fill =
+        model.methods().stream()
+            .filter(
+                method ->
+                    method.methodName().equalsString("fill")
+                        && method.methodType().equalsString("([B)V"))
+            .findFirst()
+            .orElseThrow();
+    Set<Opcode.Kind> kinds = new HashSet<>();
+    fill.code()
+        .orElseThrow()
+        .forEach(
+            element -> {
+              if (element instanceof Instruction instruction) {
+                kinds.add(instruction.opcode().kind());
+              }
+            });
+    assertThat(kinds)
+        .contains(Opcode.Kind.INVOKE)
+        .isSubsetOf(
+            Set.of(
+                Opcode.Kind.LOAD,
+                Opcode.Kind.CONSTANT,
+                Opcode.Kind.STACK,
+                Opcode.Kind.FIELD_ACCESS,
+                Opcode.Kind.INVOKE,
+                Opcode.Kind.RETURN));
   }
 }

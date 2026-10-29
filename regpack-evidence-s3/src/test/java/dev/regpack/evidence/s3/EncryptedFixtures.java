@@ -28,9 +28,11 @@ import java.util.function.Predicate;
  * share one clock. One instance serves one test: the KMS and the entropy are its own.
  *
  * <p>This copy mirrors {@code dev.regpack.evidence.crypto.EncryptedFixtures} on purpose (open item
- * 24, duplicated test support) and holds only the members that the tests of this module call: a
- * later change is made in all three copies (this one, the one in regpack-postgres and the original
- * in regpack-evidence).
+ * 24, duplicated test support) and holds the members that the tests of this module call; the data
+ * constants (the KEK list, {@code SINGLE_KEK}, {@code APPLICATION}) and the helpers of those
+ * members (the administrative KMS the fixture keeps, {@code singleKekCipher}) stay as in the
+ * original on purpose, so that the copies do not diverge: a later change is made in all three
+ * copies (this one, the one in regpack-postgres and the original in regpack-evidence).
  */
 final class EncryptedFixtures {
   /** The workload identity that may use the KEKs. */

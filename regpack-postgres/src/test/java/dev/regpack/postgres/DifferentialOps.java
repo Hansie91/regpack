@@ -55,7 +55,8 @@ import java.util.stream.Collectors;
  * runs (it never depends on what a ledger answered), run against each ledger in turn, shrunk by
  * removing operations, and printed so that it can be written down as a test. Running one gives a
  * text: the answer of the ledger, or the type and message of the exception. Two ledgers agree on an
- * operation when the two texts are equal.
+ * operation when the two texts are equal, or when {@link #agree} reads them as the same refusal of
+ * a unit of several decisions.
  *
  * <p>Identifiers that a ledger invents (subject, delivery and decision numbers) are not compared as
  * numbers: each side names them by the order in which it first showed them ({@link Canon}). Every
@@ -677,7 +678,13 @@ final class DifferentialOps {
     return "T" + side.namespace() + event + regime.charAt(0) + leg.name().charAt(0);
   }
 
-  /** The messages of the argument errors that a ledger finds only in the course of a unit. */
+  /**
+   * The messages of the argument errors that a ledger finds only in the course of a unit. The two
+   * messages about the executing LEI and the stored TRN, and the TRN conflict that {@link
+   * #isFoundWhileProcessing} accepts as well (another exception type), are there for completeness:
+   * the generator never produces them, because the TRN and the executing LEI of a subject are
+   * functions of its regime, event and leg, so the fuzz says nothing about them.
+   */
   private static final List<String> FOUND_WHILE_PROCESSING =
       List.of(
           "a new subject needs a TRN",
@@ -690,8 +697,9 @@ final class DifferentialOps {
    * defects of a unit a ledger reports. The in-memory ledger takes the decisions in the order of
    * the request and PostgreSQL in the order of their chains, so a unit with a stale head and a
    * withdrawal reports one or the other, and {@code ReportLedger#commitReportable} leaves the
-   * choice open (D33 (2)). Nothing else is lenient: the head that a head conflict carries is always
-   * compared (D33 (1)).
+   * choice open (D33 (2)). Nothing else is lenient, but the head of a head conflict is compared
+   * only when both ledgers name the same event identity (D33 (1)); two head conflicts on different
+   * event identities agree without a comparison of heads.
    */
   static final String EXACT_UNITS = "regpack.differential.exactUnits";
 
@@ -732,8 +740,11 @@ final class DifferentialOps {
    * head conflicts on the same event identity (the exception names no regime). A unit can have
    * several defects, the port leaves open which one the ledger reports (D33 (2)), and the two
    * ledgers do not find them in the same order; but when both report the stale head of the same
-   * event identity, the head they name must be the same (D33 (1)). With {@link #EXACT_UNITS} the
-   * answers of a unit are never reduced to a refusal, so only equal texts agree.
+   * event identity, the head they name must be the same (D33 (1)). A head conflict that names an
+   * event of the unit that is not itself stale is accepted as well, because the state of the chains
+   * in the course of the unit is not known here: a unit of two decisions of one chain makes the
+   * second stale after the first. With {@link #EXACT_UNITS} the answers of a unit are never reduced
+   * to a refusal, so only equal texts agree.
    */
   static boolean agree(Op op, String inMemory, String postgres) {
     if (inMemory.equals(postgres)) {
@@ -784,11 +795,11 @@ final class DifferentialOps {
         // the order of the request, PostgreSQL in the order of their chains): the answer is the
         // refusal, and agree() compares two of them by their kind. A head conflict also names its
         // event identity and head, and two conflicts on the same event identity must name the same
-        // head. The refusals
-        // before the first write (an envelope body, a leg, an argument) are compared in full, in a
-        // unit of any size
+        // head. The refusals before the first write (an envelope body, a leg, an argument) are
+        // compared in full, in a unit of any size
         if (e instanceof DecisionHeadConflictException conflict) {
           side.note("refused.Commit");
+          side.note("unit.headConflict");
           return HEAD_CONFLICT
               + conflict.eventIdentity().value()
               + HEAD_AT
@@ -798,6 +809,7 @@ final class DifferentialOps {
           throw e;
         }
         side.note("refused.Commit");
+        side.note("unit.refusedWhileProcessing");
         return REFUSED_WHILE_PROCESSING;
       }
       StringBuilder out = new StringBuilder();

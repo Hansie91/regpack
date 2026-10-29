@@ -240,4 +240,47 @@ abstract class AbstractWormEncryptedVerifyTest {
     assertThat(again.objectsChecked()).isEqualTo(5);
     assertThat(again.manifestRowsChecked()).isEqualTo(5);
   }
+
+  /**
+   * The shape that production will have, on P-WORM: the decorator with the default policy, so that
+   * the sealed file is an envelope while the intent object under {@code journal/} and the epoch
+   * marker under {@code control/} stay plain (A5). Every other test of the tier encrypts every key.
+   * After the KEK is destroyed, {@code verify} counts the sealed file as shredded and still judges
+   * the plain objects.
+   */
+  @Test
+  void aTierWithTheProductionPolicyKeepsTheJournalPlainAndStaysCleanAfterTheKekIsDestroyed() {
+    Tier tier = new Tier();
+    EvidenceStore production =
+        EncryptingEvidenceStore.withDefaultPolicy(
+            tier.raw,
+            tier.fixtures.cipher(
+                tier.fixtures.kms(),
+                KekSelector.single(EncryptedFixtures.kek(FIRST_KEK)),
+                tier.clock));
+    EvidenceVerifier verifier = new EvidenceVerifier(production, tier.ledger);
+    EndpointKey endpoint = LedgerFixtures.endpoint("EVER3");
+    LeaseToken token = tier.lease(endpoint);
+    Sealed a = tier.seal(production, endpoint, token, "BK-A");
+    new EpochMarker(production, RETENTION, tier.clock).declare(1);
+
+    // the sealed file, the intent object and the epoch marker; the two manifest rows
+    assertThat(verifier.verify("")).isEqualTo(new Report(List.of(), 3, 2, 0));
+    // the check is not vacuous: the sealed file is an envelope and the two others are plain
+    assertThat(Envelope.isEnvelope(tier.raw.get(a.sealedKey()).orElseThrow().bytes())).isTrue();
+    for (String prefix : List.of("journal/", "control/")) {
+      List<EvidenceKey> plain = tier.raw.list(prefix, Optional.empty(), 100);
+      assertThat(plain).as("the objects under %s", prefix).isNotEmpty();
+      for (EvidenceKey key : plain) {
+        assertThat(Envelope.isEnvelope(tier.raw.get(key).orElseThrow().bytes()))
+            .as("%s is stored plain", key.path())
+            .isFalse();
+      }
+    }
+
+    tier.fixtures.destroy(FIRST_KEK);
+
+    // only the sealed file is shredded; the plain objects are still read and judged
+    assertThat(verifier.verify("")).isEqualTo(new Report(List.of(), 3, 2, 1));
+  }
 }

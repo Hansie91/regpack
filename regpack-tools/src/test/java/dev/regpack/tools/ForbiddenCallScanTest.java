@@ -250,6 +250,14 @@ class ForbiddenCallScanTest {
             "java/security/SecureRandom.<init>",
             RuleSet.RANDOMNESS),
         Arguments.of(
+            "java.security.SecureRandom.getInstance(\"NativePRNG\");",
+            "java/security/SecureRandom.getInstance",
+            RuleSet.RANDOMNESS),
+        Arguments.of(
+            "java.security.SecureRandom.getInstanceStrong();",
+            "java/security/SecureRandom.getInstanceStrong",
+            RuleSet.RANDOMNESS),
+        Arguments.of(
             "new java.util.SplittableRandom();",
             "java/util/SplittableRandom.<init>",
             RuleSet.RANDOMNESS),

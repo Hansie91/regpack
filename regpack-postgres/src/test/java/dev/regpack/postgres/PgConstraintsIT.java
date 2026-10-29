@@ -1153,10 +1153,11 @@ class PgConstraintsIT extends AbstractPgStoreTest {
    * skipped, with the values it read, when the default collation of the database orders bytes, so
    * that a green tally with no skipped test means the order tests ran where they can fail. Two
    * observations must both say "not byte order": the catalogue (a libc database whose {@code
-   * datcollate} is {@code C}, {@code POSIX} or {@code C.UTF-8}, or a database of the builtin
-   * provider, sorts by code point) and the behaviour (the default collation puts {@code a} before
-   * {@code B}; byte order puts {@code B}, 0x42, before {@code a}, 0x61). The values are in the
-   * message of the skip; a green run prints nothing, and a run with {@code skipped=0} is the proof.
+   * datcollate} is {@code C}, {@code POSIX}, {@code C.UTF-8} or {@code C.utf8}, or a database of
+   * the builtin provider, sorts by code point) and the behaviour (the default collation puts {@code
+   * a} before {@code B}; byte order puts {@code B}, 0x42, before {@code a}, 0x61). The values are
+   * in the message of the skip; a green run prints nothing, and a run with {@code skipped=0} is the
+   * proof.
    */
   @Test
   void theDefaultCollationOfTheDatabaseIsNotByteOrderSoTheOrderTestsCanFail() throws SQLException {

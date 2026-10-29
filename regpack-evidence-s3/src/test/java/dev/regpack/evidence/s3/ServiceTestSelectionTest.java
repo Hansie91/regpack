@@ -178,6 +178,16 @@ class ServiceTestSelectionTest {
     assertThat(hasTheTagLine(sourceOf(root, "PgEncryptedSealScenarioIT")))
         .as("PgEncryptedSealScenarioIT carries no line @Tag(\"worm\")")
         .isFalse();
+    // the job ledger-pg excludes four groups and no gate compares its tally, so a tag of any of the
+    // four on one of these two classes would drop it from the job without a red mark: the first is
+    // the encrypted tier over the ledger, the second the only check that the two ledgers agree
+    for (String name : List.of("PgEncryptedSealScenarioIT", "PgInMemoryDifferentialIT")) {
+      String code =
+          COMMENT.matcher(sourceOf(root, name)).replaceAll(Matcher.quoteReplacement("/**/"));
+      assertThat(Pattern.compile("(?m)^\\s*@Tag\\(").matcher(code).find())
+          .as("%s carries no @Tag, because ledger-pg excludes four groups", name)
+          .isFalse();
+    }
     // the module's own run (job ledger-pg, the build jobs) leaves the group out
     String pom = Files.readString(repo.resolve("regpack-postgres/pom.xml"), UTF_8);
     Matcher excluded = EXCLUDED_GROUPS.matcher(pom);

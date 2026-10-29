@@ -28,8 +28,10 @@ import java.util.function.Predicate;
  * One instance serves one test: the KMS and the entropy are its own.
  *
  * <p>This copy mirrors {@code dev.regpack.evidence.crypto.EncryptedFixtures} on purpose (open item
- * 24, duplicated test support) and holds only the members that the tests of this module call
- * ({@link #create} and {@link #encrypt}, with what they need): a later change is made in all three
+ * 24, duplicated test support) and holds the members that the tests of this module call ({@link
+ * #create} and {@link #encrypt}, with the helpers they use: {@code kek}, {@code everyKey} and
+ * {@code singleKekCipher}); the KEK list, {@code SINGLE_KEK} and {@code APPLICATION} stay as in the
+ * original on purpose, so that the copies do not diverge: a later change is made in all three
  * copies (this one, the one in regpack-evidence-s3 and the original in regpack-evidence).
  */
 final class EncryptedFixtures {
