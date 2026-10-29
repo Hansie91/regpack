@@ -6,6 +6,7 @@ import dev.regpack.evidence.crypto.EncryptedFixtures;
 import dev.regpack.evidence.sealed.SealedEvidenceStore;
 import dev.regpack.evidence.sealed.SealedTamper;
 import dev.regpack.model.Sha256;
+import dev.regpack.ports.crypto.Envelope;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.seal.Sealing.SealOutcome;
@@ -20,7 +21,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -38,16 +41,35 @@ class SealScenariosEncryptedOnSealedTest extends AbstractSealScenarioTest {
   private final EncryptedFixtures fixtures = EncryptedFixtures.create();
   private Path volumeA;
   private Path volumeB;
+  private SealedEvidenceStore raw;
 
   @Override
   EvidenceStore createEvidence(ManualClock clock) throws IOException {
     Path base = root.toRealPath();
     volumeA = base.resolve("vol-a");
     volumeB = base.resolve("vol-b");
-    return fixtures.encrypt(
+    raw =
         SealedEvidenceStore.open(
-            new SealedEvidenceStore.Config(volumeA, volumeB, "vol-a", "vol-b", clock)),
-        clock);
+            new SealedEvidenceStore.Config(volumeA, volumeB, "vol-a", "vol-b", clock));
+    return fixtures.encrypt(raw, clock);
+  }
+
+  /**
+   * After every scenario: each object the scenario left on the volumes is an envelope (T15-1, as in
+   * {@code EncryptedWormContractTest} and {@code PgEncryptedSealScenarioIT}).
+   */
+  @AfterEach
+  void everyObjectTheMethodStoredIsAnEnvelope() {
+    if (raw == null) {
+      return;
+    }
+    List<EvidenceKey> keys = raw.list("", Optional.empty(), 1000);
+    assertThat(keys).as("the listing is one whole page").hasSizeLessThan(1000);
+    for (EvidenceKey key : keys) {
+      assertThat(Envelope.isEnvelope(raw.get(key).orElseThrow().bytes()))
+          .as("%s is stored as an envelope", key.path())
+          .isTrue();
+    }
   }
 
   @Test

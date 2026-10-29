@@ -19,6 +19,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -130,6 +133,35 @@ class EncryptedSealedContractTest extends AbstractSealedContractTest {
 
   private byte[] rawBytes(EvidenceKey key) {
     return super.store().get(key).orElseThrow().bytes();
+  }
+
+  /**
+   * After every method, whichever it is: each object that the method left on the volumes is an
+   * envelope (T15-1, as in {@code EncryptedWormContractTest}). A key that a method damaged on
+   * purpose, on both volumes, is skipped: the raw read of such a key is the corruption alarm of
+   * P-SEALED and says nothing about the policy. No method does that today: the one method that
+   * damages a copy ({@code aDamagedCopyOfTheStoreIsStillACorruptionAlarmThroughTheDecorator})
+   * damages one volume, and the other masks it. The skip is a guard for the day one does.
+   */
+  @AfterEach
+  void everyObjectTheMethodStoredIsAnEnvelope() {
+    if (encrypted == null) {
+      return;
+    }
+    simulateOutage(false);
+    List<EvidenceKey> keys = super.store().list("", Optional.empty(), 1000);
+    assertThat(keys).as("the listing is one whole page").hasSizeLessThan(1000);
+    for (EvidenceKey key : keys) {
+      byte[] stored;
+      try {
+        stored = rawBytes(key);
+      } catch (EvidenceCorruptionException damagedOnPurpose) {
+        continue;
+      }
+      assertThat(Envelope.isEnvelope(stored))
+          .as("%s is stored as an envelope", key.path())
+          .isTrue();
+    }
   }
 
   private static boolean contains(byte[] haystack, byte[] needle) {

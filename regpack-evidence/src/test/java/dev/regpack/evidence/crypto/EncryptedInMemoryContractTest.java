@@ -15,6 +15,9 @@ import dev.regpack.testkit.contract.JournalContract;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -56,6 +59,26 @@ class EncryptedInMemoryContractTest implements EvidenceStoreContract, JournalCon
   @Override
   public EvidenceStore reopen() {
     return store;
+  }
+
+  /**
+   * After every method, whichever it is: each object that the method left in the inner store is an
+   * envelope (T15-1, as in {@code EncryptedWormContractTest}). Without it a policy that skips a
+   * namespace, a key length or a class of keys leaves the inherited methods green.
+   */
+  @AfterEach
+  void everyObjectTheMethodStoredIsAnEnvelope() {
+    if (inner == null) {
+      return;
+    }
+    inner.simulateOutage(false);
+    List<EvidenceKey> keys = inner.list("", Optional.empty(), 1000);
+    assertThat(keys).as("the listing is one whole page").hasSizeLessThan(1000);
+    for (EvidenceKey key : keys) {
+      assertThat(Envelope.isEnvelope(inner.get(key).orElseThrow().bytes()))
+          .as("%s is stored as an envelope", key.path())
+          .isTrue();
+    }
   }
 
   @Test

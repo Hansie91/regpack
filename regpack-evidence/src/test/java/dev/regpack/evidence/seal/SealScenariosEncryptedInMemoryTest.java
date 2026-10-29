@@ -16,6 +16,9 @@ import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -32,6 +35,25 @@ class SealScenariosEncryptedInMemoryTest extends SealScenariosInMemoryTest {
   EvidenceStore createEvidence(ManualClock clock) {
     inner = new InMemoryEvidenceStore(clock);
     return fixtures.encrypt(inner, clock);
+  }
+
+  /**
+   * After every scenario: each object the scenario left in the inner store is an envelope (T15-1,
+   * as in {@code EncryptedWormContractTest} and {@code PgEncryptedSealScenarioIT}).
+   */
+  @AfterEach
+  void everyObjectTheMethodStoredIsAnEnvelope() {
+    if (inner == null) {
+      return;
+    }
+    inner.simulateOutage(false);
+    List<EvidenceKey> keys = inner.list("", Optional.empty(), 1000);
+    assertThat(keys).as("the listing is one whole page").hasSizeLessThan(1000);
+    for (EvidenceKey key : keys) {
+      assertThat(Envelope.isEnvelope(inner.get(key).orElseThrow().bytes()))
+          .as("%s is stored as an envelope", key.path())
+          .isTrue();
+    }
   }
 
   @Test
