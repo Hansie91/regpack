@@ -36,9 +36,13 @@ import org.junit.jupiter.api.TestInfo;
  * run as they are.
  *
  * <p>The two own methods of {@link AbstractWormSealTest} use the raw store and are not claimed for
- * the encrypted tier; the own method of {@link WormSealScenariosTest} (a marker behind the
+ * the encrypted tier; the marker method of {@link WormSealScenariosTest} (a marker behind the
  * adapter's paging) reads {@code evidence()} and so also runs over the decorator, where the markers
- * are encrypted like every other key. The service twin is {@link WormEncryptedSealScenariosIT}.
+ * are encrypted like every other key. The four methods of the guard of the OQ-1 measurement of that
+ * class (P3c1 T15-2) are inherited too and run unchanged: the first reads {@code evidence()} and so
+ * tries to measure the decorated store on an outage of the service, the other three feed the
+ * measurement a failing store of their own. The service twin is {@link
+ * WormEncryptedSealScenariosIT}.
  */
 class WormEncryptedSealScenariosTest extends WormSealScenariosTest {
   private final EncryptedFixtures fixtures = EncryptedFixtures.create();
