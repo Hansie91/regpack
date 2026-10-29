@@ -186,6 +186,8 @@ The owner approved a local PostgreSQL 18.6 on 2026-10-27 (AP-8; the set-up is in
 
 Run on 2026-10-28 in this working tree, after the `ledger-pg` run of section 6.3: mode (a) from 03:22:58 to 03:24:50 UTC and mode (b) from 03:25:14 to 03:26:52 UTC. The commands are those of the job in section 7 (the install step, the step S, the step P, the traceability step in mode `worm`, the tally step), without the job's wait for the S3 port, because that step exits with 1 when nothing answers and so stops the job before the test steps; the failsafe and surefire reports of the two modules were removed before each mode, because a fresh checkout holds no report. **Mode (a)** is the job environment with no service: `REGPACK_PG_URL` at `127.0.0.1:18998`, `REGPACK_S3_ENDPOINT` at `http://127.0.0.1:18999` (netstat showed no listener on either port before the run), the other `REGPACK_S3_*` values as in `ci.yml` (the CI test values of the service container; nothing answered), and `REGPACK_PG_REQUIRED` and `REGPACK_S3_REQUIRED` true. The local PostgreSQL on port 54329 was not used. **Mode (b)** has all of these variables unset and keeps `-Dgroups=worm -DexcludedGroups=none`.
 
+The table holds the counts of the run at `8d6e219`. At `9ded30b` (the fix group of the lens before CP-2) `WormEncryptedContractIT` is 44 and `WormEncryptedVerifyIT` 3, so step S is 174 tests, the job 203, and the numbers of the fixer's repeat of step S follow in the paragraph below the table.
+
 | Class | Step | Test methods (reflection) | Mode (a): run / failed | Mode (b): run / skipped |
 |---|---|---|---|---|
 | `WormEncryptedContractIT` | S | 43 | 43 / 43 | 43 / 43 |
