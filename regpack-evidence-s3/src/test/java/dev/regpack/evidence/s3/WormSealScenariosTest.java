@@ -89,7 +89,8 @@ class WormSealScenariosTest extends AbstractWormSealTest {
                 + sealPathFailure()
                 + ")")
         .hasSize(4);
-    Map<String, Integer> expected = binding.equals("raw") ? RAW_REQUESTS : ENCRYPTED_REQUESTS;
+    Map<String, Integer> expected =
+        binding.equals(SealPathReport.RAW) ? RAW_REQUESTS : ENCRYPTED_REQUESTS;
     for (SealPathReport.Figure figure : figures) {
       assertThat(figure.byKind().values().stream().mapToInt(Integer::intValue).sum())
           .as("requests of the case " + figure.name() + " of the " + binding + " binding")

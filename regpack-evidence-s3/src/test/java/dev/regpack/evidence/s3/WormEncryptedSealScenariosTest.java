@@ -78,7 +78,7 @@ class WormEncryptedSealScenariosTest extends WormSealScenariosTest {
 
     // OQ-1 (P3c1 T15-2): the request figures of one seal through the decorator. Last, after every
     // assertion of the test; this twin asserts the counts and prints nothing.
-    sealPathOfTheBinding("encrypted");
+    sealPathOfTheBinding(SealPathReport.ENCRYPTED);
   }
 
   /**

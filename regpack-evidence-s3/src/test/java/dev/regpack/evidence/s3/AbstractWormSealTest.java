@@ -381,7 +381,7 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
     // measure through their own decorator in theBindingReallyEncryptsWhatTheScenariosSeal, so the
     // raw figure is taken only where evidence() is the raw store.
     if (evidence() == evidence) {
-      sealPathOfTheBinding("raw");
+      sealPathOfTheBinding(SealPathReport.RAW);
     }
   }
 }

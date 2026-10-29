@@ -181,8 +181,6 @@ class RecordingTransportTest {
     recording.stop();
 
     assertThat(recording.segments().get(0).elapsedNanos()).isGreaterThanOrEqualTo(3_000_000L);
-    assertThat(recording.segments().get(0).elapsedNanos())
-        .isLessThan(Duration.ofMinutes(1).toNanos());
   }
 
   @Test

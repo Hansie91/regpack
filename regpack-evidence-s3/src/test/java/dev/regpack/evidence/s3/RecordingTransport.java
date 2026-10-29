@@ -33,6 +33,10 @@ import java.util.function.Function;
  * never reaches the caller, so a figure that cannot be taken never turns the test it sits in red.
  * Outside a segment the transport only forwards. Thread-safe.
  *
+ * <p>It counts the requests that the adapter hands to {@code S3Transport.send}; a retry made inside
+ * {@code JdkTransport} or the JDK {@code HttpClient} is not a call of the delegate and is not
+ * counted.
+ *
  * <p>The elapsed time of a segment is read from {@link System#nanoTime()} at {@link #mark} and at
  * the end of the segment. It is a measurement of this test run and decides nothing; the data clock
  * of the stores stays the {@code ManualClock}.

@@ -103,11 +103,11 @@ class S3ServiceProbeIT {
   }
 
   /** Keeps the last answer, so that the headers of a refused request can be read. */
-  private static final class RecordingTransport implements S3Transport {
+  private static final class LastAnswerTransport implements S3Transport {
     private final S3Transport inner;
     private final AtomicReference<S3Response> last = new AtomicReference<>();
 
-    RecordingTransport(S3Transport inner) {
+    LastAnswerTransport(S3Transport inner) {
       this.inner = inner;
     }
 
@@ -128,7 +128,7 @@ class S3ServiceProbeIT {
   }
 
   private final ProbeReport report = new ProbeReport();
-  private RecordingTransport recording;
+  private LastAnswerTransport recording;
   private S3Client client;
   private boolean hostHasPort;
   private String firstBucket;
@@ -136,7 +136,7 @@ class S3ServiceProbeIT {
   @Test
   void probeTheService() throws IOException {
     S3Settings settings = S3TestService.settings();
-    recording = new RecordingTransport(new JdkTransport(Duration.ofSeconds(30)));
+    recording = new LastAnswerTransport(new JdkTransport(Duration.ofSeconds(30)));
     client =
         new S3Client(
             settings.endpoint(),

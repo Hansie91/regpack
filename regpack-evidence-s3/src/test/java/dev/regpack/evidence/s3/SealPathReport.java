@@ -44,8 +44,14 @@ final class SealPathReport {
   /** The four cases, in the order they are measured and printed. */
   static final List<String> CASES = List.of(NEW_WITHOUT, NEW_WITH, SHARED_WITHOUT, SHARED_WITH);
 
+  /** The binding of the raw store. */
+  static final String RAW = "raw";
+
+  /** The binding of the encrypting decorator over the raw store. */
+  static final String ENCRYPTED = "encrypted";
+
   /** The two bindings: the raw store, and the encrypting decorator over it. */
-  static final List<String> BINDINGS = List.of("raw", "encrypted");
+  static final List<String> BINDINGS = List.of(RAW, ENCRYPTED);
 
   /**
    * Why a measurement failed: a seal that did not end SEALED, a store that was unavailable, a
