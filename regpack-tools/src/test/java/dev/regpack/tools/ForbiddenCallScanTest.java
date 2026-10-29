@@ -257,6 +257,26 @@ class ForbiddenCallScanTest {
             "java.security.SecureRandom.getInstanceStrong();",
             "java/security/SecureRandom.getInstanceStrong",
             RuleSet.RANDOMNESS),
+        // key and nonce material comes through Entropy only (Convention 2, KF8): the JCA calls
+        // that draw a key or an IV from the provider's own generator are forbidden as well
+        Arguments.of(
+            "javax.crypto.KeyGenerator.getInstance(\"AES\").generateKey();",
+            "javax/crypto/KeyGenerator.generateKey",
+            RuleSet.RANDOMNESS),
+        Arguments.of(
+            "java.security.KeyPairGenerator.getInstance(\"RSA\").generateKeyPair();",
+            "java/security/KeyPairGenerator.generateKeyPair",
+            RuleSet.RANDOMNESS),
+        Arguments.of(
+            "java.security.KeyPairGenerator.getInstance(\"RSA\").genKeyPair();",
+            "java/security/KeyPairGenerator.genKeyPair",
+            RuleSet.RANDOMNESS),
+        Arguments.of(
+            "javax.crypto.Cipher.getInstance(\"AES/GCM/NoPadding\").init("
+                + "javax.crypto.Cipher.ENCRYPT_MODE,"
+                + " new javax.crypto.spec.SecretKeySpec(new byte[32], \"AES\"));",
+            "javax/crypto/Cipher.init",
+            RuleSet.RANDOMNESS),
         Arguments.of(
             "new java.util.SplittableRandom();",
             "java/util/SplittableRandom.<init>",
@@ -412,6 +432,11 @@ class ForbiddenCallScanTest {
         "java.text.DateFormat.getDateTimeInstance("
             + "java.text.DateFormat.SHORT, java.text.DateFormat.SHORT, java.util.Locale.ROOT);",
         "new java.text.MessageFormat(\"a\", java.util.Locale.ROOT);",
+        // the init with an explicit parameter spec (the IV comes from the caller) is not flagged
+        "javax.crypto.Cipher.getInstance(\"AES/GCM/NoPadding\").init("
+            + "javax.crypto.Cipher.ENCRYPT_MODE,"
+            + " new javax.crypto.spec.SecretKeySpec(new byte[32], \"AES\"),"
+            + " new javax.crypto.spec.GCMParameterSpec(128, new byte[12]));",
         "java.time.ZoneId.of(\"UTC\");",
         "java.util.TimeZone.getTimeZone(\"UTC\");",
         "java.nio.charset.StandardCharsets.UTF_8.name();",

@@ -72,6 +72,13 @@ public final class ForbiddenCallScan {
     r.add(new Rule(RuleSet.RANDOMNESS, "java/security/SecureRandom", "<init>", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/security/SecureRandom", "getInstance", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/security/SecureRandom", "getInstanceStrong", ""));
+    // key and nonce material comes through Entropy only: the JCA calls that draw a key (or the IV
+    // of Cipher.init(int, Key)) from the provider's own generator are forbidden. The init with an
+    // explicit parameter spec or SecureRandom, which takes the IV from the caller, is not matched.
+    r.add(new Rule(RuleSet.RANDOMNESS, "javax/crypto/KeyGenerator", "generateKey", ""));
+    r.add(new Rule(RuleSet.RANDOMNESS, "java/security/KeyPairGenerator", "generateKeyPair", ""));
+    r.add(new Rule(RuleSet.RANDOMNESS, "java/security/KeyPairGenerator", "genKeyPair", ""));
+    r.add(new Rule(RuleSet.RANDOMNESS, "javax/crypto/Cipher", "init", "(ILjava/security/Key;)V"));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/util/concurrent/ThreadLocalRandom", "current", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/lang/Math", "random", ""));
     r.add(new Rule(RuleSet.RANDOMNESS, "java/util/UUID", "randomUUID", ""));
