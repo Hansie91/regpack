@@ -16,6 +16,8 @@ import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -43,6 +45,63 @@ class WormSealScenariosTest extends AbstractWormSealTest {
     if (backend != null) {
       backend.close();
     }
+  }
+
+  /**
+   * The number of requests of one seal on the fake, per case, in the order of {@link
+   * SealPathReport#CASES}, counted after a first seal in the bucket (OQ-1, P3c1 T15-2; the pin
+   * "Request counts of one DurableSeal.seal on the fake" of the lens before CP-2, measured again).
+   * These are counts on the fake, not a measurement of the service. The raw store: new bytes 6 and
+   * 9, bytes that are already sealed 5 and 10 (a day later, so that the retention extension is
+   * real).
+   */
+  static final Map<String, Integer> RAW_REQUESTS =
+      Map.of(
+          SealPathReport.NEW_WITHOUT, 6,
+          SealPathReport.NEW_WITH, 9,
+          SealPathReport.SHARED_WITHOUT, 5,
+          SealPathReport.SHARED_WITH, 10);
+
+  /** The same under the decorator: the decorated put of a key that exists reads it twice. */
+  static final Map<String, Integer> ENCRYPTED_REQUESTS =
+      Map.of(
+          SealPathReport.NEW_WITHOUT, 8,
+          SealPathReport.NEW_WITH, 11,
+          SealPathReport.SHARED_WITHOUT, 8,
+          SealPathReport.SHARED_WITH, 13);
+
+  /**
+   * The fake-backed twins assert the counts and print nothing; the service classes only print them.
+   * The extension of the retention (one PutObjectRetention and one PutObjectTagging) is in the
+   * shared case with the registrar and nowhere else.
+   */
+  @Override
+  void takeSealPath(String binding, List<SealPathReport.Figure> figures) {
+    assertThat(figures)
+        .as(
+            "the seal path of the "
+                + binding
+                + " binding was measured (why not: "
+                + sealPathFailure()
+                + ")")
+        .hasSize(4);
+    Map<String, Integer> expected = binding.equals("raw") ? RAW_REQUESTS : ENCRYPTED_REQUESTS;
+    for (SealPathReport.Figure figure : figures) {
+      assertThat(figure.byKind().values().stream().mapToInt(Integer::intValue).sum())
+          .as("requests of the case " + figure.name() + " of the " + binding + " binding")
+          .isEqualTo(expected.get(figure.name()));
+      boolean extended = figure.name().equals(SealPathReport.SHARED_WITH);
+      assertThat(figure.byKind().getOrDefault("PUT-retention", 0))
+          .as("PutObjectRetention in " + figure.name())
+          .isEqualTo(extended ? 1 : 0);
+      assertThat(figure.byKind().getOrDefault("PUT-tagging", 0))
+          .as("PutObjectTagging in " + figure.name())
+          .isEqualTo(extended ? 1 : 0);
+      assertThat(figure.byKind().getOrDefault("other", 0))
+          .as("a request of a kind the adapter is not known to send in " + figure.name())
+          .isZero();
+    }
+    assertThat(figures).extracting(SealPathReport.Figure::name).isEqualTo(SealPathReport.CASES);
   }
 
   @Override

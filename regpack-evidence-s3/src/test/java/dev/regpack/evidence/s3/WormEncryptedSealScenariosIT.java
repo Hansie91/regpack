@@ -72,6 +72,11 @@ class WormEncryptedSealScenariosIT extends WormSealScenariosIT {
     // and the ledger row names the hash of the plaintext
     assertThat(ledger().manifestRow(sealedKey).orElseThrow().entry().sha256())
         .isEqualTo(Sha256.of(report));
+
+    // OQ-1 (P3c1 T15-2): the request figures of one seal through the decorator, printed as one
+    // notice line. Last, after every assertion of the test; nothing of the figures is asserted here
+    // and the measurement cannot fail the test.
+    sealPathOfTheBinding("encrypted");
   }
 
   /**

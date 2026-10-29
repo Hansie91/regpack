@@ -16,6 +16,7 @@ import dev.regpack.model.Regime;
 import dev.regpack.ports.Clock;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceStore.Durability;
+import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import dev.regpack.ports.evidence.seal.Sealing;
 import dev.regpack.ports.evidence.seal.Sealing.SealOutcome;
@@ -32,6 +33,8 @@ import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -49,6 +52,12 @@ import org.junit.jupiter.api.Test;
  *
  * <p>A subclass creates its backend lazily (the first call of a seam method), because this class's
  * {@code @BeforeEach} runs before the one of a subclass.
+ *
+ * <p>Since P3c1 T15-2 the transport under the store is a {@link RecordingTransport}, which only
+ * forwards unless a measurement marks a segment, and {@link #sealPathOfTheBinding} (OQ-1) measures
+ * the requests of one seal in four cases at the end of one existing test of each binding. The
+ * classes that run against the real service print the figures as a notice line and assert nothing;
+ * the fake-backed twins assert the counts and print nothing.
  */
 abstract class AbstractWormSealTest implements SealScenarioContract {
   /** The retention policy the scenarios run with (OI-6: tests and tools only). */
@@ -57,8 +66,14 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
   private ManualClock clock;
   private InMemoryLedgerStore ledger;
   private OutageTransport transport;
+  private RecordingTransport recording;
   private WormConfig config;
   private WormEvidenceStore evidence;
+
+  /**
+   * Why the last measurement of OQ-1 failed (a word of {@link SealPathReport#REASONS}), or none.
+   */
+  private String sealPathFailure = "none";
 
   /** The raw client of the service, with the test credentials. */
   abstract S3Client rawClient();
@@ -76,7 +91,9 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
   void setUpStores() {
     clock = new ManualClock(AbstractWormContractTest.START);
     ledger = new InMemoryLedgerStore(clock);
-    transport = new OutageTransport(new JdkTransport(Duration.ofSeconds(60)));
+    // the recorder forwards and does nothing else outside a marked segment (OQ-1, T15-2)
+    recording = new RecordingTransport(new JdkTransport(Duration.ofSeconds(60)));
+    transport = new OutageTransport(recording);
     S3Settings settings = settings();
     config =
         WormConfig.governance(
@@ -149,14 +166,142 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
       EndpointKey endpoint, LeaseToken token, DeliveryId delivery, SealRequest request) {}
 
   private Fixture fixture(String name, String businessKey) {
+    return fixture(name, businessKey, reportOf(businessKey));
+  }
+
+  private Fixture fixture(String name, String businessKey, byte[] bytes) {
     EndpointKey endpoint = LedgerFixtures.endpoint(name);
     LeaseToken token = SealScenarioContract.lease(ledger, endpoint, "A");
     DeliveryId delivery = SealScenarioContract.queued(ledger, endpoint, businessKey);
     return new Fixture(
-        endpoint,
-        token,
-        delivery,
-        request(endpoint, token, delivery, businessKey, reportOf(businessKey)));
+        endpoint, token, delivery, request(endpoint, token, delivery, businessKey, bytes));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // OQ-1 (P3c1 T15-2): the request figures of one seal, taken from the tests themselves
+
+  /**
+   * Measures one {@code DurableSeal.seal} in four cases through {@link #evidence()} (the raw store
+   * in the raw bindings, the decorator in the encrypted ones) and hands the figures to {@link
+   * #takeSealPath}. The cases are new bytes and bytes that are already sealed (the shared object,
+   * sealed for a second delivery after the data clock has moved on by one day, so that the
+   * retention extension is real), each without the registrar ({@link #sealing}) and with the {@link
+   * RetentionEngine} registrar ({@link #sealingWithRetention}), after a first seal in the bucket.
+   * The requests are counted by kind and the elapsed time is taken from {@code System.nanoTime}, by
+   * the {@link RecordingTransport} under the store.
+   *
+   * <p>Call it as the LAST statement of an existing test, after every assertion of that test: it
+   * writes to the bucket and leaves the data clock one day later. The measurement never throws: a
+   * seal that fails, a store that is unavailable, a recorder that lost a request or any other
+   * failure of the measurement ends in no figures and a reason, and the test goes on with its own
+   * result. Only {@link #takeSealPath} may fail the test, and only in the fake-backed twins.
+   */
+  final void sealPathOfTheBinding(String binding) {
+    takeSealPath(binding, measureSealPath(evidence()));
+  }
+
+  /**
+   * What a class does with the figures of one measurement; an empty list means that the measurement
+   * failed (see {@link #sealPathFailure()}). The default prints the notice line of {@link
+   * SealPathReport}, which is what the classes that run against the real service do: a figure of
+   * the service is printed, never asserted. The fake-backed twins override it and assert the
+   * counts, and print nothing. Printing cannot fail the test: a report that throws is replaced by
+   * the fixed line of a failed measurement.
+   */
+  void takeSealPath(String binding, List<SealPathReport.Figure> figures) {
+    String line;
+    try {
+      line =
+          figures.isEmpty()
+              ? SealPathReport.failedLine(binding, sealPathFailure)
+              : SealPathReport.line(binding, figures);
+    } catch (RuntimeException e) {
+      line = SealPathReport.failedLine(binding, "error");
+    }
+    System.out.println(line);
+  }
+
+  /** Why the last measurement failed: a word of {@link SealPathReport#REASONS}, or "none". */
+  final String sealPathFailure() {
+    return sealPathFailure;
+  }
+
+  private List<SealPathReport.Figure> measureSealPath(EvidenceStore store) {
+    try {
+      Regime regime = new Regime("mifir.eu.rts22");
+      Sealing without = sealing(ledger, store, false);
+      Sealing with = sealingWithRetention(ledger, store, regime);
+      byte[] firstBytes = reportOf("OQ-1 the first seal in the bucket");
+      byte[] bytesA = reportOf("OQ-1 bytes that a seal without the registrar writes");
+      byte[] bytesB = reportOf("OQ-1 bytes that a seal with the registrar writes");
+
+      // not measured: the figures are counted after a first seal in the bucket
+      requireSealed(without.seal(fixture("OQ1W", "BK-OQ1-W1", firstBytes).request()));
+
+      List<SealPathReport.Figure> figures = new ArrayList<>();
+      figures.add(
+          measuredSeal(SealPathReport.NEW_WITHOUT, without, fixture("OQ1A", "BK-OQ1-A1", bytesA)));
+      figures.add(
+          measuredSeal(SealPathReport.NEW_WITH, with, fixture("OQ1B", "BK-OQ1-B1", bytesB)));
+      // a second delivery of the same bytes, a day later: the sealed key is shared, and the
+      // registrar's extension of the retention is a real one (the lease is taken after the move)
+      clock.advance(Duration.ofDays(1));
+      figures.add(
+          measuredSeal(
+              SealPathReport.SHARED_WITHOUT, without, fixture("OQ1C", "BK-OQ1-C1", bytesA)));
+      figures.add(
+          measuredSeal(SealPathReport.SHARED_WITH, with, fixture("OQ1D", "BK-OQ1-D1", bytesB)));
+      if (!recording.intact()) {
+        return failedMeasurement("recorder");
+      }
+      sealPathFailure = "none";
+      return List.copyOf(figures);
+    } catch (EvidenceUnavailableException e) {
+      return failedMeasurement("unavailable");
+    } catch (NotSealedException e) {
+      return failedMeasurement("not-sealed");
+    } catch (RuntimeException | AssertionError e) {
+      return failedMeasurement("error");
+    } finally {
+      recording.stop();
+    }
+  }
+
+  private List<SealPathReport.Figure> failedMeasurement(String reason) {
+    sealPathFailure = reason;
+    return List.of();
+  }
+
+  /** Seals the fixture inside a segment of the recorder and returns the figure of the segment. */
+  private SealPathReport.Figure measuredSeal(String caseName, Sealing sealer, Fixture f) {
+    SealOutcome outcome;
+    recording.mark(caseName);
+    try {
+      outcome = sealer.seal(f.request());
+    } finally {
+      recording.stop();
+    }
+    requireSealed(outcome);
+    List<RecordingTransport.Segment> segments = recording.segments();
+    RecordingTransport.Segment segment = segments.get(segments.size() - 1);
+    long millis = (segment.elapsedNanos() + 500_000L) / 1_000_000L;
+    return new SealPathReport.Figure(caseName, millis, segment.byLabel());
+  }
+
+  private static void requireSealed(SealOutcome outcome) {
+    if (outcome.status() != SealStatus.SEALED) {
+      // no detail: it is not part of any line
+      throw new NotSealedException();
+    }
+  }
+
+  /** A seal of the measurement ended in another status than SEALED. */
+  private static final class NotSealedException extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
+    NotSealedException() {
+      super("a seal of the measurement did not end SEALED");
+    }
   }
 
   @Test
@@ -216,5 +361,14 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
     assertThat(evidence.list("", Optional.empty(), 100)).isEmpty();
     assertThat(sealing(ledger, evidence, false).seal(f.request()).status())
         .isEqualTo(SealStatus.SEALED);
+
+    // OQ-1 (P3c1 T15-2): the request figures of one seal on the raw store. This test ends with the
+    // service back and a first seal in the bucket, and its subject is the seal over the transport.
+    // The encrypted bindings inherit this test and run it over the raw store on purpose: they
+    // measure through their own decorator in theBindingReallyEncryptsWhatTheScenariosSeal, so the
+    // raw figure is taken only where evidence() is the raw store.
+    if (evidence() == evidence) {
+      sealPathOfTheBinding("raw");
+    }
   }
 }
