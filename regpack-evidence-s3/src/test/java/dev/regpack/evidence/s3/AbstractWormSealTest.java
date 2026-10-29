@@ -206,7 +206,8 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
    * SealPathReport}, which is what the classes that run against the real service do: a figure of
    * the service is printed, never asserted. The fake-backed twins override it and assert the
    * counts, and print nothing. Printing cannot fail the test: a report that throws is replaced by
-   * the fixed line of a failed measurement.
+   * the fixed line of a failed measurement. That catch is defensive and not reachable by a test:
+   * {@link SealPathReport#line} clamps a negative time, so the report of figures does not throw.
    */
   void takeSealPath(String binding, List<SealPathReport.Figure> figures) {
     String line;
@@ -226,7 +227,19 @@ abstract class AbstractWormSealTest implements SealScenarioContract {
     return sealPathFailure;
   }
 
-  private List<SealPathReport.Figure> measureSealPath(EvidenceStore store) {
+  /**
+   * The measurement of {@link #sealPathOfTheBinding}, over any store (package-private for {@code
+   * WormSealScenariosTest}, which shows the guard with stores that fail). It returns the four
+   * figures, or no figures and a reason in {@link #sealPathFailure()}: a seal that does not end
+   * SEALED is {@code not-sealed} (an outage of the service ends here, because {@link DurableSeal}
+   * turns an unavailable store into a status), a recorder that lost a request is {@code recorder},
+   * a {@link RuntimeException} or an {@link AssertionError} is {@code error}; any other {@link
+   * Error} passes through. The {@link EvidenceUnavailableException} catch is defensive and not
+   * reachable by a test (the word {@code unavailable} stays in the vocabulary of {@link
+   * SealPathReport#REASONS}, which the records pin). One call per bucket: a second call meets the
+   * leases of the first.
+   */
+  final List<SealPathReport.Figure> measureSealPath(EvidenceStore store) {
     try {
       Regime regime = new Regime("mifir.eu.rts22");
       Sealing without = sealing(ledger, store, false);

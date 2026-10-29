@@ -132,7 +132,7 @@ Test methods per class of the slice at this head, from the reports of the local 
 | `NoBypassInEvidenceTest` | `regpack-evidence` | 4 | surefire, whole-reactor build without a server |
 | `EvidenceVerifierTest` | `regpack-evidence` | 31 | surefire, whole-reactor build without a server |
 | `EncryptedWormContractTest` | `regpack-evidence-s3` | 44 | surefire, whole-reactor build without a server |
-| `WormEncryptedSealScenariosTest` | `regpack-evidence-s3` | 29 | surefire, whole-reactor build without a server |
+| `WormEncryptedSealScenariosTest` | `regpack-evidence-s3` | 33 | surefire, whole-reactor build without a server |
 | `WormEncryptedVerifyTest` | `regpack-evidence-s3` | 3 | surefire, whole-reactor build without a server |
 | `WormEncryptedVersionsTest` | `regpack-evidence-s3` | 1 | surefire, whole-reactor build without a server |
 | `ServiceTestSelectionTest` | `regpack-evidence-s3` | 4 | surefire, whole-reactor build without a server |

@@ -3,12 +3,14 @@ package dev.regpack.evidence.s3;
 import static dev.regpack.testkit.contract.SealScenarioContract.reportOf;
 import static dev.regpack.testkit.contract.SealScenarioContract.request;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.evidence.s3.S3TestService.S3Settings;
 import dev.regpack.evidence.s3.client.S3Client;
 import dev.regpack.evidence.s3.fake.FakeS3Server.Fault;
 import dev.regpack.evidence.seal.EpochMarker;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.seal.Sealing.PreSendStatus;
 import dev.regpack.ports.evidence.seal.Sealing.SealOutcome;
 import dev.regpack.ports.evidence.seal.Sealing.SealStatus;
@@ -16,6 +18,7 @@ import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
+import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -27,8 +30,9 @@ import org.junit.jupiter.api.Test;
  * T9, the SEAL-1 scenario; I1, first-byte limb) on an in-memory ledger and P-WORM on the in-JVM
  * fake S3 service, and the two methods of {@link AbstractWormSealTest}. The fake is a stand-in: the
  * run that counts as evidence for P-WORM is the one against the real service ({@code
- * WormSealScenariosIT}, job {@code evidence-worm}). The one method of this class needs a fault
- * switch of the fake and so has no twin there.
+ * WormSealScenariosIT}, job {@code evidence-worm}). The marker method of this class needs a fault
+ * switch of the fake and so has no twin there; the four methods of the guard of the OQ-1
+ * measurement (P3c1 T15-2) need a store that fails and have none either.
  */
 class WormSealScenariosTest extends AbstractWormSealTest {
   private FakeWormBackend backend;
@@ -102,6 +106,52 @@ class WormSealScenariosTest extends AbstractWormSealTest {
           .isZero();
     }
     assertThat(figures).extracting(SealPathReport.Figure::name).isEqualTo(SealPathReport.CASES);
+  }
+
+  /** A store whose every call throws {@code failure} (an Error as it is, else the exception). */
+  private static EvidenceStore failingWith(Throwable failure) {
+    return (EvidenceStore)
+        Proxy.newProxyInstance(
+            EvidenceStore.class.getClassLoader(),
+            new Class<?>[] {EvidenceStore.class},
+            (proxy, method, args) -> {
+              if (failure instanceof Error error) {
+                throw error;
+              }
+              throw (RuntimeException) failure;
+            });
+  }
+
+  /*
+   * T15-2 F2: a measurement of OQ-1 that cannot be taken ends in no figures and a reason and never
+   * throws, so it can never turn a green IT red; an Error that is not an AssertionError passes
+   * through. One call per test: a second call in the same bucket meets the leases of the first.
+   */
+
+  @Test
+  void aMeasurementOnAnOutageOfTheServiceEndsWithoutFigures() {
+    simulateOutage(true);
+
+    assertThat(measureSealPath(evidence())).isEmpty();
+    assertThat(sealPathFailure()).isEqualTo("not-sealed");
+  }
+
+  @Test
+  void aMeasurementWhoseStoreThrowsARuntimeExceptionEndsWithoutFigures() {
+    assertThat(measureSealPath(failingWith(new IllegalStateException("store")))).isEmpty();
+    assertThat(sealPathFailure()).isEqualTo("error");
+  }
+
+  @Test
+  void aMeasurementWhoseStoreThrowsAnAssertionErrorEndsWithoutFigures() {
+    assertThat(measureSealPath(failingWith(new AssertionError("store")))).isEmpty();
+    assertThat(sealPathFailure()).isEqualTo("error");
+  }
+
+  @Test
+  void anErrorOfTheStoreIsNotSwallowedByTheMeasurement() {
+    assertThatThrownBy(() -> measureSealPath(failingWith(new LinkageError("store"))))
+        .isInstanceOf(LinkageError.class);
   }
 
   @Override

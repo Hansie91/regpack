@@ -84,9 +84,10 @@ class WormEncryptedSealScenariosTest extends WormSealScenariosTest {
   /**
    * After every scenario: each object the scenario left in P-WORM is an envelope. The two own
    * methods of {@link AbstractWormSealTest} build their sealer over the raw store on purpose and
-   * are left out; every other method, inherited or not, writes through {@link #evidence()}. Without
-   * this a policy that skips a namespace, a class of keys or a key length would leave the 25
-   * scenarios green.
+   * are left out; every other method, inherited or not, writes through {@link #evidence()} (the
+   * four methods of the guard of the OQ-1 measurement, inherited from {@link
+   * WormSealScenariosTest}, store nothing at all). Without this a policy that skips a namespace, a
+   * class of keys or a key length would leave the 25 scenarios green.
    */
   @AfterEach
   void everyObjectTheMethodStoredIsAnEnvelope(TestInfo info) {
