@@ -36,6 +36,7 @@ import dev.regpack.ports.ledger.DeliveryLedger.DeliveryId;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
 import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
+import dev.regpack.ports.security.KeyPurpose;
 import dev.regpack.ports.security.KeyRef;
 import dev.regpack.ports.security.Kms;
 import dev.regpack.ports.security.KmsAccessDeniedException;
@@ -53,6 +54,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -508,6 +510,71 @@ class EncryptingEvidenceStoreTest {
         .isInstanceOf(EvidenceCorruptionException.class)
         .isNotInstanceOf(EvidenceUnavailableException.class);
     assertThat(raw.get(K)).as("nothing changed").isPresent();
+  }
+
+  /**
+   * A decorator over a fresh inner store that holds {@code stored} with the KEK id of its header (8
+   * characters, from byte 7; byte 6 is the length) replaced by {@code kekId}, as a writer of the
+   * file could do. The authentication tag is not recomputed.
+   */
+  private EncryptingEvidenceStore overHeaderRewrittenTo(byte[] stored, String kekId) {
+    byte[] id = utf8(kekId);
+    assertThat((int) stored[6]).as("length of the KEK id in the header").isEqualTo(id.length);
+    byte[] rewritten = stored.clone();
+    System.arraycopy(id, 0, rewritten, 7, id.length);
+    InMemoryEvidenceStore copy = new InMemoryEvidenceStore(clock);
+    copy.put(new PutRequest(K, rewritten, "text/plain", retention()));
+    return fixtures.encrypt(copy, clock);
+  }
+
+  /**
+   * Pins the consequence of D-K2 for a header chosen by whoever can write the file: the KMS port
+   * answers "this identity may not use that key" and "the service is down" alike, so a header
+   * rewritten to name a key the service holds but this identity may not use as a KEK reads as an
+   * outage, while one that names no key at all reads as a corruption alarm. It is not a statement
+   * that this is the wanted classification; the tamper evidence of the headers is P3c2.
+   */
+  @Test
+  void aHeaderThatNamesAKeyThisIdentityCannotUseReadsAsAnOutageAndOneThatNamesNoKeyAsCorruption() {
+    // a key of another purpose that the identity may use, and a KEK that no identity may use
+    fixtures
+        .admin()
+        .createHmacKey(
+            new KeyRef("trn-key1", KeyPurpose.TRN_HMAC),
+            new byte[32],
+            Set.of(EncryptedFixtures.APPLICATION));
+    fixtures.admin().createKek(EncryptedFixtures.kek("kek-oth1"), Set.of());
+    store.put(request(K, "hello"));
+    byte[] stored = storedBytes(K);
+
+    // the control: the header names the KEK that wrapped the key, so the rewrite changes nothing
+    EncryptingEvidenceStore same = overHeaderRewrittenTo(stored, EncryptedFixtures.SINGLE_KEK);
+    assertThat(same.get(K).orElseThrow().bytes()).isEqualTo(utf8("hello"));
+    assertThat(same.put(request(K, "hello"))).isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+
+    for (String named : List.of("trn-key1", "kek-oth1")) {
+      EncryptingEvidenceStore rewritten = overHeaderRewrittenTo(stored, named);
+      Throwable get = catchThrowable(() -> rewritten.get(K));
+      Throwable put = catchThrowable(() -> rewritten.put(request(K, "hello")));
+
+      assertOutage(get);
+      assertOutage(put);
+      assertThat(List.of(get.getMessage(), put.getMessage()))
+          .as("the message of the outage for %s", named)
+          .allSatisfy(
+              message ->
+                  assertThat(message)
+                      .doesNotContain(named)
+                      .doesNotContain(EncryptedFixtures.SINGLE_KEK));
+    }
+
+    EncryptingEvidenceStore nowhere = overHeaderRewrittenTo(stored, "kek-nope");
+    assertThatThrownBy(() -> nowhere.get(K))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .isNotInstanceOf(EvidenceUnavailableException.class);
+    assertThatThrownBy(() -> nowhere.put(request(K, "hello")))
+        .isInstanceOf(EvidenceCorruptionException.class)
+        .isNotInstanceOf(EvidenceUnavailableException.class);
   }
 
   // -------------------------------------------------------------------------------------------

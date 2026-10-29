@@ -41,7 +41,11 @@ import java.util.function.Predicate;
  *   <li>Bytes that are no envelope of this key (not an envelope at all, an envelope of another kind
  *       or for another key, a changed byte, a wrapped key the KMS rejects, a KEK the KMS does not
  *       know) are an {@link EvidenceCorruptionException}. There is never a fallback to the stored
- *       bytes as plaintext, so a store that was written to behind the decorator cannot downgrade.
+ *       bytes as plaintext, so a store that was written to behind the decorator cannot downgrade. A
+ *       KEK id in the header that was changed to name a key which the key service holds but this
+ *       identity may not use as a KEK is answered with access denied and read as an outage ({@link
+ *       EvidenceUnavailableException}), not as a corruption alarm, as a real denial would be
+ *       (D-K2); a changed id that names no key is a corruption alarm.
  *   <li>A KEK that was destroyed is {@link dev.regpack.ports.crypto.DataShreddedException} on a
  *       read or a repeated put: neither an outage nor a corruption alarm, the object stays listed;
  *       its retention can still be extended and its legal hold set through this decorator, but it
