@@ -16,8 +16,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The comparison of the differential test needs no server: how it reads the refusal of a unit of
- * several decisions (D33), and what a unit of two decisions of one chain answers on the in-memory
- * ledger, which is what the comparison is fed with.
+ * several decisions (D33), what a unit of two decisions of one chain answers on the in-memory
+ * ledger, which is what the comparison is fed with, and the length of the first line of a failure.
  */
 class DifferentialOpsTest {
   private static final String REGIME = "mifir.eu.rts22";
@@ -136,5 +136,74 @@ class DifferentialOpsTest {
             side);
 
     assertThat(answer).isEqualTo(headConflict("E1", 1));
+  }
+
+  @Test
+  void theFirstLineOfAFailureFitsTheAnnotationInBothModes() {
+    String inMemory = "abcdefghij".repeat(20);
+    String postgres = "ABCDEFGHIJ".repeat(20);
+    String option = " -Dregpack.differential.exactUnits=true";
+
+    for (boolean exactUnits : new boolean[] {false, true}) {
+      for (long seed : new long[] {1, Long.MAX_VALUE, Long.MIN_VALUE}) {
+        for (int sequence : new int[] {0, 38, 599, 9999}) {
+          for (int operations : new int[] {60, 999}) {
+            String line =
+                PgInMemoryDifferentialIT.firstLine(
+                    seed, sequence, operations, exactUnits, inMemory, postgres);
+
+            String context =
+                "exactUnits %s, seed %d, sequence %d, operations %d"
+                    .formatted(exactUnits, seed, sequence, operations);
+            // 300 is the recollected cut of the check-run annotation [R], not the constant under
+            // test
+            assertThat(line.length()).as(context).isLessThanOrEqualTo(300);
+            assertThat(line.contains(option)).as(context).isEqualTo(exactUnits);
+            assertThat(line).as(context).startsWith("seed " + seed + ", sequence " + sequence);
+            assertThat(line).as(context).contains(": in-memory abcdefghij");
+            assertThat(line).as(context).contains(" / postgres ABCDEFGHIJ");
+          }
+        }
+      }
+    }
+
+    String runAgain =
+        "-Dregpack.differential.seeds=1 -Dregpack.differential.sequences=39"
+            + " -Dregpack.differential.operations=60";
+    // the default mode keeps the cut of 60 characters: the report of the default run did not change
+    assertThat(PgInMemoryDifferentialIT.firstLine(1, 38, 60, false, inMemory, postgres))
+        .isEqualTo(
+            "seed 1, sequence 38, run again: "
+                + runAgain
+                + ": in-memory "
+                + inMemory.substring(0, 60)
+                + "... / postgres "
+                + postgres.substring(0, 60)
+                + "...");
+    // the longer option of exactUnits takes room from the answers: they are cut at 48
+    assertThat(PgInMemoryDifferentialIT.firstLine(1, 38, 60, true, inMemory, postgres))
+        .isEqualTo(
+            "seed 1, sequence 38, run again: "
+                + runAgain
+                + option
+                + ": in-memory "
+                + inMemory.substring(0, 48)
+                + "... / postgres "
+                + postgres.substring(0, 48)
+                + "...");
+    // an answer that fits is not cut and gets no dots
+    assertThat(PgInMemoryDifferentialIT.firstLine(1, 38, 60, true, "ok", "throws x"))
+        .endsWith(": in-memory ok / postgres throws x");
+    // only absurd values (a seed of 20 characters and a sequence and an operations count of 10
+    // digits, with exactUnits) leave less than 20 characters for an answer, and 20 are kept then
+    assertThat(
+            PgInMemoryDifferentialIT.firstLine(
+                Long.MIN_VALUE, Integer.MAX_VALUE - 1, Integer.MAX_VALUE, true, inMemory, postgres))
+        .endsWith(
+            ": in-memory "
+                + inMemory.substring(0, 20)
+                + "... / postgres "
+                + postgres.substring(0, 20)
+                + "...");
   }
 }

@@ -106,6 +106,13 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
   /** The most differences of one seed that are shrunk when the run goes on after the first. */
   private static final int MAX_SHRUNK = 6;
 
+  /**
+   * The characters of the first line of a failure that the check-run annotation keeps: 300 is the
+   * recollected cut of the annotation [R]; {@link #firstLine} cuts the two answers to stay under
+   * it.
+   */
+  private static final int FIRST_LINE_LIMIT = 300;
+
   private static final Instant START = Instant.parse("2026-10-09T08:00:00Z");
 
   /** What has to happen at least once in a long run, by the notes of the sides. */
@@ -351,17 +358,16 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
       shrunk = ops;
     }
     Divergence divergence = afterShrinking.orElse(first);
+    boolean exactUnits = Boolean.getBoolean(DifferentialOps.EXACT_UNITS);
     StringBuilder out = new StringBuilder();
-    out.append("seed ")
-        .append(seed)
-        .append(", sequence ")
-        .append(sequence)
-        .append(", run again: ")
-        .append(runAgain(seed, sequence, originalLength))
-        .append(": in-memory ")
-        .append(oneLine(divergence.inMemory(), 60))
-        .append(" / postgres ")
-        .append(oneLine(divergence.postgres(), 60))
+    out.append(
+            firstLine(
+                seed,
+                sequence,
+                originalLength,
+                exactUnits,
+                divergence.inMemory(),
+                divergence.postgres()))
         .append('\n');
     out.append(
         notShrunk
@@ -383,12 +389,44 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
         .append("\n  postgres:  ")
         .append(divergence.postgres())
         .append("\n  run again: ")
-        .append(runAgain(seed, sequence, originalLength));
+        .append(runAgain(seed, sequence, originalLength, exactUnits));
     return out.append(" (the sequences before it are generated again from the seed)").toString();
   }
 
+  /**
+   * The first line of a failure, at most {@link #FIRST_LINE_LIMIT} characters: the seed, the
+   * sequence, the options that run it again and both answers. Each answer is cut to half of the
+   * room that is left under the limit, to at most 60 characters (the default mode has that room, so
+   * the report of the default run is as it was; {@code exactUnits} adds a longer option and leaves
+   * about 48) and to at least 20 (only absurd values go so low, and the line is then a few
+   * characters over the limit).
+   */
+  static String firstLine(
+      long seed,
+      int sequence,
+      int operations,
+      boolean exactUnits,
+      String inMemory,
+      String postgres) {
+    String head =
+        "seed "
+            + seed
+            + ", sequence "
+            + sequence
+            + ", run again: "
+            + runAgain(seed, sequence, operations, exactUnits);
+    int room =
+        FIRST_LINE_LIMIT
+            - head.length()
+            - ": in-memory ".length()
+            - " / postgres ".length()
+            - 2 * "...".length();
+    int cut = Math.max(20, Math.min(60, room / 2));
+    return head + ": in-memory " + oneLine(inMemory, cut) + " / postgres " + oneLine(postgres, cut);
+  }
+
   /** The options that run the sequence again: the sequences before it are generated again. */
-  private static String runAgain(long seed, int sequence, int operations) {
+  static String runAgain(long seed, int sequence, int operations, boolean exactUnits) {
     StringBuilder options =
         new StringBuilder("-D")
             .append(SEEDS)
@@ -402,7 +440,7 @@ class PgInMemoryDifferentialIT extends AbstractPgStoreTest {
             .append(OPERATIONS)
             .append('=')
             .append(operations);
-    if (Boolean.getBoolean(DifferentialOps.EXACT_UNITS)) {
+    if (exactUnits) {
       options.append(" -D").append(DifferentialOps.EXACT_UNITS).append("=true");
     }
     return options.toString();
