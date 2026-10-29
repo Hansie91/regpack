@@ -11,6 +11,7 @@ import dev.regpack.ports.ledger.RetentionLedger.RetentionClaim;
 import dev.regpack.postgres.PgLedgerStore.Config;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
@@ -27,7 +28,8 @@ import org.junit.jupiter.api.Test;
  * not wait; when the lock is let go, the same calls succeed. The lock is taken here with a literal
  * statement, the purpose 4 and the text schema ':' artifact, and not with {@code
  * PgRetention.ARTIFACT_LOCK_SQL}, so that the test pins the purpose and the key text independently
- * of the production constant.
+ * of the production constant. The class also holds the evidence for the premise of KF22 (a call
+ * that changes nothing still writes a row version, so there is no durability barrier).
  *
  * <p>Real-store test: skipped without {@code REGPACK_PG_URL}, a failure with {@code
  * REGPACK_PG_REQUIRED=true}. It ran green on a local PostgreSQL 18.6 before CP-1 (record AP-8); the
@@ -45,6 +47,51 @@ class PgRetentionIT extends AbstractPgStoreTest {
         AnchorEvent.OBJECT_WRITTEN,
         Optional.of(UNTIL),
         "sealed");
+  }
+
+  /**
+   * The premise of KF22 (D-K8): {@code PgRetention} takes no durability barrier, because a call
+   * that records a claim or sets a hold writes a row version even when it changes nothing, and so
+   * waits for the standby like any write. The system column {@code xmin}, the transaction that
+   * wrote the row version, shows the write: the same claim recorded again (the same date, so the
+   * {@code GREATEST} keeps the value) and a hold set to the value the flag has already each give
+   * the row a new {@code xmin}. The job {@code ledger-pg} has no standby, so the wait itself is not
+   * shown here, only the write that causes it.
+   */
+  @Test
+  void aClaimOrAHoldThatChangesNothingStillWritesARowVersion() throws SQLException {
+    store().recordRetention(List.of(claim(A, "emir.eu")));
+    String born = xmin(A);
+
+    store().recordRetention(List.of(claim(A, "emir.eu")));
+    String afterTheSameClaim = xmin(A);
+    assertThat(afterTheSameClaim)
+        .as("the claim of a stored row, with the same date, wrote a row version")
+        .isNotEqualTo(born);
+
+    store().setRetentionHold(new EvidenceKey(A), false);
+    assertThat(xmin(A))
+        .as("the release of a row that is not held wrote a row version")
+        .isNotEqualTo(afterTheSameClaim);
+  }
+
+  /** The {@code xmin} of the one row of the artifact, read on a plain connection. */
+  private String xmin(String artifact) throws SQLException {
+    String sql =
+        "SELECT xmin::text FROM "
+            + SqlIdentifier.require(schema())
+            + ".retention"
+            + " WHERE object_key = ?";
+    try (Connection connection = dataSource().getConnection();
+        PreparedStatement statement = connection.prepareStatement(sql)) {
+      statement.setString(1, artifact);
+      try (ResultSet rows = statement.executeQuery()) {
+        assertThat(rows.next()).as("the artifact has a row").isTrue();
+        String xmin = rows.getString(1);
+        assertThat(rows.next()).as("the artifact has one row only").isFalse();
+        return xmin;
+      }
+    }
   }
 
   @Test

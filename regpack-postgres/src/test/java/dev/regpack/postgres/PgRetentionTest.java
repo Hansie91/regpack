@@ -522,8 +522,8 @@ class PgRetentionTest {
    * needs no barrier. The fake server answers the barrier query with a row, so that a barrier would
    * be seen; the artifact lock and the upsert run (nothing is read to decide whether to write) and
    * the unit does not take the durability barrier. That the {@code DO UPDATE} writes a new row
-   * version for an unchanged value is a recollection of PostgreSQL and is not shown here: the
-   * statement order is.
+   * version for an unchanged value is not shown here (the statement order is); {@code
+   * PgRetentionIT#aClaimOrAHoldThatChangesNothingStillWritesARowVersion} shows it on a server.
    */
   @Test
   void recordingAnExistingClaimStillWrites() {

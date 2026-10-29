@@ -98,8 +98,10 @@ import javax.sql.DataSource;
  *
  * <p><b>A call that writes nothing still waits for the standby (I1).</b> There is no such call:
  * {@link #recordRetention} writes a row version for every claim (a conflict updates the date
- * through the {@code DO UPDATE}, also to the value it has [R]) and {@link #setRetentionHold}
- * updates every row of the artifact or fails. So no durability barrier is taken.
+ * through the {@code DO UPDATE}, also to the value it has) and {@link #setRetentionHold} updates
+ * every row of the artifact or fails. So no durability barrier is taken. {@code
+ * PgRetentionIT#aClaimOrAHoldThatChangesNothingStillWritesARowVersion} shows on a server that both
+ * calls write a row version when they change nothing.
  *
  * <p><b>Reading.</b> {@link #retentionRows} is the range on the primary key of {@code PgManifest}
  * over the artifacts, with the rows of at most {@code limit} artifacts: the keys are chosen by a
