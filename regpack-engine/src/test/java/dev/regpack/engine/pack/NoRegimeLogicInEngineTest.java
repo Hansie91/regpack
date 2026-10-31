@@ -53,7 +53,11 @@ class NoRegimeLogicInEngineTest {
 
   private static List<Path> sources(Path root) throws IOException {
     List<Path> files = new ArrayList<>();
-    for (String module : List.of("regpack-engine/src/main/java", "regpack-pack/src/main/java")) {
+    for (String module :
+        List.of(
+            "regpack-engine/src/main/java",
+            "regpack-pack/src/main/java",
+            "regpack-flow/src/main/java")) {
       try (Stream<Path> walk = Files.walk(root.resolve(module))) {
         walk.filter(p -> p.toString().endsWith(".java"))
             .filter(p -> !p.toString().replace('\\', '/').contains(SKELETON))
@@ -85,6 +89,9 @@ class NoRegimeLogicInEngineTest {
         .contains("PackRegime.java", "PackProgram.java", "PackLoader.java", "TableParser.java");
     assertThat(files.stream().map(p -> p.toString().replace('\\', '/')))
         .noneMatch(p -> p.contains(SKELETON));
+    // I4 over the flow module too: the scan provably reads it
+    assertThat(files.stream().map(p -> p.toString().replace('\\', '/')))
+        .anyMatch(p -> p.contains("/regpack-flow/src/main/java/"));
     assertThat(literalsIn(repo(), files)).as("regime literals in engine or pack sources").isEmpty();
   }
 
@@ -93,6 +100,7 @@ class NoRegimeLogicInEngineTest {
     Path dir = root.resolve("regpack-engine/src/main/java/dev/regpack/engine/pack");
     Files.createDirectories(dir);
     Files.createDirectories(root.resolve("regpack-pack/src/main/java"));
+    Files.createDirectories(root.resolve("regpack-flow/src/main/java"));
     Path planted = dir.resolve("PackProgram.java");
     Files.writeString(
         planted,

@@ -77,6 +77,11 @@ One question for the owner (W1b, not blocking): is a store or an e-mail address 
 
 | Pin | Value | Task | Reason |
 |---|---|---|---|
+| Sample file `trades-day1.csv` (`regpack-flow/src/main/resources/dev/regpack/flow/samples/`) | 1,399 bytes, SHA-256 `1073c60eac2be3d69787d844c02035d06083628ceafde2562754968cde6f0a8a`; marker: 8 records, `sum_quantity` 540.5, `data_class` SYNTHETIC | T2 | scenario table rows 1 and 3 (the file is dropped again unchanged); the batch digest and every later golden follow from these bytes; `SampleFilesTest#everyMarkerMatchesItsFile` |
+| Sample file `trades-day2.csv` | 803 bytes, SHA-256 `9cec0986c8d43d243fa579a553770c6c58018f5aec1d5c8cb6d26edd92c062e2`; marker: 4 records, `sum_quantity` 217, `data_class` SYNTHETIC | T2 | scenario table row 2 (cancel, corrected resend, quarantined record, silence) |
+| Sample file `trades-day3-badtotals.csv` | 480 bytes, SHA-256 `9891f305e140b5b6b3ac9d05e1cbd475b846361c5aa080ca578a2a1cc95e8ae0`; marker: 3 records for 2 rows, `sum_quantity` 30, `data_class` SYNTHETIC | T2 | scenario table row 4 (QUARANTINE_BATCH on a control-total mismatch); `SampleFilesTest#day3MarkerSaysThreeRecordsAndTheFileHasTwo` |
+| Sample file `trades-day4-broken.csv` | 462 bytes, SHA-256 `7623b375035d0af0a63706fb1da468e76d55bcf55d76b9bbb8534edeab724be7`; marker: 2 records, `sum_quantity` 30, `data_class` SYNTHETIC; the header lacks `price` | T2 | scenario table row 5 (REJECT_FILE, landed, moved to `rejected/`); `SampleFilesTest#day4LacksThePriceColumn` |
+| Sample file `trades-day5-notsynth.csv` | 480 bytes, SHA-256 `095c97bb6ef2e3d24fd96a19ceff93377e56b0766553253ba8bb4b69392cb64e`; marker: 2 records, `sum_quantity` 30, no `data_class` | T2 | scenario table row 6 (REJECT_FILE `NOT_SYNTHETIC`, nothing landed); `SampleFilesTest#day5MarkerHasNoDataClass` |
 
 ## Deviations
 

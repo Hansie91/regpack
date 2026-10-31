@@ -22,6 +22,7 @@
     <module>regpack-evidence-s3</module>
     <module>regpack-postgres</module>
     <module>regpack-engine</module>
+    <module>regpack-flow</module>
     <module>regpack-app</module>
   </modules>
 
@@ -79,6 +80,7 @@
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-evidence</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-evidence-s3</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>dev.regpack</groupId><artifactId>regpack-engine</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>dev.regpack</groupId><artifactId>regpack-flow</artifactId><version>${project.version}</version></dependency>
     </dependencies>
   </dependencyManagement>
 
