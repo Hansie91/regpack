@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.EventIdentity;
+import dev.regpack.model.IngestKey;
+import dev.regpack.model.decision.InputDigest;
 import dev.regpack.model.json.Json;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -192,5 +194,144 @@ class CanonicalExecutionCodecTest {
           .isInstanceOf(IllegalArgumentException.class)
           .hasMessageContaining("clientLei");
     }
+  }
+
+  private static CanonicalExecution full() {
+    return new CanonicalExecution(
+        "529900T8BM49AURSDO55",
+        "XPAR",
+        "EX-1",
+        LifecycleKind.NEW,
+        Instant.parse("2026-10-09T09:30:00.123456Z"),
+        AssetClass.EQUITY,
+        "FR0000120271",
+        true,
+        PartyKind.LEGAL_ENTITY,
+        Optional.of("5493001KJTIIGC8Y1R12"),
+        new BigDecimal("100.5"),
+        new BigDecimal("12.25"),
+        "EUR",
+        Optional.of(Side.SELL),
+        Optional.of("MTCH"),
+        Optional.of("CTP-1"),
+        Optional.of("ALGO-1"));
+  }
+
+  @Test
+  void absentOptionalFieldsAreOmittedSoOldDigestsHold() {
+    String head = "{\"assetClass\":\"EQUITY\",\"clientKind\":\"LEGAL_ENTITY\",";
+    String tail =
+        "\"currency\":\"EUR\",\"eventKind\":\"NEW\",\"firmLei\":\"529900T8BM49AURSDO55\","
+            + "\"isin\":\"FR0000120271\",\"price\":12.25,\"quantity\":100.5,"
+            + "\"tradedAt\":\"2026-10-09T09:30:00.123456Z\",\"tradedOnVenue\":true,"
+            + "\"venueExecutionId\":\"EX-1\",\"venueMic\":\"XPAR\"}";
+    assertThat(Json.canonical(CanonicalExecutionCodec.toMap(execution(Optional.empty()))))
+        .isEqualTo(head + tail);
+    assertThat(
+            Json.canonical(
+                CanonicalExecutionCodec.toMap(execution(Optional.of("5493001KJTIIGC8Y1R12")))))
+        .isEqualTo(head + "\"clientLei\":\"5493001KJTIIGC8Y1R12\"," + tail);
+    for (String key : new String[] {"side", "capacity", "counterparty", "executionWithinFirm"}) {
+      assertThat(CanonicalExecutionCodec.toMap(execution(Optional.empty()))).doesNotContainKey(key);
+    }
+    // the fixture of DecisionTypesTest#inputDigestMatchesTheGoldenVector: the pinned digest holds
+    CanonicalExecution pinned =
+        new CanonicalExecution(
+            "L",
+            "XPAR",
+            "EX-1",
+            LifecycleKind.NEW,
+            Instant.parse("2026-10-09T09:30:00.123456Z"),
+            AssetClass.EQUITY,
+            "FR0000120271",
+            true,
+            PartyKind.LEGAL_ENTITY,
+            Optional.empty(),
+            new BigDecimal("100.5"),
+            new BigDecimal("12.25"),
+            "EUR");
+    assertThat(InputDigest.of(pinned, new IngestKey("src", "rec-1", 1)).hex())
+        .isEqualTo("30ddc5cf01393b67d6c92facf300b21058c9c95392f5d5882b147582c5fe1e7d");
+  }
+
+  @Test
+  void thirteenArgumentConstructorLeavesTheFourEmpty() {
+    CanonicalExecution e = execution(Optional.empty());
+    assertThat(e.side()).isEmpty();
+    assertThat(e.capacity()).isEmpty();
+    assertThat(e.counterparty()).isEmpty();
+    assertThat(e.executionWithinFirm()).isEmpty();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void roundTripsWithAllFourOptionalFields() {
+    CanonicalExecution e = full();
+    Map<String, Object> map = CanonicalExecutionCodec.toMap(e);
+    assertThat(map)
+        .containsEntry("side", "SELL")
+        .containsEntry("capacity", "MTCH")
+        .containsEntry("counterparty", "CTP-1")
+        .containsEntry("executionWithinFirm", "ALGO-1");
+    String json = Json.canonical(map);
+    CanonicalExecution back =
+        CanonicalExecutionCodec.fromMap((Map<String, Object>) Json.parse(json));
+    assertThat(back).isEqualTo(e);
+    assertThat(Json.canonical(CanonicalExecutionCodec.toMap(back))).isEqualTo(json);
+  }
+
+  @Test
+  void aSideOutsideTheEnumerationIsRefused() {
+    Map<String, Object> map = new LinkedHashMap<>(CanonicalExecutionCodec.toMap(full()));
+    map.put("side", "HOLD");
+    assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("side");
+  }
+
+  @Test
+  void aBadOptionalTextIsRefusedWithoutEchoingIt() {
+    String nul = String.valueOf((char) 0);
+    String high = String.valueOf((char) 0xD800);
+    String[] bad = {"A" + nul + "B", "A" + high + "B", "x".repeat(257)};
+    for (String field : new String[] {"capacity", "counterparty", "executionWithinFirm"}) {
+      for (String value : bad) {
+        Map<String, Object> map = new LinkedHashMap<>(CanonicalExecutionCodec.toMap(full()));
+        map.put(field, value);
+        assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+            .as(field)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining(field)
+            .message()
+            .doesNotContain(value);
+      }
+    }
+    // the constructor refuses the same texts
+    assertThatThrownBy(
+            () ->
+                new CanonicalExecution(
+                    "F",
+                    "XPAR",
+                    "EX-1",
+                    LifecycleKind.NEW,
+                    Instant.parse("2026-10-09T09:30:00Z"),
+                    AssetClass.EQUITY,
+                    "FR0000120271",
+                    true,
+                    PartyKind.LEGAL_ENTITY,
+                    Optional.empty(),
+                    BigDecimal.ONE,
+                    BigDecimal.ONE,
+                    "EUR",
+                    Optional.empty(),
+                    Optional.of("x".repeat(257)),
+                    Optional.empty(),
+                    Optional.empty()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("capacity");
+    // 256 characters are allowed
+    Map<String, Object> longest = new LinkedHashMap<>(CanonicalExecutionCodec.toMap(full()));
+    longest.put("capacity", "x".repeat(256));
+    assertThat(CanonicalExecutionCodec.fromMap(longest).capacity()).contains("x".repeat(256));
   }
 }

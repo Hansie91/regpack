@@ -14,7 +14,11 @@ import java.util.Optional;
 public final class CanonicalExecutionCodec {
   private CanonicalExecutionCodec() {}
 
-  /** Keys are the record component names; {@code clientLei} is omitted when absent. */
+  /**
+   * Keys are the record component names; {@code clientLei}, {@code side}, {@code capacity}, {@code
+   * counterparty} and {@code executionWithinFirm} are omitted when absent, so an execution without
+   * them has the canonical JSON (and the input digest) it had before they existed.
+   */
   public static Map<String, Object> toMap(CanonicalExecution execution) {
     Map<String, Object> map = new LinkedHashMap<>();
     map.put("firmLei", execution.firmLei());
@@ -30,6 +34,10 @@ public final class CanonicalExecutionCodec {
     map.put("quantity", execution.quantity());
     map.put("price", execution.price());
     map.put("currency", execution.currency());
+    execution.side().ifPresent(side -> map.put("side", side.name()));
+    execution.capacity().ifPresent(v -> map.put("capacity", v));
+    execution.counterparty().ifPresent(v -> map.put("counterparty", v));
+    execution.executionWithinFirm().ifPresent(v -> map.put("executionWithinFirm", v));
     return map;
   }
 
@@ -103,7 +111,20 @@ public final class CanonicalExecutionCodec {
         map.containsKey("clientLei") ? Optional.of(text(map, "clientLei")) : Optional.empty(),
         decimal(map, "quantity"),
         decimal(map, "price"),
-        text(map, "currency"));
+        text(map, "currency"),
+        map.containsKey("side")
+            ? Optional.of(enumValue(map, "side", Side.class))
+            : Optional.empty(),
+        optionalText(map, "capacity"),
+        optionalText(map, "counterparty"),
+        optionalText(map, "executionWithinFirm"));
+  }
+
+  /**
+   * The text of an optional field; the constructor of the record applies the {@link KeyText} rule.
+   */
+  private static Optional<String> optionalText(Map<String, Object> map, String field) {
+    return map.containsKey(field) ? Optional.of(text(map, field)) : Optional.empty();
   }
 
   private static Object required(Map<String, Object> map, String field) {

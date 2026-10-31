@@ -21,7 +21,7 @@ import java.util.Set;
 import java.util.TreeMap;
 
 /**
- * The canonical input of this engine build as {@link Bindings}: the 13 paths of a flattened {@link
+ * The canonical input of this engine build as {@link Bindings}: the 17 paths of a flattened {@link
  * CanonicalExecution}. A pack declares the paths its rules may read in {@code
  * model/canonical-input.yaml}; {@link #checkSupported} refuses a declaration this class cannot bind
  * (a path it does not know, another type, another enumeration, or a ledger-state input).
@@ -34,9 +34,16 @@ public final class CanonicalBindings implements Bindings {
   private static final String LIFECYCLE_KIND = "LifecycleKind";
   private static final String PARTY_KIND = "PartyKind";
   private static final String ASSET_CLASS = "AssetClass";
+  private static final String SIDE = "Side";
 
-  /** The paths that can be absent in this engine build; every other path is always present. */
-  private static final Set<String> OPTIONAL_PATHS = Set.of("client.lei");
+  /** The five paths that can be absent in this engine build; every other path is always present. */
+  private static final Set<String> OPTIONAL_PATHS =
+      Set.of(
+          "client.lei",
+          "trade.side",
+          "trade.capacity",
+          "trade.counterparty",
+          "trade.executionWithin");
 
   /** The paths this class binds, with their types, in path order. */
   public static final Map<String, ValueType> VARIABLES;
@@ -59,12 +66,17 @@ public final class CanonicalBindings implements Bindings {
     types.put("trade.quantity", ValueType.DECIMAL);
     types.put("trade.price", ValueType.DECIMAL);
     types.put("trade.currency", ValueType.STRING);
+    types.put("trade.side", ValueType.ENUM);
+    types.put("trade.capacity", ValueType.STRING);
+    types.put("trade.counterparty", ValueType.STRING);
+    types.put("trade.executionWithin", ValueType.STRING);
     VARIABLES = Collections.unmodifiableMap(types);
 
     Map<String, String> enums = new TreeMap<>();
     enums.put("event.kind", LIFECYCLE_KIND);
     enums.put("instrument.assetClass", ASSET_CLASS);
     enums.put("client.kind", PARTY_KIND);
+    enums.put("trade.side", SIDE);
     ENUM_TYPES = Collections.unmodifiableMap(enums);
   }
 
@@ -92,6 +104,10 @@ public final class CanonicalBindings implements Bindings {
       case "trade.quantity" -> Optional.of(new DecimalValue(execution.quantity()));
       case "trade.price" -> Optional.of(new DecimalValue(execution.price()));
       case "trade.currency" -> Optional.of(new StringValue(execution.currency()));
+      case "trade.side" -> execution.side().map(side -> new EnumValue(SIDE, side.name()));
+      case "trade.capacity" -> execution.capacity().map(StringValue::new);
+      case "trade.counterparty" -> execution.counterparty().map(StringValue::new);
+      case "trade.executionWithin" -> execution.executionWithinFirm().map(StringValue::new);
       default -> Optional.empty();
     };
   }
@@ -101,7 +117,9 @@ public final class CanonicalBindings implements Bindings {
    * {@code INPUT_PATH_UNSUPPORTED} (a path this class does not bind, or a ledger-state input) and
    * {@code INPUT_TYPE_MISMATCH} (another type, or another enumeration for an ENUM path) and {@code
    * INPUT_OPTIONAL_MISMATCH} (an {@code optional} flag that contradicts the binding: only {@code
-   * client.lei} can be absent).
+   * client.lei}, {@code trade.side}, {@code trade.capacity}, {@code trade.counterparty} and {@code
+   * trade.executionWithin} can be absent). Only the declared variables are walked, so a pack that
+   * declares some of the paths (the sample pack declares 13) is accepted.
    */
   public static List<PackProblem> checkSupported(CanonicalInputSpec spec) {
     Objects.requireNonNull(spec, "spec");

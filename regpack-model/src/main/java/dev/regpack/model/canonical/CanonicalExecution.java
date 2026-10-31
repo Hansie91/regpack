@@ -1,12 +1,20 @@
 package dev.regpack.model.canonical;
 
 import dev.regpack.model.EventIdentity;
+import dev.regpack.model.KeyText;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 
-/** A flattened execution event of the walking skeleton. */
+/**
+ * A flattened execution event of the walking skeleton.
+ *
+ * <p>The last four components are optional: {@code side}, {@code capacity}, {@code counterparty}
+ * and {@code executionWithinFirm}. Each text is a {@link KeyText} (at most {@value
+ * KeyText#MAX_CHARS} characters, no control character, no unpaired surrogate); a refusal names the
+ * field and never echoes the value. The 13-argument constructor leaves the four empty.
+ */
 public record CanonicalExecution(
     String firmLei,
     String venueMic,
@@ -20,8 +28,47 @@ public record CanonicalExecution(
     Optional<String> clientLei,
     BigDecimal quantity,
     BigDecimal price,
-    String currency)
+    String currency,
+    Optional<Side> side,
+    Optional<String> capacity,
+    Optional<String> counterparty,
+    Optional<String> executionWithinFirm)
     implements CanonicalEvent {
+
+  /** An execution with none of the four optional components. */
+  public CanonicalExecution(
+      String firmLei,
+      String venueMic,
+      String venueExecutionId,
+      LifecycleKind eventKind,
+      Instant tradedAt,
+      AssetClass assetClass,
+      String isin,
+      boolean tradedOnVenue,
+      PartyKind clientKind,
+      Optional<String> clientLei,
+      BigDecimal quantity,
+      BigDecimal price,
+      String currency) {
+    this(
+        firmLei,
+        venueMic,
+        venueExecutionId,
+        eventKind,
+        tradedAt,
+        assetClass,
+        isin,
+        tradedOnVenue,
+        clientKind,
+        clientLei,
+        quantity,
+        price,
+        currency,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty());
+  }
 
   public CanonicalExecution {
     requireText(firmLei, "firmLei");
@@ -37,6 +84,13 @@ public record CanonicalExecution(
     Objects.requireNonNull(quantity, "quantity");
     Objects.requireNonNull(price, "price");
     requireText(currency, "currency");
+    Objects.requireNonNull(side, "side");
+    Objects.requireNonNull(capacity, "capacity");
+    Objects.requireNonNull(counterparty, "counterparty");
+    Objects.requireNonNull(executionWithinFirm, "executionWithinFirm");
+    capacity.ifPresent(v -> KeyText.require("capacity", v));
+    counterparty.ifPresent(v -> KeyText.require("counterparty", v));
+    executionWithinFirm.ifPresent(v -> KeyText.require("executionWithinFirm", v));
   }
 
   private static void requireText(String value, String field) {

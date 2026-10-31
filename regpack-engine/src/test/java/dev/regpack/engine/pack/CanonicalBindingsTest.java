@@ -6,6 +6,7 @@ import dev.regpack.model.canonical.AssetClass;
 import dev.regpack.model.canonical.CanonicalExecution;
 import dev.regpack.model.canonical.LifecycleKind;
 import dev.regpack.model.canonical.PartyKind;
+import dev.regpack.model.canonical.Side;
 import dev.regpack.pack.check.PackProblem;
 import dev.regpack.pack.model.CanonicalInputSpec;
 import dev.regpack.pack.model.CanonicalInputSpec.Variable;
@@ -23,7 +24,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
 
 class CanonicalBindingsTest {
@@ -46,6 +49,29 @@ class CanonicalBindingsTest {
         "EUR");
   }
 
+  /** The fixture with the four optional components set. */
+  private static CanonicalExecution fullExecution() {
+    CanonicalExecution base = execution(Optional.of("LEI-CLIENT-0001"));
+    return new CanonicalExecution(
+        base.firmLei(),
+        base.venueMic(),
+        base.venueExecutionId(),
+        base.eventKind(),
+        base.tradedAt(),
+        base.assetClass(),
+        base.isin(),
+        base.tradedOnVenue(),
+        base.clientKind(),
+        base.clientLei(),
+        base.quantity(),
+        base.price(),
+        base.currency(),
+        Optional.of(Side.BUY),
+        Optional.of("AOTC"),
+        Optional.of("LEI-CCP-0001"),
+        Optional.of("ALGO-1"));
+  }
+
   private static CanonicalBindings bindings() {
     return new CanonicalBindings(execution(Optional.of("LEI-CLIENT-0001")));
   }
@@ -64,8 +90,8 @@ class CanonicalBindingsTest {
 
   @Test
   void bindsEveryCataloguePathWithItsType() {
-    CanonicalBindings bindings = bindings();
-    assertThat(CanonicalBindings.VARIABLES).hasSize(13);
+    CanonicalBindings bindings = new CanonicalBindings(fullExecution());
+    assertThat(CanonicalBindings.VARIABLES).hasSize(17);
     for (Map.Entry<String, ValueType> entry : CanonicalBindings.VARIABLES.entrySet()) {
       Value value = bindings.get(entry.getKey()).orElseThrow();
       Class<? extends Value> expected =
@@ -87,6 +113,81 @@ class CanonicalBindingsTest {
     assertThat(bindings.get("instrument.isin")).contains(new StringValue("ZZ0000000001"));
     assertThat(bindings.get("trade.currency")).contains(new StringValue("EUR"));
     assertThat(bindings.get("client.lei")).contains(new StringValue("LEI-CLIENT-0001"));
+  }
+
+  @Test
+  void bindsSeventeenPathsAndOnlyFiveAreOptional() {
+    assertThat(CanonicalBindings.VARIABLES).hasSize(17);
+    Set<String> optional = new TreeSet<>();
+    for (String path : CanonicalBindings.VARIABLES.keySet()) {
+      Map<String, Variable> declared =
+          Map.of(
+              path,
+              new Variable(
+                  CanonicalBindings.VARIABLES.get(path), enumName(path), Source.EVENT, false));
+      if (!CanonicalBindings.checkSupported(new CanonicalInputSpec(declared)).isEmpty()) {
+        optional.add(path);
+      }
+    }
+    assertThat(optional)
+        .containsExactlyInAnyOrder(
+            "client.lei",
+            "trade.side",
+            "trade.capacity",
+            "trade.counterparty",
+            "trade.executionWithin");
+  }
+
+  private static Optional<String> enumName(String path) {
+    return switch (path) {
+      case "event.kind" -> Optional.of("LifecycleKind");
+      case "instrument.assetClass" -> Optional.of("AssetClass");
+      case "client.kind" -> Optional.of("PartyKind");
+      case "trade.side" -> Optional.of("Side");
+      default -> Optional.empty();
+    };
+  }
+
+  @Test
+  void sideBindsAsAnEnumOfSide() {
+    assertThat(CanonicalBindings.VARIABLES.get("trade.side")).isEqualTo(ValueType.ENUM);
+    CanonicalBindings bindings = new CanonicalBindings(fullExecution());
+    assertThat(bindings.get("trade.side")).contains(new EnumValue("Side", "BUY"));
+    assertThat(bindings.get("trade.capacity")).contains(new StringValue("AOTC"));
+    assertThat(bindings.get("trade.counterparty")).contains(new StringValue("LEI-CCP-0001"));
+    assertThat(bindings.get("trade.executionWithin")).contains(new StringValue("ALGO-1"));
+    // a declaration of trade.side as another enumeration is a type mismatch
+    Map<String, Variable> wrong =
+        Map.of(
+            "trade.side",
+            new Variable(ValueType.ENUM, Optional.of("PartyKind"), Source.EVENT, true));
+    assertThat(codes(CanonicalBindings.checkSupported(new CanonicalInputSpec(wrong))))
+        .containsExactly("INPUT_TYPE_MISMATCH");
+    Map<String, Variable> right =
+        Map.of("trade.side", new Variable(ValueType.ENUM, Optional.of("Side"), Source.EVENT, true));
+    assertThat(CanonicalBindings.checkSupported(new CanonicalInputSpec(right))).isEmpty();
+  }
+
+  @Test
+  void aPackThatDeclaresASideThatCannotBeAbsentIsRefused() {
+    Map<String, Variable> declared =
+        Map.of(
+            "trade.side", new Variable(ValueType.ENUM, Optional.of("Side"), Source.EVENT, false));
+    List<PackProblem> problems = CanonicalBindings.checkSupported(new CanonicalInputSpec(declared));
+    assertThat(codes(problems)).containsExactly("INPUT_OPTIONAL_MISMATCH");
+    assertThat(problems)
+        .extracting(PackProblem::message)
+        .anyMatch(m -> m.contains("trade.side") && m.contains("optional"));
+  }
+
+  @Test
+  void anAbsentOptionalComponentIsEmptyNotAnError() {
+    CanonicalBindings bindings = bindings();
+    assertThat(bindings.get("trade.side")).isEmpty();
+    assertThat(bindings.get("trade.capacity")).isEmpty();
+    assertThat(bindings.get("trade.counterparty")).isEmpty();
+    assertThat(bindings.get("trade.executionWithin")).isEmpty();
+    assertThat(bindings.get("trade.quantity")).isPresent();
   }
 
   @Test
@@ -187,7 +288,14 @@ class CanonicalBindingsTest {
     CanonicalInputSpec sample = SamplePacks.load().input();
     Map<String, ValueType> declared = new TreeMap<>();
     sample.variables().forEach((path, variable) -> declared.put(path, variable.type()));
-    assertThat(CanonicalBindings.VARIABLES).isEqualTo(declared);
+    // the sample declares 13 paths; the catalogue has four more, all optional
+    assertThat(declared).hasSize(13);
+    assertThat(CanonicalBindings.VARIABLES.entrySet()).containsAll(declared.entrySet());
+    Set<String> rest = new TreeSet<>(CanonicalBindings.VARIABLES.keySet());
+    rest.removeAll(declared.keySet());
+    assertThat(rest)
+        .containsExactlyInAnyOrder(
+            "trade.side", "trade.capacity", "trade.counterparty", "trade.executionWithin");
     assertThat(CanonicalBindings.checkSupported(sample)).isEmpty();
   }
 }
