@@ -10,7 +10,9 @@ import dev.regpack.testkit.contract.LeaseDeliveryLedgerContract;
 import dev.regpack.testkit.contract.LedgerDurabilityContract;
 import dev.regpack.testkit.contract.ManifestLedgerContract;
 import dev.regpack.testkit.contract.ReportLedgerContract;
+import dev.regpack.testkit.contract.RetentionLedgerContract;
 import dev.regpack.testkit.contract.StorableValuesLedgerContract;
+import dev.regpack.testkit.contract.SubjectIndexLedgerContract;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 
@@ -24,6 +26,8 @@ public abstract class AbstractLedgerContractTest
         FencingScenarioContract,
         StorableValuesLedgerContract,
         ManifestLedgerContract,
+        RetentionLedgerContract,
+        SubjectIndexLedgerContract,
         LedgerDurabilityContract {
   private ManualClock clock;
   private LedgerStore ledger;

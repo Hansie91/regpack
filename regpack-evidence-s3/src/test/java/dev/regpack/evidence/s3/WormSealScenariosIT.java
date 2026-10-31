@@ -6,12 +6,13 @@ import dev.regpack.ports.Clock;
 import org.junit.jupiter.api.Tag;
 
 /**
- * T10: the 24 seal-and-send scenarios of {@code SealScenarioContract} (I1, first-byte limb) and the
- * two own methods of {@link AbstractWormSealTest}, on an in-memory ledger and P-WORM on the real
- * S3-compatible object-lock service of the job {@code evidence-worm}. The method that needs a fault
- * switch of the fake ({@code aMarkerBehindTheAdaptersPagingIsFound}) has no twin here. The
- * fake-backed twin is {@link WormSealScenariosTest}; this class is the P-WORM half of the evidence
- * for I1, and the source-file limb of I1 is P7a.
+ * T10: the 25 seal-and-send scenarios of {@code SealScenarioContract} (the 24 of P3b and, since
+ * P3c1 T9, the SEAL-1 scenario; I1, first-byte limb) and the two own methods of {@link
+ * AbstractWormSealTest}, on an in-memory ledger and P-WORM on the real S3-compatible object-lock
+ * service of the job {@code evidence-worm}. The method that needs a fault switch of the fake
+ * ({@code aMarkerBehindTheAdaptersPagingIsFound}) has no twin here. The fake-backed twin is {@link
+ * WormSealScenariosTest}; this class is the P-WORM half of the evidence for I1, and the source-file
+ * limb of I1 is P7a.
  */
 @Tag("worm")
 class WormSealScenariosIT extends AbstractWormSealTest {

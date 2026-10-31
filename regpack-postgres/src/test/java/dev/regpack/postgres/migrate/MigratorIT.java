@@ -73,11 +73,11 @@ class MigratorIT {
     return SqlIdentifier.require(schema) + "." + SqlIdentifier.require(name);
   }
 
-  /** The real scripts followed by one broken script that is the next version (V003 today). */
+  /** The real scripts followed by one broken script that is the next version (V004 today). */
   private static ScriptCatalogue withABrokenNextScript(String brokenSql) {
     List<ScriptCatalogue.Script> scripts =
         new ArrayList<>(ScriptCatalogue.fromClasspath().scripts());
-    scripts.add(ScriptCatalogue.Script.of(scripts.size() + 1, "V003__broken.sql", brokenSql));
+    scripts.add(ScriptCatalogue.Script.of(scripts.size() + 1, "V004__broken.sql", brokenSql));
     return ScriptCatalogue.of(scripts);
   }
 
@@ -142,11 +142,11 @@ class MigratorIT {
 
   /**
    * The production starting point of a database that the P3a build migrated: only V001 is stored.
-   * The first start of the next build applies V002 alone, leaves the rows of V001 and the data as
-   * they are, and is then idempotent.
+   * The first start of the next build applies every later script alone, leaves the rows of V001 and
+   * the data as they are, and is then idempotent.
    */
   @Test
-  void anUpgradeFromAV001OnlyDatabaseAppliesOnlyV002() throws SQLException {
+  void anUpgradeFromAV001OnlyDatabaseAppliesEveryLaterScript() throws SQLException {
     ScriptCatalogue full = ScriptCatalogue.fromClasspath();
     ScriptCatalogue.Script v001 = full.scripts().get(0);
     assertThat(v001.name()).isEqualTo("V001__core.sql");
@@ -193,6 +193,75 @@ class MigratorIT {
     assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
   }
 
+  /**
+   * The production starting point of a database that the P3b build migrated: V001 and V002 are
+   * stored, with data in the tables of both. The first start of the next build applies the later
+   * scripts alone (V003 today, and so on), leaves the rows of the stored ones and all data as they
+   * are, creates the tables of the later scripts empty, and is then idempotent. The expected set is
+   * taken from the catalogue, so that a later script does not make the test stale.
+   */
+  @Test
+  void anUpgradeFromAV001AndV002DatabaseAppliesOnlyTheLaterScripts() throws SQLException {
+    ScriptCatalogue full = ScriptCatalogue.fromClasspath();
+    Migrator.Report before =
+        Migrator.migrate(dataSource, schema, ScriptCatalogue.of(full.scripts().subList(0, 2)));
+    assertThat(before.applied()).containsExactly(1, 2);
+    assertThat(column("SELECT to_regclass(?)::text", schema + ".retention"))
+        .as("the P3b database has no retention table")
+        .containsExactly((String) null);
+    assertThat(column("SELECT to_regclass(?)::text", schema + ".subject_index"))
+        .as("the P3b database has no subject index")
+        .containsExactly((String) null);
+    update("INSERT INTO " + table("regime") + " (regime) VALUES ('survivor')");
+    update(
+        "INSERT INTO "
+            + table("object_manifest")
+            + " (object_key, object_class, sha256, size_bytes, provenance, written_at)"
+            + " VALUES ('sealed/ab/survivor', 1, decode(repeat('ab', 32), 'hex'), 10, 1, now())");
+    String appliedAtOfV002 =
+        column("SELECT applied_at::text FROM " + table("schema_migration") + " WHERE version = 2")
+            .get(0);
+
+    Migrator.Report upgrade = Migrator.migrate(dataSource, schema);
+
+    assertThat(upgrade.applied())
+        .as("only the scripts after V002 are applied")
+        .containsExactlyElementsOf(
+            full.scripts().stream().skip(2).map(ScriptCatalogue.Script::version).toList())
+        .startsWith(3);
+    assertThat(upgrade.currentVersion()).isEqualTo(full.latestVersion());
+    assertThat(
+            column(
+                "SELECT version::text || ' ' || name || ' ' || sha256 FROM "
+                    + table("schema_migration")
+                    + " ORDER BY version"))
+        .isEqualTo(
+            full.scripts().stream()
+                .map(s -> s.version() + " " + s.name() + " " + s.sha256())
+                .toList());
+    assertThat(
+            column(
+                "SELECT applied_at::text FROM " + table("schema_migration") + " WHERE version = 2"))
+        .as("the row of V002 is left alone")
+        .containsExactly(appliedAtOfV002);
+    assertThat(column("SELECT regime FROM " + table("regime")))
+        .as("the data of V001 survives")
+        .containsExactly("survivor");
+    assertThat(column("SELECT object_key FROM " + table("object_manifest")))
+        .as("the data of V002 survives")
+        .containsExactly("sealed/ab/survivor");
+    for (String created : List.of("retention", "subject_index")) {
+      assertThat(column("SELECT to_regclass(?)::text", schema + "." + created))
+          .as("%s exists after the upgrade", created)
+          .doesNotContainNull()
+          .hasSize(1);
+      assertThat(column("SELECT count(*)::text FROM " + table(created)))
+          .as("%s starts empty", created)
+          .containsExactly("0");
+    }
+    assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
+  }
+
   @Test
   void refusesADatabaseNewerThanTheCode() throws SQLException {
     Migrator.migrate(dataSource, schema);
@@ -213,8 +282,8 @@ class MigratorIT {
   @Test
   void refusesAGapInTheStoredVersions() throws SQLException {
     Migrator.migrate(dataSource, schema);
-    // stored versions {2,3} instead of {1,2}: the history does not start at 1
-    update("UPDATE " + table("schema_migration") + " SET version = 3 WHERE version = 1");
+    // stored versions {2,3,4} instead of {1,2,3}: the history does not start at 1
+    update("UPDATE " + table("schema_migration") + " SET version = 4 WHERE version = 1");
     assertThatThrownBy(() -> Migrator.migrate(dataSource, schema))
         .isInstanceOfSatisfying(
             MigrationException.class,
@@ -222,7 +291,7 @@ class MigratorIT {
               assertThat(e.kind()).isEqualTo(Kind.GAP);
               assertThat(e.version()).as("the first version that is missing").isEqualTo(1);
             });
-    // a hole in the middle: stored versions {1,3} instead of {1,2}
+    // a hole in the middle: stored versions {1,3,4} instead of {1,2,3}
     update("UPDATE " + table("schema_migration") + " SET version = 1 WHERE version = 2");
     assertThatThrownBy(() -> Migrator.migrate(dataSource, schema))
         .isInstanceOfSatisfying(
@@ -278,16 +347,16 @@ class MigratorIT {
             MigrationException.class,
             e -> {
               assertThat(e.kind()).isEqualTo(Kind.SCRIPT_FAILED);
-              assertThat(e.version()).isEqualTo(3);
+              assertThat(e.version()).isEqualTo(4);
             });
     assertThat(
             column("SELECT version::text FROM " + table("schema_migration") + " ORDER BY version"))
-        .as("the two real scripts stay applied")
-        .containsExactly("1", "2");
+        .as("the three real scripts stay applied")
+        .containsExactly("1", "2", "3");
     assertThat(column("SELECT to_regclass(?)::text", schema + ".broken_probe"))
         .as("nothing of the broken script: its first statement was rolled back")
         .containsExactly((String) null);
-    // version 3 was never recorded, so a run with the real catalogue finds nothing to do
+    // version 4 was never recorded, so a run with the real catalogue finds nothing to do
     assertThat(Migrator.migrate(dataSource, schema).applied()).isEmpty();
   }
 
@@ -300,7 +369,7 @@ class MigratorIT {
             MigrationException.class,
             e -> {
               assertThat(e.getMessage())
-                  .contains("V003__broken.sql")
+                  .contains("V004__broken.sql")
                   .contains("SCRIPT_FAILED")
                   .doesNotContain("secret_marker_table_zz")
                   .doesNotContain("INSERT")
@@ -317,7 +386,8 @@ class MigratorIT {
             "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
                 + " WHERE n.nspname = ? AND c.relkind IN ('r', 'p')",
             schema);
-    // the union of the documents of every script: the 18 tables of V001 and object_manifest (V002)
+    // the union of the documents of every script: the 18 tables of V001, object_manifest (V002),
+    // retention and subject_index (V003)
     assertThat(tables).containsExactlyInAnyOrderElementsOf(SchemaDocument.allTableNames());
 
     // and, as far as the server can show it, every named constraint, index and trigger of the

@@ -169,6 +169,20 @@ class TrnDerivationTest {
         .isInstanceOf(KmsAccessDeniedException.class);
   }
 
+  @Test
+  void anIndexKeyCannotBeUsedForATrn() {
+    KeyRef index = new KeyRef("synthetic-index", KeyPurpose.INDEX_HMAC);
+    Kms withIndex =
+        InMemoryKms.create()
+            .createHmacKey(index, "SYNTHETIC-TEST-INDEX".getBytes(UTF_8), Set.of(APPLICATION))
+            .as(APPLICATION);
+
+    assertThatThrownBy(
+            () -> TrnDerivation.derive(withIndex, index, REGIME_A, IDENTITY, Leg.MARKET, 32))
+        .isInstanceOf(KmsAccessDeniedException.class)
+        .hasMessageNotContaining("synthetic-index");
+  }
+
   /** Independent routine: the big-endian bit string of the bytes, five bits at a time. */
   private static String referenceBase32(byte[] bytes) {
     BigInteger value = new BigInteger(1, bytes);

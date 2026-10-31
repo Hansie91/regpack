@@ -373,6 +373,25 @@ class PgManifestTest {
     assertThat(sentTo(answering)).contains(Unit.BARRIER_SQL);
   }
 
+  /**
+   * {@link PgManifest#anyRowInserted} decides on the counts of a whole batch, which the fake server
+   * cannot mix (it gives every entry of a batch one count): a row is a count above zero anywhere in
+   * the batch, and a count that says nothing (0, or negative like {@code SUCCESS_NO_INFO} and
+   * {@code EXECUTE_FAILED}) is not a row. The subject index uses it too.
+   */
+  @Test
+  void anyRowInsertedIsTrueForACountAboveZeroAnywhereInTheBatch() {
+    assertThat(PgManifest.anyRowInserted(new int[] {1, 0})).isTrue();
+    assertThat(PgManifest.anyRowInserted(new int[] {0, 1})).isTrue();
+    assertThat(PgManifest.anyRowInserted(new int[] {0, 1, 0})).isTrue();
+    assertThat(PgManifest.anyRowInserted(new int[] {2})).isTrue();
+
+    assertThat(PgManifest.anyRowInserted(new int[] {0, 0})).isFalse();
+    assertThat(PgManifest.anyRowInserted(new int[] {-2})).isFalse();
+    assertThat(PgManifest.anyRowInserted(new int[] {-2, 0, -2})).isFalse();
+    assertThat(PgManifest.anyRowInserted(new int[] {})).isFalse();
+  }
+
   @Test
   void aReplayWithAnotherHashIsAConflictAndSendsNoBarrier() {
     ObjectEntry entry = objectEntry("replay/clash", "bytes-B");

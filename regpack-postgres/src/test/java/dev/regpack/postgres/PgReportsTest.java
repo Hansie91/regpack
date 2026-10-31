@@ -13,22 +13,31 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.model.Leg;
 import dev.regpack.model.Outcome;
+import dev.regpack.ports.crypto.Envelope;
 import dev.regpack.ports.ledger.DecisionLedger.NewDecision;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
+import dev.regpack.ports.ledger.LedgerException;
 import dev.regpack.ports.ledger.ReportLedger.NewVersion;
 import dev.regpack.ports.ledger.ReportLedger.ReportableCommit;
 import dev.regpack.ports.ledger.ReportLedger.ReportableDecision;
+import dev.regpack.ports.ledger.ReportLedger.StoredVersion;
+import dev.regpack.ports.ledger.ReportLedger.SubjectId;
 import dev.regpack.ports.ledger.ReportLedger.TrnProposal;
 import dev.regpack.postgres.PgLedgerStore.Config;
 import dev.regpack.testkit.clock.ManualClock;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import java.io.IOException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -162,6 +171,216 @@ class PgReportsTest {
   }
 
   // ------------------------------------------------------------------------------------------
+  // the envelope rule (P3c1 T12, note T12-1)
+
+  /**
+   * A connection that fails the test on any call: the entry point that takes one must not use it.
+   */
+  private static Connection untouchableConnection() {
+    return (Connection)
+        Proxy.newProxyInstance(
+            PgReportsTest.class.getClassLoader(),
+            new Class<?>[] {Connection.class},
+            (proxy, method, args) -> {
+              throw new AssertionError("the connection was used by " + method.getName());
+            });
+  }
+
+  /** A {@code PgReports} built with the production configuration over the given fake server. */
+  private static PgReports strictReports(SqlSpy local) {
+    Config production = Config.production("t42_7");
+    return new PgReports(
+        local.over(null),
+        new ManualClock(Instant.parse("2026-10-09T08:00:00Z")),
+        production,
+        new PgDecisions(local.over(null), production));
+  }
+
+  /**
+   * A unit of two decisions: an envelope body in the first and {@code secondBody} in the second.
+   */
+  private static ReportableCommit unitWithSecondBody(byte[] secondBody) {
+    return unit(
+        new ReportableDecision(
+            reportDecision(0, "E1", "ctx", "d1", MARKET),
+            List.of(
+                EnvelopeBodyFixtures.version(
+                    "E1", MARKET, "TRNE1M", EnvelopeBodyFixtures.envelope()))),
+        new ReportableDecision(
+            reportDecision(0, "E2", "ctx", "d2", MARKET),
+            List.of(EnvelopeBodyFixtures.version("E2", MARKET, "TRNE2M", secondBody))));
+  }
+
+  /**
+   * The refusal sits in the validation that both writers of {@code report_version.body} share
+   * ({@code commitReportable} and the package-private {@code commitReportableIn}), runs for every
+   * version of every decision, and runs before any connection is opened: the spy sees nothing, the
+   * connection handed to the second entry point is never touched. The plain body is the second
+   * decision's, and the empty body is a plain body too.
+   */
+  @Test
+  void aPlainBodyIsRefusedByBothEntryPointsBeforeAnyStatement() {
+    SqlSpy local = new SqlSpy();
+    PgReports strict = strictReports(local);
+    Connection untouchable = untouchableConnection();
+
+    for (byte[] plainBody : List.of(EnvelopeBodyFixtures.plain(), new byte[0])) {
+      ReportableCommit refused = unitWithSecondBody(plainBody);
+
+      assertThatThrownBy(() -> strict.commitReportable(refused))
+          .as("commitReportable, %d bytes", plainBody.length)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope");
+      assertThatThrownBy(() -> strict.commitReportableIn(untouchable, refused))
+          .as("commitReportableIn, %d bytes", plainBody.length)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope");
+    }
+
+    assertThat(local.events()).as("no connection, no statement, no bind").isEmpty();
+    assertThat(local.statements()).isZero();
+  }
+
+  /**
+   * The test is {@code Envelope.isEnvelope} and not the magic alone: a body that starts like an
+   * envelope and is none (cut after eight bytes, the magic and then garbage, a version, a kind or a
+   * KEK id the format does not know) is a plain body and is refused by both entry points, with the
+   * same text, before any statement, with the connection untouched. A check of the first four bytes
+   * would accept every one of these, and only the contract on a real server would notice.
+   */
+  @Test
+  void aBodyThatOnlyLooksLikeAnEnvelopeIsRefusedByBothEntryPointsBeforeAnyStatement() {
+    byte[] envelope = EnvelopeBodyFixtures.envelope();
+    assertThat(Envelope.isEnvelope(envelope)).as("the fixture is an envelope").isTrue();
+    byte[] magicAndGarbage = new byte[120];
+    Arrays.fill(magicAndGarbage, (byte) 'z');
+    System.arraycopy(envelope, 0, magicAndGarbage, 0, 4);
+    Map<String, byte[]> nearMisses = new LinkedHashMap<>();
+    nearMisses.put("cut after eight bytes", Arrays.copyOf(envelope, 8));
+    nearMisses.put("the magic followed by garbage", magicAndGarbage);
+    nearMisses.put("a bad version byte", withByte(envelope, 4, (byte) 2));
+    nearMisses.put("a bad kind byte", withByte(envelope, 5, (byte) 3));
+    nearMisses.put("a bad KEK id character", withByte(envelope, 7, (byte) '/'));
+
+    SqlSpy local = new SqlSpy();
+    PgReports strict = strictReports(local);
+    Connection untouchable = untouchableConnection();
+    for (Map.Entry<String, byte[]> nearMiss : nearMisses.entrySet()) {
+      byte[] body = nearMiss.getValue();
+      String name = nearMiss.getKey();
+      assertThat(Arrays.copyOf(body, 4))
+          .as("%s starts with the magic", name)
+          .isEqualTo(Arrays.copyOf(envelope, 4));
+      assertThat(Envelope.isEnvelope(body)).as("%s is not an envelope", name).isFalse();
+      ReportableCommit refused = unitWithSecondBody(body);
+
+      assertThatThrownBy(() -> strict.commitReportable(refused))
+          .as("commitReportable, %s", name)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope");
+      assertThatThrownBy(() -> strict.commitReportableIn(untouchable, refused))
+          .as("commitReportableIn, %s", name)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope");
+    }
+
+    assertThat(local.events()).as("no connection, no statement, no bind").isEmpty();
+    assertThat(local.statements()).isZero();
+  }
+
+  private static byte[] withByte(byte[] bytes, int index, byte value) {
+    byte[] copy = bytes.clone();
+    copy[index] = value;
+    return copy;
+  }
+
+  /** The same rule, for the second leg of one decision and in either order of the legs. */
+  @Test
+  void aPlainBodyInTheSecondLegOfOneDecisionIsRefusedToo() {
+    SqlSpy local = new SqlSpy();
+    PgReports strict = strictReports(local);
+    NewDecision both = reportDecision(0, "E1", "ctx", "d1", MARKET, CLIENT);
+    NewVersion envelopeLeg =
+        EnvelopeBodyFixtures.version("E1", MARKET, "TRNE1M", EnvelopeBodyFixtures.envelope());
+    NewVersion plainLeg =
+        EnvelopeBodyFixtures.version("E1", CLIENT, "TRNE1C", EnvelopeBodyFixtures.plain());
+
+    for (List<NewVersion> legs :
+        List.of(List.of(envelopeLeg, plainLeg), List.of(plainLeg, envelopeLeg))) {
+      assertThatThrownBy(() -> strict.commitReportable(unit(new ReportableDecision(both, legs))))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("a report body must be an envelope");
+    }
+    assertThat(local.events()).isEmpty();
+  }
+
+  @Test
+  void theEnvelopeEncodingIsOneAndThePlainEncodingStaysZero() {
+    assertThat(PgReports.ENVELOPE_ENCODING).isEqualTo((short) 1);
+    assertThat(PgReports.BODY_ENCODING).isEqualTo((short) 0);
+  }
+
+  /** A stored version row as the fake server answers {@code VERSIONS_SQL}. */
+  private static Object[] storedVersion(long seq, byte[] body, int encoding) {
+    return new Object[] {
+      seq,
+      5L,
+      "NEWT",
+      "ab".repeat(32),
+      body,
+      (short) encoding,
+      (short) 1, // SOURCE
+      77L
+    };
+  }
+
+  /** Both encodings that the adapter writes are read; any other code is a refused row. */
+  @Test
+  void theVersionsAreReadWithEncodingsZeroAndOneAndNoOther() {
+    byte[] envelope = EnvelopeBodyFixtures.envelope();
+    byte[] plain = EnvelopeBodyFixtures.plain();
+    SqlSpy answering =
+        new SqlSpy()
+            .answering(
+                (sql, events) ->
+                    sql.equals(PgReports.VERSIONS_SQL)
+                        ? List.of(storedVersion(1, plain, 0), storedVersion(2, envelope, 1))
+                        : List.of());
+    PgReports reading =
+        new PgReports(
+            answering.over(null),
+            new ManualClock(Instant.parse("2026-10-09T08:00:00Z")),
+            config,
+            decisions);
+
+    List<StoredVersion> versions = reading.versions(new SubjectId(9));
+
+    assertThat(versions).extracting(StoredVersion::versionSeq).containsExactly(1L, 2L);
+    assertThat(versions.get(0).body()).isEqualTo(plain);
+    assertThat(versions.get(1).body()).isEqualTo(envelope);
+
+    for (int unknown : new int[] {2, 3, -1, Short.MAX_VALUE}) {
+      SqlSpy refusing =
+          new SqlSpy()
+              .answering(
+                  (sql, events) ->
+                      sql.equals(PgReports.VERSIONS_SQL)
+                          ? List.<Object[]>of(storedVersion(1, plain, unknown))
+                          : List.of());
+      PgReports other =
+          new PgReports(
+              refusing.over(null),
+              new ManualClock(Instant.parse("2026-10-09T08:00:00Z")),
+              config,
+              decisions);
+      assertThatThrownBy(() -> other.versions(new SubjectId(9)))
+          .as("encoding %d", unknown)
+          .isInstanceOf(LedgerException.class)
+          .hasMessage("a stored report version has an unknown body encoding");
+    }
+  }
+
+  // ------------------------------------------------------------------------------------------
   // static checks of the statements
 
   @Test
@@ -264,8 +483,9 @@ class PgReportsTest {
 
   @Test
   void theVersionIsStoredPlainAndTheDecisionDayIsKept() throws IOException {
-    // body_encoding 0 is plain until the key hierarchy of P3c; the foreign key to the partitioned
-    // decision table needs the day
+    // body_encoding 0 is a body that is not an envelope (PgReports.BODY_ENCODING); 1 is an
+    // envelope body since P3c1 (ENVELOPE_ENCODING); the foreign key to the partitioned decision
+    // table needs the day
     assertThat(PgReports.BODY_ENCODING).isZero();
     assertThat(PgReports.VERSION_INSERT_SQL).contains("decision_as_at");
     assertThat(migration())

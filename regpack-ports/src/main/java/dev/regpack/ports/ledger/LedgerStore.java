@@ -2,7 +2,8 @@ package dev.regpack.ports.ledger;
 
 /**
  * Unit-of-work API: every "same transaction" rule of the spec is one call. The aggregate of the
- * ledger sub-ports; later plans add sub-ports without touching these.
+ * ledger sub-ports; a later plan adds a sub-port by extending this list (the retention rows and the
+ * data-subject index were added by P3c1).
  */
 public interface LedgerStore
     extends IngestLedger,
@@ -13,4 +14,6 @@ public interface LedgerStore
         ContextLedger,
         ReportLedger,
         ManifestLedger,
+        RetentionLedger,
+        SubjectIndexLedger,
         LedgerDurability {}

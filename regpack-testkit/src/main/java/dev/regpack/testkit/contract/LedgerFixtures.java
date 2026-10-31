@@ -282,6 +282,43 @@ public final class LedgerFixtures {
         endpointEpoch);
   }
 
+  /**
+   * The one version that {@link #commitOneVersion} requests: the {@link #MIFIR_REGIME} subject of
+   * the MARKET leg of {@code LEI1|XPAR|E1}, executing LEI {@code EXEC1}, TRN {@code TRN1} under key
+   * id {@code KEY-1}, action {@code NEWT}, logical hash {@code SHA-256("h1")}, endpoint {@code
+   * endpoint("EP1")} in epoch 1, and the given {@code body}.
+   */
+  public static ReportLedger.NewVersion oneVersion(byte[] body) {
+    return new ReportLedger.NewVersion(
+        subjectKey(MIFIR_REGIME, "E1", Leg.MARKET),
+        "EXEC1",
+        Optional.of(new ReportLedger.TrnProposal("TRN1", "KEY-1")),
+        "NEWT",
+        Sha256.ofUtf8("h1"),
+        body,
+        ReportLedger.VersionOrigin.SOURCE,
+        endpoint("EP1"),
+        1);
+  }
+
+  /**
+   * Commits a REPORT decision for the MARKET leg of {@code LEI1|XPAR|E1} on an empty chain together
+   * with {@link #oneVersion(byte[]) the one version} that carries {@code body}, and returns the
+   * result of that decision. It expects the chain of the event to be empty, so a ledger takes it
+   * once.
+   */
+  public static ReportLedger.ReportableCommitted commitOneVersion(
+      ReportLedger ledger, byte[] body) {
+    ReportLedger.ReportableDecision decision =
+        new ReportLedger.ReportableDecision(
+            reportDecision("E1", "ctx", "d1", Leg.MARKET), List.of(oneVersion(body)));
+    return ledger
+        .commitReportable(
+            new ReportLedger.ReportableCommit(
+                List.of(decision), Optional.empty(), Optional.empty()))
+        .get(0);
+  }
+
   /** The endpoint {@code ("SIMULATOR", "ARM", "LEI-" + name, "NCA-" + name)}. */
   public static LeaseLedger.EndpointKey endpoint(String name) {
     return new LeaseLedger.EndpointKey("SIMULATOR", "ARM", "LEI-" + name, "NCA-" + name);

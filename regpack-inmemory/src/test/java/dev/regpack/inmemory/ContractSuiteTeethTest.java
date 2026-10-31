@@ -8,6 +8,7 @@ import dev.regpack.inmemory.mutants.AnyRetainUntilEvidenceContractTest;
 import dev.regpack.inmemory.mutants.AsAtNotCheckedLedgerContractTest;
 import dev.regpack.inmemory.mutants.BeginSendingNotAtomicWithManifestLedgerContractTest;
 import dev.regpack.inmemory.mutants.CaseFoldedKeysEvidenceContractTest;
+import dev.regpack.inmemory.mutants.EnvelopeRequirementIgnoredEnvelopeBodiesTest;
 import dev.regpack.inmemory.mutants.ExactKeyNotFirstLedgerContractTest;
 import dev.regpack.inmemory.mutants.HighestVersionIsMinLedgerContractTest;
 import dev.regpack.inmemory.mutants.IdempotencyIgnoresContextLedgerContractTest;
@@ -28,10 +29,15 @@ import dev.regpack.inmemory.mutants.OverwriteOnDuplicateEvidenceContractTest;
 import dev.regpack.inmemory.mutants.OverwriteOnDuplicateJournalContractTest;
 import dev.regpack.inmemory.mutants.PageUnboundedLedgerContractTest;
 import dev.regpack.inmemory.mutants.RedeliveryReingestsLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionExpiredListsControlLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionHoldIgnoredInExpiredLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionNewRowUnheldLedgerContractTest;
+import dev.regpack.inmemory.mutants.RetentionShortensLedgerContractTest;
 import dev.regpack.inmemory.mutants.ShortPagesEvidenceContractTest;
 import dev.regpack.inmemory.mutants.ShortenRetentionEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SilentMissingKeyEvidenceContractTest;
 import dev.regpack.inmemory.mutants.SubjectNotRegimeScopedLedgerContractTest;
+import dev.regpack.inmemory.mutants.SubjectRemoveRemovesAllLedgerContractTest;
 import dev.regpack.inmemory.mutants.SuppressAgainstAnyVersionLedgerContractTest;
 import dev.regpack.inmemory.mutants.TakeoverTouchesOtherEndpointsLedgerContractTest;
 import dev.regpack.inmemory.mutants.TrnNotUniquePerLeiLedgerContractTest;
@@ -205,6 +211,33 @@ class ContractSuiteTeethTest {
     expected.put(
         BeginSendingNotAtomicWithManifestLedgerContractTest.class,
         Set.of("aConflictingObjectRollsTheSendingTransitionBack"));
+
+    // P3c1 T7: a ledger built to require envelopes accepts a plain body
+    expected.put(
+        EnvelopeRequirementIgnoredEnvelopeBodiesTest.class,
+        Set.of("aPlainBodyIsRefusedWhenEnvelopesAreRequired"));
+
+    // P3c1 T8: the retention rows (KF11, KF13, KF20)
+    expected.put(
+        RetentionShortensLedgerContractTest.class,
+        Set.of(
+            "aLaterRetainUntilReplacesAndAnEarlierOneIsIgnored",
+            "twoRegimesGiveTwoRowsAndOneRegimeTwiceGivesOne"));
+    expected.put(
+        RetentionExpiredListsControlLedgerContractTest.class,
+        Set.of("expiredRetentionNeverListsControlKeys"));
+    expected.put(
+        RetentionHoldIgnoredInExpiredLedgerContractTest.class,
+        Set.of(
+            "aHoldAppliesToEveryRowOfTheArtifact",
+            "aClaimRecordedAfterAHoldIsHeldToo",
+            "expiredRetentionListsOnlyDueUnheldRowsInOrder"));
+    expected.put(
+        RetentionNewRowUnheldLedgerContractTest.class, Set.of("aClaimRecordedAfterAHoldIsHeldToo"));
+
+    // P3c1 T10: the data-subject index (KF15, KF20)
+    expected.put(
+        SubjectRemoveRemovesAllLedgerContractTest.class, Set.of("removeDeletesOnlyTheNamedRef"));
 
     List<String> misses = new ArrayList<>();
     Set<String> usedExceptions = new TreeSet<>();

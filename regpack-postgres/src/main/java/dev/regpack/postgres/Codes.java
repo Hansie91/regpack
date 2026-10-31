@@ -9,6 +9,8 @@ import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
 import dev.regpack.ports.ledger.ReportLedger.VersionOrigin;
+import dev.regpack.ports.ledger.RetentionLedger.AnchorEvent;
+import dev.regpack.ports.ledger.SubjectIndexLedger.RefKind;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Map;
@@ -24,8 +26,14 @@ import java.util.Objects;
  * <p>The numbers 4, 5 and 11 of {@link DeliveryState} and 1 of {@link OutboxState} are also written
  * into the partial-index predicates of {@code V001__core.sql}; {@code CodesTest} and {@code
  * SchemaDocMatchesMigrationsTest} pin both sides. {@link ObjectClass} and {@link Provenance} are
- * the two code columns of {@code object_manifest} (V002); the database has no CHECK on their set,
- * so a new constant needs a code here and nothing else.
+ * the two code columns of {@code object_manifest} (V002), {@link AnchorEvent} and {@link RefKind}
+ * those of {@code retention} and {@code subject_index} (V003); the database has no CHECK on their
+ * set, so a new constant needs a code here and nothing else.
+ *
+ * <p>The code of {@link AnchorEvent} and of {@link RefKind} is the ordinal plus one, and it has to
+ * stay so: the in-memory ledgers order rows by the declaration of the enum, PostgreSQL by the
+ * smallint ({@code CodesTest#theOrderBearingFamiliesHaveCodesInDeclarationOrder}). The ports have
+ * no accessor for the code.
  */
 public final class Codes {
   private static final Table<Outcome> OUTCOME =
@@ -96,6 +104,16 @@ public final class Codes {
       new Table<>("provenance", Provenance.class)
           .put(Provenance.WRITTEN, 1)
           .put(Provenance.ADOPTED_AT_RESTORE, 2);
+
+  private static final Table<AnchorEvent> ANCHOR_EVENT =
+      new Table<>("anchor event", AnchorEvent.class)
+          .put(AnchorEvent.OBJECT_WRITTEN, 1)
+          .put(AnchorEvent.TERMINATION, 2);
+
+  private static final Table<RefKind> REF_KIND =
+      new Table<>("reference kind", RefKind.class)
+          .put(RefKind.REPORT_VERSION, 1)
+          .put(RefKind.EVIDENCE_OBJECT, 2);
 
   private Codes() {}
 
@@ -169,6 +187,22 @@ public final class Codes {
 
   public static Provenance provenance(short code) {
     return PROVENANCE.constant(code);
+  }
+
+  public static short of(AnchorEvent anchor) {
+    return ANCHOR_EVENT.code(anchor);
+  }
+
+  public static AnchorEvent anchorEvent(short code) {
+    return ANCHOR_EVENT.constant(code);
+  }
+
+  public static short of(RefKind kind) {
+    return REF_KIND.code(kind);
+  }
+
+  public static RefKind refKind(short code) {
+    return REF_KIND.constant(code);
   }
 
   /** One enum's explicit code table; built once in the static initializer, read-only after. */

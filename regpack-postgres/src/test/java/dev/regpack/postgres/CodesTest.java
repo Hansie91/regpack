@@ -12,6 +12,8 @@ import dev.regpack.ports.ledger.ManifestLedger.Provenance;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxKind;
 import dev.regpack.ports.ledger.OutboxLedger.OutboxState;
 import dev.regpack.ports.ledger.ReportLedger.VersionOrigin;
+import dev.regpack.ports.ledger.RetentionLedger.AnchorEvent;
+import dev.regpack.ports.ledger.SubjectIndexLedger.RefKind;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
@@ -89,6 +91,9 @@ class CodesTest {
             "SIGNED_MANIFEST",
             "OTHER")),
     new Family(Provenance.class, "provenance", codes("WRITTEN", "ADOPTED_AT_RESTORE")),
+    // retention.anchor_event and subject_index.ref_kind (V003); the database has no CHECK on either
+    new Family(AnchorEvent.class, "anchorEvent", codes("OBJECT_WRITTEN", "TERMINATION")),
+    new Family(RefKind.class, "refKind", codes("REPORT_VERSION", "EVIDENCE_OBJECT")),
   };
 
   @Test
@@ -148,6 +153,46 @@ class CodesTest {
     assertThat(Provenance.values()).as("a new provenance needs a code and a pin").hasSize(2);
     assertThatThrownBy(() -> Codes.of((ObjectClass) null)).isInstanceOf(NullPointerException.class);
     assertThatThrownBy(() -> Codes.of((Provenance) null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void anchorEventAndRefKindCodesArePinned() {
+    // V003 stores both as smallint, without a CHECK on the set (schema-design-p3c.md, note a): the
+    // numbers are written here as literals, not derived from the order of the constants
+    assertThat(Codes.of(AnchorEvent.OBJECT_WRITTEN)).isEqualTo((short) 1);
+    assertThat(Codes.of(AnchorEvent.TERMINATION)).isEqualTo((short) 2);
+    assertThat(Codes.of(RefKind.REPORT_VERSION)).isEqualTo((short) 1);
+    assertThat(Codes.of(RefKind.EVIDENCE_OBJECT)).isEqualTo((short) 2);
+    for (AnchorEvent anchor : AnchorEvent.values()) {
+      assertThat(Codes.anchorEvent(Codes.of(anchor))).isSameAs(anchor);
+    }
+    for (RefKind kind : RefKind.values()) {
+      assertThat(Codes.refKind(Codes.of(kind))).isSameAs(kind);
+    }
+    assertThat(AnchorEvent.values()).as("a new anchor event needs a code and a pin").hasSize(2);
+    assertThat(RefKind.values()).as("a new reference kind needs a code and a pin").hasSize(2);
+    assertThatThrownBy(() -> Codes.of((AnchorEvent) null)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> Codes.of((RefKind) null)).isInstanceOf(NullPointerException.class);
+  }
+
+  /**
+   * T11-6: the in-memory ledgers order the anchor events and the reference kinds by their
+   * declaration (the ordinal), PostgreSQL orders the smallint column. The two orders are the same
+   * only while each code is its ordinal plus one; a constant inserted in the middle of an enum
+   * would make the adapters list rows in different orders, so the test fails first.
+   */
+  @Test
+  void theOrderBearingFamiliesHaveCodesInDeclarationOrder() {
+    for (AnchorEvent anchor : AnchorEvent.values()) {
+      assertThat((int) Codes.of(anchor))
+          .as("code of %s is its ordinal plus one", anchor)
+          .isEqualTo(anchor.ordinal() + 1);
+    }
+    for (RefKind kind : RefKind.values()) {
+      assertThat((int) Codes.of(kind))
+          .as("code of %s is its ordinal plus one", kind)
+          .isEqualTo(kind.ordinal() + 1);
+    }
   }
 
   @Test

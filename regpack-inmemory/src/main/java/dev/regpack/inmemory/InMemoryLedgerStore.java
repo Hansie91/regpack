@@ -17,6 +17,8 @@ import dev.regpack.model.decision.DecisionId;
 import dev.regpack.model.decision.DecisionRecord;
 import dev.regpack.model.json.Json;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.crypto.Envelope;
+import dev.regpack.ports.crypto.SubjectHash;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.ledger.DecisionHeadConflictException;
 import dev.regpack.ports.ledger.DuplicateKeyException;
@@ -31,6 +33,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,10 +45,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
- * In-memory {@link LedgerStore}. Every public method is {@code synchronized} on one lock and
- * validates its input before it mutates anything, so a rejected call leaves no trace.
+ * In-memory {@link LedgerStore}. Every public method except the configuration setter {@link
+ * #requireEnvelopeBodies} is {@code synchronized} on one lock and validates its input before it
+ * mutates anything, so a rejected call leaves no trace.
  */
 public final class InMemoryLedgerStore implements LedgerStore {
   private record SourceEvent(EventIdentity eventIdentity, String sourceId) {}
@@ -56,6 +61,56 @@ public final class InMemoryLedgerStore implements LedgerStore {
   private record StreamKey(String sourceId, String stream) {}
 
   private record ChainKey(Regime regime, EventIdentity eventIdentity) {}
+
+  /** The identity of a retention row inside one call: (artifact text, regime id text, anchor). */
+  private record ClaimKey(String artifact, String regime, AnchorEvent anchor) {}
+
+  /** The place of a retention row inside its artifact: ordered by regime id text, then anchor. */
+  private record RetentionSlot(String regime, AnchorEvent anchor)
+      implements Comparable<RetentionSlot> {
+    @Override
+    public int compareTo(RetentionSlot other) {
+      int byRegime = regime.compareTo(other.regime);
+      return byRegime != 0 ? byRegime : anchor.compareTo(other.anchor);
+    }
+  }
+
+  /**
+   * The order of the references of one hash: the kind by its code, then the text by code point (the
+   * order of its UTF-8 bytes).
+   */
+  private static final Comparator<SubjectRef> SUBJECT_REF_ORDER =
+      Comparator.comparing(SubjectRef::kind)
+          .thenComparing(SubjectRef::ref, InMemoryLedgerStore::compareCodePoints);
+
+  /**
+   * Compares two texts by Unicode code point. {@code KeyText} forbids unpaired surrogates, so a
+   * surrogate is the start of a supplementary code point, which sorts after every BMP character;
+   * this is the order of the UTF-8 bytes and of {@code COLLATE "C"} in a UTF8 database.
+   *
+   * <p>The same rule as {@code PgSubjectIndex#compareCodePoints}, by another algorithm; each is
+   * tested against hand-written literal orders, and nothing else ties them.
+   */
+  private static int compareCodePoints(String a, String b) {
+    int shared = Math.min(a.length(), b.length());
+    for (int i = 0; i < shared; i++) {
+      char x = a.charAt(i);
+      char y = b.charAt(i);
+      if (x != y) {
+        boolean xs = Character.isSurrogate(x);
+        boolean ys = Character.isSurrogate(y);
+        return xs == ys ? x - y : (xs ? 1 : -1);
+      }
+    }
+    return a.length() - b.length();
+  }
+
+  /** The order of the expiry list: (retain-until, artifact text, regime id text, anchor). */
+  private static final Comparator<RetentionRow> EXPIRY_ORDER =
+      Comparator.<RetentionRow, Instant>comparing(row -> row.claim().retainUntil().orElseThrow())
+          .thenComparing(row -> row.claim().artifact().path())
+          .thenComparing(row -> row.claim().regime().id())
+          .thenComparing(row -> row.claim().anchor());
 
   /**
    * Spec 10 scopes the decision key by regime: (regime, event identity, context, input), and the
@@ -163,7 +218,19 @@ public final class InMemoryLedgerStore implements LedgerStore {
     /** A beginSending that does not apply still records the objects of its intent. */
     MANIFEST_RECORDED_ON_FAILED_BEGIN,
     /** A manifest conflict in beginSending leaves the state change and the attempt row behind. */
-    BEGIN_SENDING_NOT_ATOMIC_WITH_MANIFEST
+    BEGIN_SENDING_NOT_ATOMIC_WITH_MANIFEST,
+    /** A ledger that is built to require envelope bodies accepts a plain body. */
+    ENVELOPE_REQUIREMENT_IGNORED,
+    /** A claim with a value replaces the stored retain-until even when it is earlier. */
+    RETENTION_SHORTENS,
+    /** The expiry list also names the rows under the epoch-marker prefix. */
+    RETENTION_EXPIRED_LISTS_CONTROL,
+    /** The expiry list also names the rows that are held. */
+    RETENTION_HOLD_IGNORED_IN_EXPIRED,
+    /** A new row of a held artifact is stored unheld. */
+    RETENTION_NEW_ROW_UNHELD,
+    /** Removing a reference deletes every row of each hash that names it. */
+    SUBJECT_REMOVE_REMOVES_ALL
   }
 
   /** Constant stand-in for the day under IDEMPOTENCY_KEY_IGNORES_DAY. */
@@ -177,6 +244,7 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
   private final Clock clock;
   private final Flaw flaw;
+  private volatile boolean requireEnvelopeBodies;
   private final Object lock = new Object();
   private final Map<IngestKey, StoredIngest> ingests = new HashMap<>();
   private final Map<EventVersion, StoredIngest> ingestsByEventVersion = new HashMap<>();
@@ -207,6 +275,20 @@ public final class InMemoryLedgerStore implements LedgerStore {
   /** The object manifest by key path; String order is the UTF-16 code-unit order of the store. */
   private final TreeMap<String, ManifestRow> manifest = new TreeMap<>();
 
+  /**
+   * The retention rows by artifact text, then by (regime id text, anchor event): String order is
+   * the UTF-16 code-unit order of the store, and never the order of a Regime object or of
+   * insertion.
+   */
+  private final TreeMap<String, TreeMap<RetentionSlot, RetentionRow>> retention = new TreeMap<>();
+
+  /**
+   * The data-subject index: the references of each keyed hash, ordered by (kind code, reference
+   * text); the text by code point (UTF-8 byte order) and never a collation. The map is keyed by the
+   * {@link SubjectHash} value, which compares its hash with {@code MessageDigest.isEqual}.
+   */
+  private final Map<SubjectHash, TreeSet<SubjectRef>> subjectIndex = new HashMap<>();
+
   private Status durability = new Status(false, 0, "in-memory ledger");
 
   /** The clock is the "database clock" for leases (T11). */
@@ -218,6 +300,16 @@ public final class InMemoryLedgerStore implements LedgerStore {
   public InMemoryLedgerStore(Clock clock, Flaw flaw) {
     this.clock = Objects.requireNonNull(clock, "clock");
     this.flaw = Objects.requireNonNull(flaw, "flaw");
+  }
+
+  /**
+   * Builds the store to require envelope bodies (the {@code Config.production} of the PostgreSQL
+   * adapter): a version whose body is not an envelope ({@code Envelope.isEnvelope}) is refused
+   * before anything is written. The default is false. Returns this store.
+   */
+  public InMemoryLedgerStore requireEnvelopeBodies(boolean require) {
+    this.requireEnvelopeBodies = require;
+    return this;
   }
 
   @Override
@@ -426,13 +518,17 @@ public final class InMemoryLedgerStore implements LedgerStore {
       ChainKey chainKey = new ChainKey(body.regime(), body.eventIdentity());
       List<DecisionRecord> chain = chains.getOrDefault(chainKey, List.of());
       List<DecisionRecord> added = appended.computeIfAbsent(chainKey, k -> new ArrayList<>());
-      long headSeq = chain.size() + added.size();
+      long storedHeadSeq = chain.size();
+      long headSeq = storedHeadSeq + added.size();
       if (decision.expectedHeadSeq() != headSeq) {
         // test double only: deliberate flaw for ContractSuiteTeethTest (no rollback)
         if (flaw == Flaw.NON_ATOMIC_DECISIONS) {
           publishDecisions();
         }
-        throw new DecisionHeadConflictException(body.eventIdentity(), headSeq);
+        // The conflict carries the STORED head, as PostgreSQL does: the unit is rolled back, so a
+        // head that only an earlier decision of this unit would have made never becomes current,
+        // and a loser that re-reads could not find it (D33 (1)).
+        throw new DecisionHeadConflictException(body.eventIdentity(), storedHeadSeq);
       }
       Optional<DecisionId> supersedes = Optional.empty();
       if (!added.isEmpty()) {
@@ -561,6 +657,13 @@ public final class InMemoryLedgerStore implements LedgerStore {
     Set<Leg> seen = EnumSet.noneOf(Leg.class);
     for (NewVersion version : reportable.versions()) {
       SubjectKey subject = version.subject();
+      // the single test of the ledger (D-K6); the message holds nothing of the body
+      // test double only: deliberate flaw for ContractSuiteTeethTest
+      if (requireEnvelopeBodies
+          && flaw != Flaw.ENVELOPE_REQUIREMENT_IGNORED
+          && !Envelope.isEnvelope(version.body())) {
+        throw new IllegalArgumentException("a report body must be an envelope");
+      }
       // test double only: deliberate flaw for ContractSuiteTeethTest
       if (body.outcome() != Outcome.REPORT && flaw != Flaw.VERSION_ON_ANY_OUTCOME) {
         throw new IllegalArgumentException("a version needs a REPORT decision: " + body.outcome());
@@ -620,10 +723,11 @@ public final class InMemoryLedgerStore implements LedgerStore {
             VersionStatus.EXISTING,
             Optional.of(existing.delivery()));
       }
-      long head =
-          stage.headSeq(new ChainKey(decision.body().regime(), decision.body().eventIdentity()));
-      if (decision.decisionSeq() != head) {
-        throw new DecisionHeadConflictException(decision.body().eventIdentity(), head);
+      ChainKey chainKey = new ChainKey(decision.body().regime(), decision.body().eventIdentity());
+      if (decision.decisionSeq() != stage.headSeq(chainKey)) {
+        // the STORED head, as in DecisionStage.stage (D33 (1))
+        throw new DecisionHeadConflictException(
+            decision.body().eventIdentity(), chains.getOrDefault(chainKey, List.of()).size());
       }
     }
     if (subject == null) {
@@ -1188,6 +1292,201 @@ public final class InMemoryLedgerStore implements LedgerStore {
       }
     }
     return List.copyOf(rows);
+  }
+
+  @Override
+  public void recordRetention(List<RetentionClaim> claims) {
+    Objects.requireNonNull(claims, "claims");
+    List<RetentionClaim> copy = List.copyOf(claims);
+    if (copy.isEmpty()) {
+      return;
+    }
+    Set<ClaimKey> seen = new HashSet<>();
+    for (RetentionClaim claim : copy) {
+      ClaimKey identity =
+          new ClaimKey(claim.artifact().path(), claim.regime().id(), claim.anchor());
+      if (!seen.add(identity)) {
+        throw new IllegalArgumentException("two claims of one call have one artifact and anchor");
+      }
+    }
+    synchronized (lock) {
+      Instant now = clock.now();
+      for (RetentionClaim claim : copy) {
+        String path = claim.artifact().path();
+        // the map of an artifact is created with its first row, never before
+        TreeMap<RetentionSlot, RetentionRow> existing = retention.get(path);
+        RetentionSlot slot = new RetentionSlot(claim.regime().id(), claim.anchor());
+        RetentionRow stored = existing == null ? null : existing.get(slot);
+        if (stored == null) {
+          // test double only: deliberate flaw for ContractSuiteTeethTest
+          boolean held =
+              flaw != Flaw.RETENTION_NEW_ROW_UNHELD
+                  && existing != null
+                  && existing.values().stream().anyMatch(RetentionRow::legalHold);
+          retention
+              .computeIfAbsent(path, key -> new TreeMap<>())
+              .put(slot, new RetentionRow(claim, held, now));
+        } else {
+          RetentionClaim kept = stored.claim();
+          Optional<Instant> merged = mergedRetainUntil(kept.retainUntil(), claim.retainUntil());
+          existing.put(
+              slot,
+              new RetentionRow(
+                  new RetentionClaim(
+                      kept.artifact(), kept.regime(), kept.anchor(), merged, kept.retentionClass()),
+                  stored.legalHold(),
+                  stored.recordedAt()));
+        }
+      }
+    }
+  }
+
+  /**
+   * The later of the two dates; a value replaces an empty one and an empty one replaces nothing.
+   */
+  private Optional<Instant> mergedRetainUntil(Optional<Instant> stored, Optional<Instant> given) {
+    if (given.isEmpty()) {
+      return stored;
+    }
+    // test double only: deliberate flaw for ContractSuiteTeethTest
+    if (stored.isEmpty() || flaw == Flaw.RETENTION_SHORTENS) {
+      return given;
+    }
+    return given.get().isAfter(stored.get()) ? given : stored;
+  }
+
+  @Override
+  public void setRetentionHold(EvidenceKey artifact, boolean hold) {
+    Objects.requireNonNull(artifact, "artifact");
+    synchronized (lock) {
+      TreeMap<RetentionSlot, RetentionRow> slots = retention.get(artifact.path());
+      if (slots == null) {
+        throw new IllegalArgumentException("the artifact has no retention row");
+      }
+      slots.replaceAll((slot, row) -> new RetentionRow(row.claim(), hold, row.recordedAt()));
+    }
+  }
+
+  @Override
+  public List<RetentionRow> retentionRows(String prefix, Optional<EvidenceKey> after, int limit) {
+    Objects.requireNonNull(prefix, "prefix");
+    Objects.requireNonNull(after, "after");
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    int maxArtifacts = Math.min(limit, MAX_RETENTION_ROWS_PER_CALL);
+    List<RetentionRow> rows = new ArrayList<>();
+    synchronized (lock) {
+      // as in manifestRows: start at the larger of the prefix and the artifact after which to list
+      boolean afterPrefix = after.isPresent() && after.get().path().compareTo(prefix) >= 0;
+      NavigableMap<String, TreeMap<RetentionSlot, RetentionRow>> candidates =
+          afterPrefix
+              ? retention.tailMap(after.get().path(), false)
+              : retention.tailMap(prefix, true);
+      int artifacts = 0;
+      for (var artifact : candidates.entrySet()) {
+        if (artifacts >= maxArtifacts || !artifact.getKey().startsWith(prefix)) {
+          break;
+        }
+        rows.addAll(artifact.getValue().values());
+        artifacts++;
+      }
+    }
+    return List.copyOf(rows);
+  }
+
+  @Override
+  public List<RetentionRow> expiredRetention(
+      Instant asOf, Optional<RetentionRow> after, int limit) {
+    Objects.requireNonNull(asOf, "asOf");
+    Objects.requireNonNull(after, "after");
+    RetentionClaim.requireStorable("asOf", asOf);
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    if (after.isPresent() && after.get().claim().retainUntil().isEmpty()) {
+      throw new IllegalArgumentException("a row without a retain-until is not in the expiry list");
+    }
+    int max = Math.min(limit, MAX_RETENTION_ROWS_PER_CALL);
+    List<RetentionRow> due = new ArrayList<>();
+    synchronized (lock) {
+      for (var artifact : retention.entrySet()) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest
+        if (flaw != Flaw.RETENTION_EXPIRED_LISTS_CONTROL
+            && artifact.getKey().startsWith(EXEMPT_PREFIX)) {
+          continue;
+        }
+        for (RetentionRow row : artifact.getValue().values()) {
+          boolean isDue =
+              row.claim().retainUntil().isPresent()
+                  && !row.claim().retainUntil().get().isAfter(asOf)
+                  // test double only: deliberate flaw for ContractSuiteTeethTest
+                  && (flaw == Flaw.RETENTION_HOLD_IGNORED_IN_EXPIRED || !row.legalHold());
+          if (isDue && (after.isEmpty() || EXPIRY_ORDER.compare(row, after.get()) > 0)) {
+            due.add(row);
+          }
+        }
+      }
+    }
+    due.sort(EXPIRY_ORDER);
+    return List.copyOf(due.subList(0, Math.min(max, due.size())));
+  }
+
+  @Override
+  public void indexSubjects(List<SubjectEntry> entries) {
+    // List.copyOf refuses a null list or element before anything is stored
+    List<SubjectEntry> copy = List.copyOf(Objects.requireNonNull(entries, "entries"));
+    synchronized (lock) {
+      for (SubjectEntry entry : copy) {
+        subjectIndex
+            .computeIfAbsent(entry.hash(), hash -> new TreeSet<>(SUBJECT_REF_ORDER))
+            .add(entry.ref());
+      }
+    }
+  }
+
+  @Override
+  public List<SubjectRef> subjectRefs(SubjectHash hash, Optional<SubjectRef> after, int limit) {
+    Objects.requireNonNull(hash, "hash");
+    Objects.requireNonNull(after, "after");
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must not be negative");
+    }
+    int max = Math.min(limit, MAX_REFS_PER_CALL);
+    List<SubjectRef> refs = new ArrayList<>();
+    synchronized (lock) {
+      TreeSet<SubjectRef> stored = subjectIndex.get(hash);
+      if (stored != null && max > 0) {
+        for (SubjectRef ref : after.isPresent() ? stored.tailSet(after.get(), false) : stored) {
+          refs.add(ref);
+          if (refs.size() == max) {
+            break;
+          }
+        }
+      }
+    }
+    return List.copyOf(refs);
+  }
+
+  @Override
+  public int removeSubjectRefs(SubjectRef ref) {
+    Objects.requireNonNull(ref, "ref");
+    int removed = 0;
+    synchronized (lock) {
+      for (var each : subjectIndex.values()) {
+        // test double only: deliberate flaw for ContractSuiteTeethTest
+        if (flaw == Flaw.SUBJECT_REMOVE_REMOVES_ALL) {
+          if (each.contains(ref)) {
+            removed += each.size();
+            each.clear();
+          }
+        } else if (each.remove(ref)) {
+          removed++;
+        }
+      }
+      subjectIndex.values().removeIf(TreeSet::isEmpty);
+    }
+    return removed;
   }
 
   @Override

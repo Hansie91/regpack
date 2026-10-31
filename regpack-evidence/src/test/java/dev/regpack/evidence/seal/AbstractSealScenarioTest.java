@@ -1,6 +1,8 @@
 package dev.regpack.evidence.seal;
 
+import dev.regpack.evidence.retention.RetentionEngine;
 import dev.regpack.inmemory.InMemoryLedgerStore;
+import dev.regpack.model.Regime;
 import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import dev.regpack.ports.evidence.seal.Sealing;
@@ -68,5 +70,20 @@ abstract class AbstractSealScenarioTest implements SealScenarioContract {
   @Override
   public Sealing sealing(LedgerStore ledger, EvidenceStore evidence, boolean productionGate) {
     return create(ledger, evidence, gate(productionGate));
+  }
+
+  /**
+   * The sealer with the retention registrar (SEAL-1): the policy of {@link #RETENTION}, a gate that
+   * asks nothing and a {@link RetentionEngine} for {@code regime} over the given ports.
+   */
+  @Override
+  public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
+    return new DurableSeal(
+        ledger,
+        evidence,
+        clock,
+        RETENTION,
+        gate(false),
+        new RetentionEngine(ledger, evidence, regime));
   }
 }

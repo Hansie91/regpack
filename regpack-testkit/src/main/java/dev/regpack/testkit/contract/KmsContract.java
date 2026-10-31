@@ -8,6 +8,7 @@ import dev.regpack.ports.security.KeyPurpose;
 import dev.regpack.ports.security.KeyRef;
 import dev.regpack.ports.security.Kms;
 import dev.regpack.ports.security.KmsAccessDeniedException;
+import dev.regpack.ports.security.KmsKeyDestroyedException;
 import dev.regpack.ports.security.KmsSignature;
 import dev.regpack.ports.security.WrappedKey;
 import org.junit.jupiter.api.Test;
@@ -41,6 +42,15 @@ public interface KmsContract {
 
   /** ENVELOPE_KEK "kek-2": allowed to the signer identity only, not to application. */
   KeyRef kek2();
+
+  /** INDEX_HMAC "index-key": allowed to the application identity only, not to signer. */
+  KeyRef indexKey();
+
+  /**
+   * The administrative path that destroys an ENVELOPE_KEK (the destruction job, or a KMS
+   * administrator). It is not a method of the {@link Kms} port, so every adapter binds it itself.
+   */
+  void destroyForTest(KeyRef kek);
 
   private static byte[] bytes(String text) {
     return text.getBytes(UTF_8);
@@ -183,6 +193,82 @@ public interface KmsContract {
     assertThat(first.ciphertext()).isNotEqualTo(second.ciphertext());
     assertThat(application().unwrap(kek(), first, aad))
         .isEqualTo(application().unwrap(kek(), second, aad));
+  }
+
+  @Test
+  default void indexKeyHmacIsDeterministicAndDeniedToTheSigner() {
+    byte[] message = bytes("subject-input");
+    byte[] first = application().hmac(indexKey(), message);
+    assertThat(first).hasSize(32);
+    assertThat(application().hmac(indexKey(), message)).isEqualTo(first);
+    assertThat(application().hmac(indexKey(), bytes("subject-input-2"))).isNotEqualTo(first);
+    assertThat(application().hmac(trnKey(), message)).isNotEqualTo(first);
+    assertThatThrownBy(() -> signer().hmac(indexKey(), message))
+        .isInstanceOf(KmsAccessDeniedException.class);
+  }
+
+  @Test
+  default void anIndexKeyCannotWrapAndAKekCannotHmac() {
+    byte[] data = bytes("data");
+    assertThatThrownBy(() -> application().wrap(indexKey(), data, data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    assertThatThrownBy(
+            () -> application().unwrap(indexKey(), new WrappedKey("index-key", data), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    assertThatThrownBy(() -> signer().sign(indexKey(), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    assertThatThrownBy(() -> application().hmac(kek(), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    // The purpose named by the caller must match the purpose of the key, in both directions.
+    assertThatThrownBy(
+            () -> application().hmac(new KeyRef(kek().keyId(), KeyPurpose.INDEX_HMAC), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    assertThatThrownBy(
+            () -> application().hmac(new KeyRef(indexKey().keyId(), KeyPurpose.TRN_HMAC), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+    assertThatThrownBy(
+            () -> application().hmac(new KeyRef(trnKey().keyId(), KeyPurpose.INDEX_HMAC), data))
+        .isInstanceOf(KmsAccessDeniedException.class);
+  }
+
+  @Test
+  default void aDestroyedKekReportsDestroyedNotUnknown() {
+    byte[] dataKey = bytes("0123456789abcdef0123456789abcdef");
+    byte[] aad = bytes("aad");
+    WrappedKey wrapped = application().wrap(kek(), dataKey, aad);
+    destroyForTest(kek());
+    assertThatThrownBy(() -> application().wrap(kek(), dataKey, aad))
+        .isInstanceOf(KmsKeyDestroyedException.class)
+        .isNotInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> application().unwrap(kek(), wrapped, aad))
+        .isInstanceOf(KmsKeyDestroyedException.class)
+        .isNotInstanceOf(IllegalArgumentException.class);
+    // An unknown key stays an IllegalArgumentException and is not reported as destroyed.
+    KeyRef unknownKek = new KeyRef("nope", KeyPurpose.ENVELOPE_KEK);
+    assertThatThrownBy(() -> application().wrap(unknownKek, dataKey, aad))
+        .isInstanceOf(IllegalArgumentException.class)
+        .isNotInstanceOf(KmsKeyDestroyedException.class);
+    assertThatThrownBy(() -> application().unwrap(unknownKek, wrapped, aad))
+        .isInstanceOf(IllegalArgumentException.class)
+        .isNotInstanceOf(KmsKeyDestroyedException.class);
+    // The other kek still works, and so do the other key purposes.
+    WrappedKey other = signer().wrap(kek2(), dataKey, aad);
+    assertThat(signer().unwrap(kek2(), other, aad)).isEqualTo(dataKey);
+    assertThat(application().hmac(indexKey(), aad)).hasSize(32);
+  }
+
+  @Test
+  default void aKeyWrappedBeforeDestructionCannotBeUnwrappedAfterIt() {
+    byte[] dataKey = bytes("0123456789abcdef0123456789abcdef");
+    byte[] aad = bytes("aad");
+    WrappedKey wrapped = application().wrap(kek(), dataKey, aad);
+    assertThat(application().unwrap(kek(), wrapped, aad)).isEqualTo(dataKey);
+    destroyForTest(kek());
+    assertThatThrownBy(() -> application().unwrap(kek(), wrapped, aad))
+        .isInstanceOf(KmsKeyDestroyedException.class);
+    // A different aad does not make it readable either.
+    assertThatThrownBy(() -> application().unwrap(kek(), wrapped, bytes("other")))
+        .isInstanceOf(KmsKeyDestroyedException.class);
   }
 
   @Test

@@ -5,12 +5,14 @@ import static dev.regpack.testkit.contract.SealScenarioContract.request;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import dev.regpack.evidence.retention.RetentionEngine;
 import dev.regpack.evidence.seal.DurableSeal;
 import dev.regpack.evidence.seal.SealedKeys;
 import dev.regpack.evidence.seal.SendGate;
 import dev.regpack.evidence.sealed.SealedEvidenceStore;
 import dev.regpack.evidence.verify.EvidenceVerifier;
 import dev.regpack.evidence.verify.EvidenceVerifier.Report;
+import dev.regpack.model.Regime;
 import dev.regpack.model.Sha256;
 import dev.regpack.ports.evidence.EvidenceKey;
 import dev.regpack.ports.evidence.EvidenceStore;
@@ -124,6 +126,23 @@ class PgSealScenarioIT extends AbstractPgStoreTest implements SealScenarioContra
         RetentionPolicy.fixedDays(1826),
         new SendGate(
             productionGate ? SendGate.Requirement.production() : SendGate.Requirement.none()));
+  }
+
+  /**
+   * The sealer with the retention registrar (SEAL-1) over the PostgreSQL ledger and P-SEALED: the
+   * policy of 1,826 days, a gate that asks nothing and a {@link RetentionEngine} for {@code
+   * regime}. The class skips without {@code REGPACK_PG_URL}; it ran green on a local PostgreSQL
+   * 18.6 before CP-1 (record AP-8), and the CI run stays the authoritative one.
+   */
+  @Override
+  public Sealing sealingWithRetention(LedgerStore ledger, EvidenceStore evidence, Regime regime) {
+    return new DurableSeal(
+        ledger,
+        evidence,
+        clock(),
+        RetentionPolicy.fixedDays(1826),
+        new SendGate(SendGate.Requirement.none()),
+        new RetentionEngine(ledger, evidence, regime));
   }
 
   // ---------------------------------------------------------------------------------------------

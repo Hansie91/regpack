@@ -29,7 +29,9 @@ import java.sql.BatchUpdateException;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -340,6 +342,62 @@ class PgUnitFlowTest {
 
     assertThat(committed.decision().status()).isEqualTo(CommitStatus.INSERTED);
     assertThat(spy.events()).contains("commit").doesNotContain("execute: " + Unit.BARRIER_SQL);
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // P3c1 T12: body_encoding 1 for an envelope, 0 for any other body, in the default configuration
+
+  /** The binds of the statement {@code sql}: the events between the previous statement and it. */
+  private static List<String> bindsOf(List<String> events, String sql) {
+    int end = at(events, sql);
+    int start = end;
+    while (start > 0 && !events.get(start - 1).startsWith("execute: ")) {
+      start--;
+    }
+    return events.subList(start, end);
+  }
+
+  @Test
+  void aVersionIsStoredWithTheEncodingOfItsBodyAndTheBodyUnchanged() {
+    SqlSpy.Answers base = serverOfAFirstDecision();
+    byte[] envelope = EnvelopeBodyFixtures.envelope();
+    byte[] plain = EnvelopeBodyFixtures.plain();
+    byte[] empty = new byte[0];
+    // a body that only starts like an envelope is not one: the default ledger stores it as plain
+    byte[] magicOnly = Arrays.copyOf(envelope, 8);
+    for (Object[] each :
+        new Object[][] {
+          {envelope, 1}, {plain, 0}, {empty, 0}, {magicOnly, 0},
+        }) {
+      byte[] body = (byte[]) each[0];
+      SqlSpy typed =
+          new SqlSpy()
+              .recordingTypedBinds()
+              .updatingRows(1)
+              .answering(
+                  (sql, events) ->
+                      sql.equals(PgDeliveries.CREATE_SQL) ? row(55L) : base.rows(sql, events));
+      PgDecisions typedDecisions = new PgDecisions(typed.over(null), CONFIG);
+      PgReports typedReports =
+          new PgReports(typed.over(null), new ManualClock(NOW), CONFIG, typedDecisions);
+
+      ReportableCommitted committed =
+          typedReports
+              .commitReportable(
+                  reportable(FIRST, EnvelopeBodyFixtures.version("E1", MARKET, "TRN1", body)))
+              .get(0);
+
+      assertThat(committed.versions().get(0).status())
+          .as("a created version for %d bytes", body.length)
+          .isEqualTo(VersionStatus.CREATED);
+      List<String> binds = bindsOf(typed.events(), PgReports.VERSION_INSERT_SQL);
+      assertThat(binds)
+          .as("the binds of the version insert for %d bytes", body.length)
+          .contains(
+              "bind bytes 7=" + HexFormat.of().formatHex(body),
+              "bind short 8=" + each[1],
+              "bind short 9=1");
+    }
   }
 
   // ------------------------------------------------------------------------------------------

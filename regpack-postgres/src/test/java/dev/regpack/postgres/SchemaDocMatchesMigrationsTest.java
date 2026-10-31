@@ -18,12 +18,14 @@ import org.junit.jupiter.api.Test;
 /**
  * The reviewed schema documents and the migrations must say the same (review focus LF13): per
  * script, the machine-read blocks of its document ({@code docs/ledger/schema-design.md} for V001,
- * {@code docs/ledger/schema-design-p3b.md} for V002) against the statements of the script, the
- * recorded digest of each approved document and the recorded checksum of each applied script.
+ * {@code docs/ledger/schema-design-p3b.md} for V002, {@code docs/ledger/schema-design-p3c.md} for
+ * V003) against the statements of the script, the recorded digest of each approved document and the
+ * recorded checksum of each applied script.
  */
 class SchemaDocMatchesMigrationsTest {
   private static final String V001 = "V001__core.sql";
   private static final String V002 = "V002__evidence_manifest.sql";
+  private static final String V003 = "V003__retention_and_subject_index.sql";
 
   private static final Pattern TABLE = Pattern.compile("^CREATE TABLE (\\w+) \\(");
   private static final Pattern CONSTRAINT =
@@ -56,6 +58,12 @@ class SchemaDocMatchesMigrationsTest {
             SchemaDocument.EVIDENCE_DECISIONS,
             "approved-schema-p3b-sha256",
             "schema-design-p3b.md (approved)"));
+    approvals.put(
+        V003,
+        new Approval(
+            SchemaDocument.P3C_DECISIONS,
+            "approved-schema-p3c-sha256",
+            "schema-design-p3c.md (approved)"));
     return approvals;
   }
 
@@ -158,6 +166,9 @@ class SchemaDocMatchesMigrationsTest {
     assertThat(SchemaDocument.tableNames(SchemaDocument.DOCUMENT_OF_SCRIPT.get(V002)))
         .as("V002 adds exactly one table")
         .containsExactly("object_manifest");
+    assertThat(SchemaDocument.tableNames(SchemaDocument.DOCUMENT_OF_SCRIPT.get(V003)))
+        .as("V003 adds exactly retention and subject_index")
+        .containsExactly("retention", "subject_index");
     assertThat(SchemaDocument.allTableNames())
         .as("no table is created by two scripts")
         .doesNotHaveDuplicates();
@@ -354,6 +365,42 @@ class SchemaDocMatchesMigrationsTest {
     }
     assertThat(proposed).as("the block holds the three statements").hasSize(3);
     assertThat(statements(script(V002))).containsExactlyElementsOf(proposed);
+  }
+
+  @Test
+  void v003ChecksumIsRecorded() {
+    ScriptCatalogue.Script v003 = script(V003);
+    assertThat(v003.version()).isEqualTo(3);
+    Map<String, String> pins = SchemaDocument.pins(SchemaDocument.P3C_DECISIONS);
+    assertThat(pins)
+        .as(
+            "Pins created in docs/evidence/p3c-decisions.md has a line for"
+                + " V003__retention_and_subject_index.sql")
+        .containsKey(V003);
+    assertThat(v003.sha256())
+        .as("an applied script is never edited; a change is a new script")
+        .isEqualTo(pins.get(V003));
+  }
+
+  @Test
+  void v003HoldsExactlyTheStatementsOfTheProposedTextOfItsDocument() {
+    // T11: "exactly the statements of the approved document"; the document (frozen by its digest)
+    // shows them as the first fenced sql block after the words "Proposed text of the migration"
+    String document = SchemaDocument.read(SchemaDocument.DOCUMENT_OF_SCRIPT.get(V003));
+    int heading = document.indexOf("**Proposed text of the migration");
+    assertThat(heading).as("the proposed text is announced").isGreaterThanOrEqualTo(0);
+    int open = document.indexOf("```sql\n", heading);
+    assertThat(open).as("the proposed text is a fenced sql block").isGreaterThan(heading);
+    int from = open + "```sql\n".length();
+    int close = document.indexOf("\n```", from);
+    assertThat(close).as("the block is closed").isGreaterThan(from);
+    List<String> proposed = new ArrayList<>();
+    for (String statement : ScriptCatalogue.statements(document.substring(from, close + 1))) {
+      proposed.add(statement.replaceAll("\\s+", " ").strip());
+    }
+    // D2 option (a) of the approved document: two tables, two indexes, the function, the trigger
+    assertThat(proposed).as("the block holds the six statements").hasSize(6);
+    assertThat(statements(script(V003))).containsExactlyElementsOf(proposed);
   }
 
   @Test

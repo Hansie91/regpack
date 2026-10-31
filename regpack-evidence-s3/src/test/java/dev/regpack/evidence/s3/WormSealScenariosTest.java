@@ -3,12 +3,14 @@ package dev.regpack.evidence.s3;
 import static dev.regpack.testkit.contract.SealScenarioContract.reportOf;
 import static dev.regpack.testkit.contract.SealScenarioContract.request;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.evidence.s3.S3TestService.S3Settings;
 import dev.regpack.evidence.s3.client.S3Client;
 import dev.regpack.evidence.s3.fake.FakeS3Server.Fault;
 import dev.regpack.evidence.seal.EpochMarker;
 import dev.regpack.ports.Clock;
+import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.seal.Sealing.PreSendStatus;
 import dev.regpack.ports.evidence.seal.Sealing.SealOutcome;
 import dev.regpack.ports.evidence.seal.Sealing.SealStatus;
@@ -16,16 +18,21 @@ import dev.regpack.ports.ledger.LeaseLedger.EndpointKey;
 import dev.regpack.ports.ledger.LeaseLedger.LeaseToken;
 import dev.regpack.testkit.contract.LedgerFixtures;
 import dev.regpack.testkit.contract.SealScenarioContract;
+import java.lang.reflect.Proxy;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * T9: the 24 seal-and-send scenarios of {@code SealScenarioContract} (I1, first-byte limb) on an
- * in-memory ledger and P-WORM on the in-JVM fake S3 service, and the two methods of {@link
- * AbstractWormSealTest}. The fake is a stand-in: the run that counts as evidence for P-WORM is the
- * one against the real service ({@code WormSealScenariosIT}, job {@code evidence-worm}). The one
- * method of this class needs a fault switch of the fake and so has no twin there.
+ * T9: the 25 seal-and-send scenarios of {@code SealScenarioContract} (the 24 of P3b and, since P3c1
+ * T9, the SEAL-1 scenario; I1, first-byte limb) on an in-memory ledger and P-WORM on the in-JVM
+ * fake S3 service, and the two methods of {@link AbstractWormSealTest}. The fake is a stand-in: the
+ * run that counts as evidence for P-WORM is the one against the real service ({@code
+ * WormSealScenariosIT}, job {@code evidence-worm}). The marker method of this class needs a fault
+ * switch of the fake and so has no twin there; the four methods of the guard of the OQ-1
+ * measurement (P3c1 T15-2) need a store that fails and have none either.
  */
 class WormSealScenariosTest extends AbstractWormSealTest {
   private FakeWormBackend backend;
@@ -42,6 +49,110 @@ class WormSealScenariosTest extends AbstractWormSealTest {
     if (backend != null) {
       backend.close();
     }
+  }
+
+  /**
+   * The number of requests of one seal on the fake, per case, in the order of {@link
+   * SealPathReport#CASES}, counted after a first seal in the bucket (OQ-1, P3c1 T15-2; the pin
+   * "Request counts of one DurableSeal.seal on the fake" of the lens before CP-2, measured again).
+   * These are counts on the fake, not a measurement of the service. The raw store: new bytes 6 and
+   * 9, bytes that are already sealed 5 and 10 (a day later, so that the retention extension is
+   * real).
+   */
+  static final Map<String, Integer> RAW_REQUESTS =
+      Map.of(
+          SealPathReport.NEW_WITHOUT, 6,
+          SealPathReport.NEW_WITH, 9,
+          SealPathReport.SHARED_WITHOUT, 5,
+          SealPathReport.SHARED_WITH, 10);
+
+  /** The same under the decorator: the decorated put of a key that exists reads it twice. */
+  static final Map<String, Integer> ENCRYPTED_REQUESTS =
+      Map.of(
+          SealPathReport.NEW_WITHOUT, 8,
+          SealPathReport.NEW_WITH, 11,
+          SealPathReport.SHARED_WITHOUT, 8,
+          SealPathReport.SHARED_WITH, 13);
+
+  /**
+   * The fake-backed twins assert the counts and print nothing; the service classes only print them.
+   * The extension of the retention (one PutObjectRetention and one PutObjectTagging) is in the
+   * shared case with the registrar and nowhere else.
+   */
+  @Override
+  void takeSealPath(String binding, List<SealPathReport.Figure> figures) {
+    assertThat(figures)
+        .as(
+            "the seal path of the "
+                + binding
+                + " binding was measured (why not: "
+                + sealPathFailure()
+                + ")")
+        .hasSize(4);
+    Map<String, Integer> expected =
+        binding.equals(SealPathReport.RAW) ? RAW_REQUESTS : ENCRYPTED_REQUESTS;
+    for (SealPathReport.Figure figure : figures) {
+      assertThat(figure.byKind().values().stream().mapToInt(Integer::intValue).sum())
+          .as("requests of the case " + figure.name() + " of the " + binding + " binding")
+          .isEqualTo(expected.get(figure.name()));
+      boolean extended = figure.name().equals(SealPathReport.SHARED_WITH);
+      assertThat(figure.byKind().getOrDefault("PUT-retention", 0))
+          .as("PutObjectRetention in " + figure.name())
+          .isEqualTo(extended ? 1 : 0);
+      assertThat(figure.byKind().getOrDefault("PUT-tagging", 0))
+          .as("PutObjectTagging in " + figure.name())
+          .isEqualTo(extended ? 1 : 0);
+      assertThat(figure.byKind().getOrDefault("other", 0))
+          .as("a request of a kind the adapter is not known to send in " + figure.name())
+          .isZero();
+    }
+    assertThat(figures).extracting(SealPathReport.Figure::name).isEqualTo(SealPathReport.CASES);
+  }
+
+  /** A store whose every call throws {@code failure} (an Error as it is, else the exception). */
+  private static EvidenceStore failingWith(Throwable failure) {
+    return (EvidenceStore)
+        Proxy.newProxyInstance(
+            EvidenceStore.class.getClassLoader(),
+            new Class<?>[] {EvidenceStore.class},
+            (proxy, method, args) -> {
+              if (failure instanceof Error error) {
+                throw error;
+              }
+              throw (RuntimeException) failure;
+            });
+  }
+
+  /*
+   * T15-2 F2: a measurement of OQ-1 that cannot be taken ends in no figures and a reason and never
+   * throws, so it can never turn a green IT red; an Error that is not an AssertionError passes
+   * through. One call per test: a second call in the same bucket meets the leases of the first.
+   */
+
+  @Test
+  void aMeasurementOnAnOutageOfTheServiceEndsWithoutFigures() {
+    simulateOutage(true);
+
+    assertThat(measureSealPath(evidence())).isEmpty();
+    assertThat(sealPathFailure()).isEqualTo("not-sealed");
+  }
+
+  @Test
+  void aMeasurementWhoseStoreThrowsARuntimeExceptionEndsWithoutFigures() {
+    assertThat(measureSealPath(failingWith(new IllegalStateException("store")))).isEmpty();
+    assertThat(sealPathFailure()).isEqualTo("error");
+  }
+
+  @Test
+  void aMeasurementWhoseStoreThrowsAnAssertionErrorEndsWithoutFigures() {
+    assertThat(measureSealPath(failingWith(new AssertionError("store")))).isEmpty();
+    assertThat(sealPathFailure()).isEqualTo("error");
+  }
+
+  @Test
+  void anErrorOfTheStoreIsNotSwallowedByTheMeasurement() {
+    assertThatThrownBy(() -> measureSealPath(failingWith(new LinkageError("store"))))
+        .isInstanceOf(LinkageError.class);
   }
 
   @Override

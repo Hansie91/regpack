@@ -9,7 +9,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -125,5 +129,41 @@ class ThirdPartyBoundaryTest {
     assertThat(offenders)
         .as("no spike package or spike artifact id in the POM or the sources of %s", THIS_MODULE)
         .isEmpty();
+  }
+
+  /**
+   * Of the modules of this repository only the model and the ports are compile dependencies of this
+   * module; every other one (the in-memory adapter, the evidence tier, the test kit) is test scope,
+   * in this direction only (AP-5). The enforcer lets {@code dev.regpack} through at every scope, so
+   * the scope is pinned here. Every dependency element is read in any layout (on one line or on
+   * several, with or without a version child), and a missing scope counts as compile, as it does
+   * for Maven. The three entries asserted first make a reformatted POM fail loudly instead of
+   * passing with nothing read.
+   */
+  @Test
+  void everyRegpackDependencyBeyondModelAndPortsIsTestScope() {
+    String pom = text(repoRoot().resolve(THIS_MODULE).resolve("pom.xml"));
+    Matcher block = Pattern.compile("<dependency>(.*?)</dependency>", Pattern.DOTALL).matcher(pom);
+    Map<String, String> scopeOf = new TreeMap<>();
+    while (block.find()) {
+      String element = block.group(1);
+      Matcher group = Pattern.compile("<groupId>([^<]*)</groupId>").matcher(element);
+      Matcher artifact = Pattern.compile("<artifactId>([^<]*)</artifactId>").matcher(element);
+      Matcher scope = Pattern.compile("<scope>([^<]*)</scope>").matcher(element);
+      if (group.find() && group.group(1).trim().equals("dev.regpack") && artifact.find()) {
+        scopeOf.put(artifact.group(1).trim(), scope.find() ? scope.group(1).trim() : "compile");
+      }
+    }
+
+    assertThat(scopeOf)
+        .containsEntry("regpack-inmemory", "test")
+        .containsEntry("regpack-model", "compile")
+        .containsEntry("regpack-ports", "compile");
+    scopeOf.forEach(
+        (artifact, scope) -> {
+          if (!artifact.equals("regpack-model") && !artifact.equals("regpack-ports")) {
+            assertThat(scope).as(artifact + " is a test-scope dependency").isEqualTo("test");
+          }
+        });
   }
 }
