@@ -3,7 +3,10 @@ package dev.regpack.flow;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.regpack.model.ident.Isin;
+import dev.regpack.model.ident.Lei;
 import dev.regpack.model.json.Json;
+import dev.regpack.testkit.ident.SyntheticIds;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -292,34 +295,21 @@ class SampleFilesTest {
     assertThat(execIds).containsExactly("EX-011", "EX-012", "EX-013", "EX-014", "EX-015", "EX-016");
   }
 
-  /** The values of V3 (plus the invalid ISIN of the scenario table): the only shaped tokens. */
-  private static final Set<String> ALLOWED =
-      Set.of(
-          "SYNT00FIRM0000000152",
-          "SYNT00CCP00000000194",
-          "SYNT00CLIENT00000167",
-          "SYNT00CLIENT00000264",
-          "SYNT00LAPSED00000132",
-          "ZZ0000000016",
-          "ZZ0000000024",
-          "ZZ0000000032",
-          "ZZ0000000040",
-          "ZZ0000000057",
-          "ZZ0000000065",
-          "ZZ0000000017");
-
-  private static final Pattern LEI_SHAPE = Pattern.compile("[A-Z0-9]{18}[0-9]{2}");
-  private static final Pattern ISIN_SHAPE = Pattern.compile("[A-Z]{2}[A-Z0-9]{9}[0-9]");
   private static final Pattern NOT_ALNUM = Pattern.compile("[^A-Za-z0-9]+");
 
   /**
-   * The LEI- or ISIN-shaped tokens of a text that are not in V3 (a regex; T3 has the strong check).
+   * The LEI- or ISIN-shaped tokens of a text that are not a V3 constant ({@code BAD_ISIN} counts
+   * for an ISIN): the shape is the one of {@link Lei#hasShape} and {@link Isin#hasShape}, so a
+   * token with a wrong check digit is found too.
    */
   private static List<String> unknownIdentifiers(String text) {
     List<String> found = new ArrayList<>();
     for (String token : NOT_ALNUM.split(text)) {
-      if ((LEI_SHAPE.matcher(token).matches() || ISIN_SHAPE.matcher(token).matches())
-          && !ALLOWED.contains(token)) {
+      if (Lei.hasShape(token) && !SyntheticIds.LEIS.contains(token)) {
+        found.add(token);
+      } else if (Isin.hasShape(token)
+          && !SyntheticIds.ISINS.contains(token)
+          && !SyntheticIds.BAD_ISIN.equals(token)) {
         found.add(token);
       }
     }
@@ -337,8 +327,15 @@ class SampleFilesTest {
     for (String name : all) {
       assertThat(unknownIdentifiers(text(name))).as(name).isEmpty();
       for (String token : NOT_ALNUM.split(text(name))) {
-        if (LEI_SHAPE.matcher(token).matches() || ISIN_SHAPE.matcher(token).matches()) {
+        if (Lei.hasShape(token)) {
           shaped++;
+          assertThat(Lei.isValid(token)).as(name + " LEI check digits").isTrue();
+        } else if (Isin.hasShape(token)) {
+          shaped++;
+          // the one invalid ISIN of the samples is the scenario's BAD_ISIN (T-004, V06)
+          assertThat(Isin.isValid(token))
+              .as(name + " ISIN check digit")
+              .isEqualTo(!SyntheticIds.BAD_ISIN.equals(token));
         }
       }
     }
