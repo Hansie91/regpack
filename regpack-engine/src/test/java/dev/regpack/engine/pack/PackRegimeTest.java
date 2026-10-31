@@ -2,9 +2,11 @@ package dev.regpack.engine.pack;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 import dev.regpack.engine.exec.MeteredExecutor;
 import dev.regpack.engine.expr.Rulings;
+import dev.regpack.model.Citation;
 import dev.regpack.model.IngestKey;
 import dev.regpack.model.Outcome;
 import dev.regpack.model.Sha256;
@@ -16,10 +18,14 @@ import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.pack.model.LoadedPack;
 import dev.regpack.ports.exec.CostBudget;
+import dev.regpack.ports.regime.RegimeProvider;
 import dev.regpack.ports.regime.RegimeProvider.Descriptor;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -166,7 +172,7 @@ class PackRegimeTest {
   }
 
   @Test
-  void aContextThatDiffersOnlyInTheCallersPlaceholdersIsRefusedUntilP2a2() {
+  void aContextThatDiffersOnlyInTheCallersPlaceholdersIsAcceptedAndStampsTheDecision() {
     PackRegime regime = create(SamplePacks.load(), REPORT);
     DecisionContext own = regime.decisionContext();
     DecisionContext profiled =
@@ -181,10 +187,286 @@ class PackRegimeTest {
             own.engineBuild(),
             own.executor());
 
-    assertThatThrownBy(
-            () -> regime.evaluate(execution(AssetClass.EQUITY), contextOf(regime, profiled)))
+    DecisionBody body =
+        regime.evaluate(execution(AssetClass.EQUITY), contextOf(regime, profiled)).decision();
+
+    assertThat(body.decisionContextId()).isEqualTo(profiled.id());
+    assertThat(body.decisionContextId()).isNotEqualTo(own.id());
+  }
+
+  @Test
+  void aContextThatDiffersInTheOverlayOrThePinsIsStillRefused() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+    DecisionContext own = regime.decisionContext();
+    DecisionContext overlaid =
+        new DecisionContext(
+            own.packDigest(),
+            Optional.of(new Sha256("1".repeat(64))),
+            own.interpretationPins(),
+            own.referenceSnapshotIds(),
+            own.enrichmentSnapshotIds(),
+            own.firmProfileVersion(),
+            own.mappingVersion(),
+            own.engineBuild(),
+            own.executor());
+    DecisionContext pinned =
+        new DecisionContext(
+            own.packDigest(),
+            own.overlayDigest(),
+            List.of("pin-1"),
+            own.referenceSnapshotIds(),
+            own.enrichmentSnapshotIds(),
+            own.firmProfileVersion(),
+            own.mappingVersion(),
+            own.engineBuild(),
+            own.executor());
+    CanonicalExecution event = execution(AssetClass.EQUITY);
+
+    assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, overlaid)))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("differs");
+        .hasMessageContaining("overlay")
+        .hasMessageContaining("pins");
+    assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, pinned)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("overlay");
+  }
+
+  @Test
+  void contextForStampsTheFourBatchComponentsAndKeepsTheRest() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+    DecisionContext own = regime.decisionContext();
+    BatchInputs batch =
+        new BatchInputs("mapping@abc", "profile-1", List.of("ref-1", "ref-2"), List.of("enr-1"));
+
+    DecisionContext stamped = regime.contextFor(batch);
+
+    assertThat(stamped.mappingVersion()).isEqualTo("mapping@abc");
+    assertThat(stamped.firmProfileVersion()).isEqualTo("profile-1");
+    assertThat(stamped.referenceSnapshotIds()).containsExactly("ref-1", "ref-2");
+    assertThat(stamped.enrichmentSnapshotIds()).containsExactly("enr-1");
+    assertThat(stamped.packDigest()).isEqualTo(own.packDigest());
+    assertThat(stamped.overlayDigest()).isEqualTo(own.overlayDigest());
+    assertThat(stamped.interpretationPins()).isEqualTo(own.interpretationPins());
+    assertThat(stamped.engineBuild()).isEqualTo(own.engineBuild());
+    assertThat(stamped.executor()).isEqualTo(own.executor());
+    assertThat(stamped.circuitEpoch()).isEqualTo(own.circuitEpoch());
+    DecisionBody body =
+        regime.evaluate(execution(AssetClass.EQUITY), contextOf(regime, stamped)).decision();
+    assertThat(body.decisionContextId()).isEqualTo(stamped.id());
+  }
+
+  @Test
+  void theDecisionIdChangesWithEachOfTheFourBatchComponents() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+    BatchInputs base = new BatchInputs("m@1", "p-1", List.of("r-1"), List.of("e-1"));
+    List<BatchInputs> variants =
+        List.of(
+            new BatchInputs("m@2", "p-1", List.of("r-1"), List.of("e-1")),
+            new BatchInputs("m@1", "p-2", List.of("r-1"), List.of("e-1")),
+            new BatchInputs("m@1", "p-1", List.of("r-2"), List.of("e-1")),
+            new BatchInputs("m@1", "p-1", List.of("r-1"), List.of("e-2")));
+    CanonicalExecution event = execution(AssetClass.EQUITY);
+    Sha256 baseId =
+        regime
+            .evaluate(event, contextOf(regime, regime.contextFor(base)))
+            .decision()
+            .decisionContextId();
+
+    for (BatchInputs variant : variants) {
+      Sha256 id =
+          regime
+              .evaluate(event, contextOf(regime, regime.contextFor(variant)))
+              .decision()
+              .decisionContextId();
+      assertThat(id).as(variant.toString()).isNotEqualTo(baseId);
+    }
+    assertThat(
+            regime
+                .evaluate(event, contextOf(regime, regime.contextFor(base)))
+                .decision()
+                .decisionContextId())
+        .as("the same inputs give the same id")
+        .isEqualTo(baseId);
+  }
+
+  @Test
+  void moreThan64SnapshotIdsOrOversizeTextAreRefused() {
+    List<String> sixtyFour = new ArrayList<>();
+    for (int i = 0; i < 64; i++) {
+      sixtyFour.add("ref-" + i);
+    }
+    List<String> sixtyFive = new ArrayList<>(sixtyFour);
+    sixtyFive.add("ref-64");
+
+    assertThat(new BatchInputs("m@1", "p-1", sixtyFour, sixtyFour).referenceSnapshotIds())
+        .hasSize(64);
+    assertThatThrownBy(() -> new BatchInputs("m@1", "p-1", sixtyFive, List.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("referenceSnapshotIds");
+    assertThatThrownBy(() -> new BatchInputs("m@1", "p-1", List.of(), sixtyFive))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("enrichmentSnapshotIds");
+    assertThatThrownBy(() -> new BatchInputs("m".repeat(257), "p-1", List.of(), List.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("mappingVersion");
+    assertThatThrownBy(() -> new BatchInputs("m@1", "p\n1", List.of(), List.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("firmProfileVersion")
+        .hasMessageNotContaining("p\n1");
+    assertThatThrownBy(() -> new BatchInputs("m@1", "p-1", List.of("x".repeat(257)), List.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("referenceSnapshotIds");
+    assertThatThrownBy(() -> new BatchInputs("m@1", " ", List.of(), List.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("firmProfileVersion");
+    assertThatThrownBy(() -> new BatchInputs("m@1", "p-1", List.of(), List.of("a\u0000b")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("enrichmentSnapshotIds");
+  }
+
+  // ---- derived fields (plan W1a, task T5) ----------------------------------------------------
+
+  private static PackRegime deriveRegime(Map<String, String> overrides) {
+    return PackRegime.create(
+        DeriveFixture.loadSealed(overrides), DeriveFixture.REPORT, EXECUTOR, Rulings.load());
+  }
+
+  private static RegimeProvider.Result evaluate(PackRegime regime, CanonicalExecution event) {
+    return regime.evaluate(event, contextOf(regime, regime.decisionContext()));
+  }
+
+  @Test
+  void aReportGivesDerivedFieldsInRowOrderWithRuleRefAndCitationsAndANonReportNone() {
+    PackRegime regime = deriveRegime(Map.of());
+
+    RegimeProvider.Result onNew = evaluate(regime, DeriveFixture.newExecution());
+
+    assertThat(onNew.decision().outcome()).isEqualTo(Outcome.REPORT);
+    assertThat(onNew.decision().attributes()).containsEntry("action", "NEWT");
+    assertThat(onNew.fields())
+        .extracting(RegimeProvider.DerivedField::name)
+        .containsExactly(
+            "executing_lei",
+            "buyer",
+            "seller",
+            "trading_datetime",
+            "quantity",
+            "price",
+            "venue",
+            "on_venue",
+            "side",
+            "execution_within_firm",
+            "transmission");
+    RegimeProvider.DerivedField first = onNew.fields().get(0);
+    assertThat(first.value()).isEqualTo("LEI-FIRM-0001");
+    assertThat(first.ruleRef()).isEqualTo("DR-0001");
+    assertThat(first.citations())
+        .extracting(Citation::sourceId, Citation::provisionPath)
+        .containsExactly(tuple("fixture-law", "fixture/1"));
+    assertThat(onNew.fields().get(3).value()).isEqualTo("2026-10-30T09:30:00.123456Z");
+    assertThat(onNew.fields().get(4).value()).isEqualTo("100.5");
+    assertThat(onNew.fields().get(5).value()).isEqualTo("12.25");
+
+    RegimeProvider.Result onCancel =
+        evaluate(
+            regime,
+            DeriveFixture.execution(
+                LifecycleKind.CANCEL, new BigDecimal("12.25"), Optional.empty()));
+    RegimeProvider.Result onNovation =
+        evaluate(
+            regime,
+            DeriveFixture.execution(
+                LifecycleKind.NOVATION, new BigDecimal("12.25"), Optional.empty()));
+    RegimeProvider.Result onAmend =
+        evaluate(
+            regime,
+            DeriveFixture.execution(
+                LifecycleKind.AMEND, new BigDecimal("12.25"), Optional.empty()));
+
+    assertThat(onCancel.decision().outcome()).isEqualTo(Outcome.REPORT);
+    assertThat(onCancel.fields())
+        .extracting(RegimeProvider.DerivedField::name)
+        .containsExactly("executing_lei");
+    assertThat(onNovation.decision().outcome()).isEqualTo(Outcome.DO_NOT_REPORT);
+    assertThat(onNovation.fields()).isEmpty();
+    assertThat(onAmend.decision().outcome()).isEqualTo(Outcome.UNDETERMINED);
+    assertThat(onAmend.fields()).isEmpty();
+  }
+
+  @Test
+  void aPackWithoutDeriveTablesGivesNoFieldsAndTheBudgetOfTheTablesAlone() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+
+    RegimeProvider.Result result = evaluate(regime, execution(AssetClass.EQUITY));
+
+    assertThat(result.decision().outcome()).isEqualTo(Outcome.REPORT);
+    assertThat(result.fields()).isEmpty();
+    assertThat(regime.recordBudget()).isEqualTo(new CostBudget(40));
+  }
+
+  @Test
+  void aDeriveErrorAfterAReportHitGivesUndeterminedExecError() {
+    String cite = "cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]";
+    Map<String, String> files =
+        Map.of(
+            DeriveFixture.DERIVE,
+            "table: {id: derive.fixture.report}\nrows:\n"
+                + "  - {id: D-OK, field: executing_lei, value: \"firm.lei\", rule_ref: DR-0001, "
+                + cite
+                + "}\n"
+                + "  - {id: D-CP, field: counterparty, value: \"trade.counterparty\","
+                + " rule_ref: DR-0002, "
+                + cite
+                + "}\n");
+    PackRegime regime = deriveRegime(files);
+
+    RegimeProvider.Result failed = evaluate(regime, DeriveFixture.withoutCounterparty());
+    RegimeProvider.Result fine = evaluate(regime, DeriveFixture.newExecution());
+
+    assertThat(failed.decision().outcome()).isEqualTo(Outcome.UNDETERMINED);
+    assertThat(failed.decision().reasonCode().value()).isEqualTo("EXEC_ERROR");
+    assertThat(failed.decision().node()).isEqualTo("EXEC");
+    assertThat(failed.decision().flags())
+        .contains("rule_id=D-CP", "error_kind=ABSENT")
+        .noneMatch(flag -> flag.contains("LEI-"));
+    assertThat(failed.decision().ruleIdsHit()).isEmpty();
+    assertThat(failed.decision().legs()).isEmpty();
+    assertThat(failed.fields()).isEmpty();
+    assertThat(fine.decision().outcome()).isEqualTo(Outcome.REPORT);
+    assertThat(fine.fields())
+        .extracting(RegimeProvider.DerivedField::name)
+        .containsExactly("executing_lei", "counterparty");
+  }
+
+  @Test
+  void aDeriveRowThatRunsOutOfBudgetGivesUndeterminedExecBudget() {
+    PackRegime regime = deriveRegime(Map.of());
+    EvaluationContext tight =
+        new EvaluationContext(
+            regime.decisionContext(),
+            new IngestKey("toy-source", "rec-1", 1),
+            Instant.parse("2026-10-30T10:00:00Z"),
+            new CostBudget(20));
+
+    RegimeProvider.Result result = regime.evaluate(DeriveFixture.newExecution(), tight);
+
+    assertThat(result.decision().outcome()).isEqualTo(Outcome.UNDETERMINED);
+    assertThat(result.decision().reasonCode().value()).isEqualTo("EXEC_BUDGET");
+    assertThat(result.decision().flags()).anyMatch(flag -> flag.startsWith("rule_id=D-"));
+    assertThat(result.fields()).isEmpty();
+  }
+
+  @Test
+  void theRecordBudgetOfAPackWithDeriveTablesCoversTheDeriveRows() {
+    PackRegime regime = deriveRegime(Map.of());
+
+    RegimeProvider.Result result = evaluate(regime, DeriveFixture.newExecution());
+
+    assertThat(regime.recordBudget().maxUnits())
+        .isGreaterThanOrEqualTo(regime.compiled().budget().perRecordUnits());
+    assertThat(regime.recordBudget().maxUnits()).isEqualTo(regime.compiled().recordUnits());
+    assertThat(result.decision().outcome()).isEqualTo(Outcome.REPORT);
+    assertThat(result.fields()).hasSize(11);
   }
 
   private static PackRegime createWithCircuit(RuleCircuit circuit) {

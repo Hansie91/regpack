@@ -403,6 +403,33 @@ Checks return `PackProblem(code, path, line, message)`; tests assert the upper-c
 
 These are reasons on UNDETERMINED decisions, not pack problems: `EXEC_ERROR` (an evaluation error), `EXEC_BUDGET` (the per-record budget ran out) and `EXEC_CIRCUIT_OPEN` (the rule's poison circuit is open). A pack may not declare them or `ENRICH_MISS`.
 
+### 6.12 Derive tables
+
+A derive table (`derive/report.yaml`, listed under `derive_tables` of a report) is read by `DeriveTable.parse` in `regpack-pack` and compiled with the scope tables by the engine (decision D-W5 of the W1a plan). The file is `table: {id}` and `rows`; a row has `id`, `field`, `when` (optional, default `true`), `value`, `rule_ref` and `cite`. The engine compiles every `value` as `string(value)`, so a derived field has the text of the `string` function: a decimal as plain text without trailing zeros, an instant with six fraction digits, an enumeration by its name. A row whose `when` is false gives no field. A row that fails after a REPORT hit gives an UNDETERMINED decision with the reason `EXEC_ERROR` (or `EXEC_BUDGET`) and the flag `rule_id=<row id>`.
+
+| code | meaning |
+|---|---|
+| `DERIVE_SHAPE` | a derive file, its `table`, `rows`, a row or a value has the wrong shape (not a mapping, list or single value) |
+| `DERIVE_KEY_UNKNOWN` | a key that the derive file, its `table`, a row or a citation does not know |
+| `DERIVE_KEY_MISSING` | a required key is missing (`table`, `rows`; in a row `id`, `field`, `value`, `rule_ref`, `cite`; in a citation `source_id`, `provision_path`, `role`) |
+| `DERIVE_TABLE_ID_INVALID` | the table id is not `[A-Za-z][A-Za-z0-9_.-]{0,63}` |
+| `DERIVE_ROWS_EMPTY` | a derive table without a row |
+| `DERIVE_ROW_ID_INVALID` | a row id is not `[A-Za-z][A-Za-z0-9_.-]{0,63}` |
+| `DERIVE_ROW_ID_DUPLICATE` | a row id used twice in a table, or by a derive row and a scope row of the same report |
+| `DERIVE_FIELD_INVALID` | a field name is not `[a-z][a-z0-9_]{0,63}` |
+| `DERIVE_FIELD_DUPLICATE` | a field given twice in a table, or by two derive rows of the same report |
+| `DERIVE_WHEN_EMPTY` | a `when` that is blank (omit the key for `true`) |
+| `DERIVE_VALUE_EMPTY` | a `value` that is blank |
+| `DERIVE_RULE_REF_INVALID` | a `rule_ref` is not `[A-Za-z][A-Za-z0-9_.-]{0,63}` |
+| `DERIVE_RULE_REF_DUPLICATE` | a `rule_ref` used by a derive row and another row of the same report |
+| `DERIVE_CITE_EMPTY` | a row with an empty `cite` list |
+| `DERIVE_CITE_INVALID` | a citation that is not a mapping, or whose source id, provision path or role has an invalid form |
+| `DERIVE_CITE_UNRESOLVED` | a citation whose source or provision is not in `sources.yaml` |
+| `DERIVE_BAD_CHARACTER` | a derive cell with a character the pack text policy refuses (a line feed included) |
+| `DERIVE_TABLE_MISSING` | the report lists a derive file that the loaded pack does not hold |
+| `DERIVE_DOES_NOT_COMPILE` | a `when` or a `value` that does not compile (syntax, undeclared path, over the parse cap, or not one expression) |
+| `DERIVE_OVER_CEILING` | a derive expression with more nodes than `rule_nodes` |
+
 ## 7. Hand-offs
 
 - **P3:** the decision schema needs `attributes` (JSON, nullable) and the stored `engine_build` text; the leg type is closed until BRK-12 is decided; `lifecycle.yaml` content is reserved. BRK-04 and BRK-10 are ledger contracts that block the schema freeze: when a pack declares a status model, `state.status` is part of `input_digest` and `decision_context` (P2a reads it only through `Bindings` and adds no field); `attributes{}` is `DecisionBody.attributes`. The `unsigned` stamp of spec 6.5 step 6 is not produced by P2a. Every decision with reason `EXEC_CIRCUIT_OPEN` (flag `circuit=open`) must be enumerable per rule and pack digest, raise a data-quality item (spec 7.3) and be re-evaluated when the circuit closes; until then they are open UNDETERMINED items for I7. **The model as built does NOT supersede such a decision by itself:** nothing in the decision context or in the input digest changes between an `EXEC_CIRCUIT_OPEN` decision and the re-evaluation of the same record after `RuleCircuit.close`, so under the unique key (event_identity, decision_context_id, input_digest) of spec 6.3 the re-evaluation is a `NOOP_REDELIVERY` and the open decision stays current (`PackScopeEngineTest#aReEvaluationAfterCloseHasTheSameContextAndDigestSoTheLedgerTreatsItAsARedelivery` pins this). P3 must add one of two things before it freezes the decision schema: either a circuit epoch (a generation that `close` increments) stamped into the decision context, so that the re-evaluation has a new `decision_context_id`; or a re-evaluation ordinal (or the reason code) in the unique key. It also adds a ledger contract test that a re-evaluation of an `EXEC_CIRCUIT_OPEN` decision is `INSERTED`, not `NOOP_REDELIVERY`. Only a new pack digest changes the context today. They are to be counted and excluded from the determinism sample (no determinism-sample class exists at P2a).

@@ -1,0 +1,45 @@
+# One scope table: a new execution and a cancel are reported, a novation is not, anything else is
+# undetermined. Synthetic: no regulatory text.
+table: {id: derive.fixture.scope, hit_policy: FIRST, priority: explicit, inputs: [event.kind], catch_all: F-DEFAULT}
+rows:
+  - id: F-SKIP
+    node: SCP
+    priority: 100
+    when: "event.kind == 'NOVATION'"
+    outcome: DO_NOT_REPORT
+    reason: FIXT.SCP.SKIPPED
+    rule_ref: FR-0001
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+  - id: F-NEW
+    node: SCP
+    priority: 200
+    when: "event.kind == 'NEW'"
+    outcome: REPORT
+    reason: FIXT.SCP.IN_SCOPE
+    rule_ref: FR-0002
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action: NEWT}
+  - id: F-CANCEL
+    node: SCP
+    priority: 210
+    when: "event.kind == 'CANCEL'"
+    outcome: REPORT
+    reason: FIXT.SCP.IN_SCOPE
+    rule_ref: FR-0003
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+    set: {action: CANC}
+  - id: F-DEFAULT
+    node: SCP
+    priority: 9999
+    when: "true"
+    outcome: UNDETERMINED
+    reason: FIXT.SCP.NO_MATCH
+    rule_ref: FR-0099
+    cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]
+    rationale: RAT-0001

@@ -1,0 +1,7 @@
+# The prefix and the node are declared by the pack. Placeholder owner: gate G1 is open.
+prefix: FIXT
+nodes: [SCP]
+reasons:
+  - {code: FIXT.SCP.SKIPPED, label: SKIPPED, category: EXCLUSION, default_outcome: DO_NOT_REPORT, owner: agent.w1a-fixture, valid: {from: 2000-01-01}}
+  - {code: FIXT.SCP.IN_SCOPE, label: IN_SCOPE, category: INCLUSION, default_outcome: REPORT, owner: agent.w1a-fixture, valid: {from: 2000-01-01}}
+  - {code: FIXT.SCP.NO_MATCH, label: NO_MATCH, category: DEFAULT, default_outcome: UNDETERMINED, owner: agent.w1a-fixture, valid: {from: 2000-01-01}}

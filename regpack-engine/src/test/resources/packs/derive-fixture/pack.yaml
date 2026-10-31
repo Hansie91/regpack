@@ -1,0 +1,16 @@
+# Synthetic derive fixture (plan W1a, task T5): no regulatory text and no third-party artefact.
+# One scope table and one derive table over the optional canonical paths; the citations name the
+# synthetic source fixture-law. It is sealed with scripts/pack.sh seal after every edit.
+id: derive.fixture
+semver: 0.1.0
+regime: derive.fixture
+jurisdiction: EU
+valid: {legal: {from: 2000-01-01}}
+as_at_field: event.tradedAt
+engine_min: 1.0.0+lib1
+input_schema: 48f5dcc01d49abda16b8324d6631b81c9d51f073bb9e590444384cc237fff543
+reports:
+  - id: derive.fixture
+    input: model/canonical-input.yaml
+    scope_tables: [scope/scope.yaml]
+    derive_tables: [derive/report.yaml]

@@ -1,0 +1,16 @@
+# One derive table: a row gives one field of the report; a row whose when is false gives no field.
+# Values are expressions; the engine renders them as text (decimal plain, instant with six digits,
+# enumeration by name). Synthetic: no regulatory text.
+table: {id: derive.fixture.report}
+rows:
+  - {id: D-EXEC, field: executing_lei, value: "firm.lei", rule_ref: DR-0001, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-BUYER, field: buyer, when: "event.kind == 'NEW'", value: "trade.side == 'BUY' ? (trade.capacity == 'AOTC' ? client.lei : firm.lei) : trade.counterparty", rule_ref: DR-0002, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-SELLER, field: seller, when: "event.kind == 'NEW'", value: "trade.side == 'SELL' ? (trade.capacity == 'AOTC' ? client.lei : firm.lei) : trade.counterparty", rule_ref: DR-0003, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-TIME, field: trading_datetime, when: "event.kind == 'NEW'", value: "isoMicros(event.tradedAt)", rule_ref: DR-0004, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-QTY, field: quantity, when: "event.kind == 'NEW'", value: "string(round(trade.quantity, 4, 'HALF_EVEN'))", rule_ref: DR-0005, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-PRICE, field: price, when: "event.kind == 'NEW'", value: "string(round(trade.price, 6, 'HALF_EVEN'))", rule_ref: DR-0006, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-VENUE, field: venue, when: "event.kind == 'NEW'", value: "venue.mic", rule_ref: DR-0007, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-ONVENUE, field: on_venue, when: "event.kind == 'NEW'", value: "instrument.tradedOnVenue", rule_ref: DR-0008, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-SIDE, field: side, when: "event.kind == 'NEW' && has(trade.side)", value: "trade.side", rule_ref: DR-0009, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-WITHIN, field: execution_within_firm, when: "event.kind == 'NEW' && has(trade.executionWithin)", value: "trade.executionWithin", rule_ref: DR-0010, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}
+  - {id: D-TRANSMIT, field: transmission, when: "event.kind == 'NEW'", value: "'false'", rule_ref: DR-0011, cite: [{source_id: fixture-law, provision_path: fixture/1, role: BASIS}]}

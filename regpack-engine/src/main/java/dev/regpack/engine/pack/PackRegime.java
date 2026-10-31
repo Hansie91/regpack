@@ -1,5 +1,6 @@
 package dev.regpack.engine.pack;
 
+import dev.regpack.engine.expr.ErrorKind;
 import dev.regpack.engine.expr.Rulings;
 import dev.regpack.model.Citation;
 import dev.regpack.model.Leg;
@@ -63,6 +64,7 @@ public final class PackRegime implements RegimeProvider {
   private final DecisionContext baseContext;
   private final Map<String, List<Citation>> citations;
   private final List<Citation> catchAllCitations;
+  private final Map<String, List<Citation>> deriveCitations;
 
   private PackRegime(
       CompiledPack compiled,
@@ -78,11 +80,16 @@ public final class PackRegime implements RegimeProvider {
     Map<String, List<Citation>> resolved = new HashMap<>();
     for (CompiledPack.Table table : compiled.tables()) {
       for (CompiledPack.Row row : table.rows()) {
-        resolved.put(row.id(), resolve(pack, row.source()));
+        resolved.put(row.id(), resolve(pack, row.source().cite()));
       }
     }
     this.citations = Map.copyOf(resolved);
     this.catchAllCitations = citations.get(catchAllOf(compiled.lastTable()).id());
+    Map<String, List<Citation>> derived = new HashMap<>();
+    for (CompiledPack.DeriveRow row : compiled.deriveRows()) {
+      derived.put(row.id(), resolve(pack, row.source().cite()));
+    }
+    this.deriveCitations = Map.copyOf(derived);
   }
 
   /**
@@ -179,9 +186,34 @@ public final class PackRegime implements RegimeProvider {
     return compiled.regime();
   }
 
-  /** The per-record budget of the compiled pack, in cost units. */
+  /**
+   * The per-record budget of the compiled pack, in cost units. Each step (the scope tables and the
+   * derive rows) runs under the budget the caller supplies, so this is the larger of the two
+   * budgets of the pack ({@link CompiledPack#recordUnits()}).
+   */
   public CostBudget recordBudget() {
-    return new CostBudget(compiled.budget().perRecordUnits());
+    return new CostBudget(compiled.recordUnits());
+  }
+
+  /**
+   * The context of a batch: the context of this provider with the four components that come from
+   * the caller (decision D-W6). The caller takes it again for every batch, because the circuit
+   * epoch is part of it.
+   */
+  public DecisionContext contextFor(BatchInputs inputs) {
+    Objects.requireNonNull(inputs, "inputs");
+    DecisionContext own = decisionContext();
+    return new DecisionContext(
+        own.packDigest(),
+        own.overlayDigest(),
+        own.interpretationPins(),
+        inputs.referenceSnapshotIds(),
+        inputs.enrichmentSnapshotIds(),
+        inputs.firmProfileVersion(),
+        inputs.mappingVersion(),
+        own.engineBuild(),
+        own.executor(),
+        own.circuitEpoch());
   }
 
   /**
@@ -264,25 +296,90 @@ public final class PackRegime implements RegimeProvider {
             .filter(TimestampValue.class::isInstance)
             .map(v -> ((TimestampValue) v).value())
             .orElse(execution.occurredAt());
-    DecisionBody body =
+    Decided decided =
         switch (result) {
-          case Completed<PackProgram.Decision> done -> {
-            TableRow row = done.value().row();
-            yield body(
-                execution,
-                context,
-                asAt,
-                row.outcome(),
-                List.of(),
-                row.reason(),
-                row.node(),
-                List.of(row.id()),
-                done.path(),
-                citations.get(row.id()),
-                row.outcome() == Outcome.REPORT ? row.legs() : List.of(),
-                row.set());
-          }
+          case Completed<PackProgram.Decision> done ->
+              completed(execution, context, bindings, asAt, done);
           case BudgetExhausted<PackProgram.Decision> out ->
+              new Decided(
+                  body(
+                      execution,
+                      context,
+                      asAt,
+                      Outcome.UNDETERMINED,
+                      List.of(
+                          "rule_id=" + out.ruleId(),
+                          "cost_units=" + out.costUnits(),
+                          "limit=" + out.limit()),
+                      EXEC_BUDGET,
+                      NODE_EXEC,
+                      List.of(),
+                      out.path(),
+                      catchAllCitations,
+                      List.of(),
+                      Map.of()),
+                  List.of());
+          case Failed<PackProgram.Decision> failed ->
+              new Decided(
+                  body(
+                      execution,
+                      context,
+                      asAt,
+                      Outcome.UNDETERMINED,
+                      program.circuitOpenRule().isPresent()
+                          ? List.of("rule_id=" + failed.ruleId(), "circuit=open")
+                          : failureFlags(
+                              failed.ruleId(),
+                              failed.errorClass(),
+                              failed.costUnits(),
+                              program.lastErrorKind()),
+                      program.circuitOpenRule().isPresent() ? EXEC_CIRCUIT_OPEN : EXEC_ERROR,
+                      NODE_EXEC,
+                      List.of(),
+                      failed.path(),
+                      catchAllCitations,
+                      List.of(),
+                      Map.of()),
+                  List.of());
+        };
+    return new Traced(
+        new Result(decided.body(), decided.fields(), Optional.empty()), program.rowTraces());
+  }
+
+  /** A decision and the fields derived for it (none unless the decision is a REPORT). */
+  private record Decided(DecisionBody body, List<DerivedField> fields) {}
+
+  /**
+   * The decision of a scope row, and, for a REPORT row of a pack with derive tables, the derived
+   * fields (decision D-W5). The derive step runs under its own meter and the caller's budget. A
+   * failing or over-budget derive row after a REPORT hit gives an UNDETERMINED decision (I5): the
+   * report is never half built, and the flags name the row, the error class and kind and the cost
+   * units, never a value of the record.
+   */
+  private Decided completed(
+      CanonicalExecution execution,
+      EvaluationContext context,
+      Bindings bindings,
+      Instant asAt,
+      Completed<PackProgram.Decision> done) {
+    TableRow row = done.value().row();
+    List<DerivedField> fields = List.of();
+    if (row.outcome() == Outcome.REPORT && !compiled.deriveRows().isEmpty()) {
+      DeriveProgram derive = new DeriveProgram(compiled);
+      ExecutionResult<List<DeriveProgram.Derived>> derived =
+          executor.execute(derive, bindings, context.budget());
+      switch (derived) {
+        case Completed<List<DeriveProgram.Derived>> ok -> {
+          List<DerivedField> list = new ArrayList<>();
+          for (DeriveProgram.Derived d : ok.value()) {
+            list.add(
+                new DerivedField(
+                    d.field(), d.value(), d.ruleRef(), deriveCitations.get(d.rowId())));
+          }
+          fields = list;
+        }
+        case BudgetExhausted<List<DeriveProgram.Derived>> out -> {
+          return new Decided(
               body(
                   execution,
                   context,
@@ -295,40 +392,62 @@ public final class PackRegime implements RegimeProvider {
                   EXEC_BUDGET,
                   NODE_EXEC,
                   List.of(),
-                  out.path(),
+                  done.path(),
                   catchAllCitations,
                   List.of(),
-                  Map.of());
-          case Failed<PackProgram.Decision> failed ->
+                  Map.of()),
+              List.of());
+        }
+        case Failed<List<DeriveProgram.Derived>> failed -> {
+          return new Decided(
               body(
                   execution,
                   context,
                   asAt,
                   Outcome.UNDETERMINED,
-                  program.circuitOpenRule().isPresent()
-                      ? List.of("rule_id=" + failed.ruleId(), "circuit=open")
-                      : failureFlags(failed, program),
-                  program.circuitOpenRule().isPresent() ? EXEC_CIRCUIT_OPEN : EXEC_ERROR,
+                  failureFlags(
+                      failed.ruleId(),
+                      failed.errorClass(),
+                      failed.costUnits(),
+                      derive.lastErrorKind()),
+                  EXEC_ERROR,
                   NODE_EXEC,
                   List.of(),
-                  failed.path(),
+                  done.path(),
                   catchAllCitations,
                   List.of(),
-                  Map.of());
-        };
-    return new Traced(new Result(body, List.of(), Optional.empty()), program.rowTraces());
+                  Map.of()),
+              List.of());
+        }
+      }
+    }
+    return new Decided(
+        body(
+            execution,
+            context,
+            asAt,
+            row.outcome(),
+            List.of(),
+            row.reason(),
+            row.node(),
+            List.of(row.id()),
+            done.path(),
+            citations.get(row.id()),
+            row.outcome() == Outcome.REPORT ? row.legs() : List.of(),
+            row.set()),
+        fields);
   }
 
   /**
    * A decision is stamped with the id of the context it is evaluated under, and the replay rules
    * (I3, Tier 2) rest on that stamp. The pack digest, the engine build and the executor are facts
    * of this provider, so a context that names others is refused instead of stamping a decision the
-   * provider did not make. The overlay, pins, Firm Profile and snapshots are placeholders in P2a
-   * and so are the provider's own too: until P2a-2 relaxes the components that really come from the
-   * caller, the whole context must equal {@link #decisionContext()} and every decision is stamped
-   * with it. The circuit epoch is a fact of this provider's circuit (INTERP-3): a context from
-   * before a close of an open rule is refused as stale, and the batch that holds it must be pinned
-   * again.
+   * provider did not make; so are the overlay and the pins, which are the provider's own in this
+   * build. The mapping version, the Firm Profile version and the two lists of snapshot ids really
+   * come from the caller of a batch (see {@link #contextFor}): a context that differs from {@link
+   * #decisionContext()} in those four only is accepted and every decision is stamped with it. The
+   * circuit epoch is a fact of this provider's circuit (INTERP-3): a context from before a close of
+   * an open rule is refused as stale, and the batch that holds it must be pinned again.
    *
    * @param current the snapshot taken at the start of the call
    */
@@ -362,10 +481,11 @@ public final class PackRegime implements RegimeProvider {
               + current.circuitEpoch()
               + "; take decisionContext() again");
     }
-    if (!given.equals(current)) {
+    if (!given.overlayDigest().equals(current.overlayDigest())
+        || !given.interpretationPins().equals(current.interpretationPins())) {
       throw new IllegalArgumentException(
-          "the decision context differs from the one of this provider in its overlay, pins,"
-              + " snapshots, Firm Profile or mapping version (P2a-2 supplies these)");
+          "the decision context differs from the one of this provider in its overlay or pins; only"
+              + " the mapping version, the Firm Profile version and the snapshot ids may differ");
     }
   }
 
@@ -375,12 +495,12 @@ public final class PackRegime implements RegimeProvider {
 
   /** Rule, error class, the kind when known, cost units: never a value of the record (7.3). */
   private static List<String> failureFlags(
-      Failed<PackProgram.Decision> failed, PackProgram program) {
+      String ruleId, String errorClass, long costUnits, Optional<ErrorKind> kind) {
     List<String> flags = new ArrayList<>();
-    flags.add("rule_id=" + failed.ruleId());
-    flags.add("error_class=" + failed.errorClass());
-    program.lastErrorKind().ifPresent(kind -> flags.add("error_kind=" + kind));
-    flags.add("cost_units=" + failed.costUnits());
+    flags.add("rule_id=" + ruleId);
+    flags.add("error_class=" + errorClass);
+    kind.ifPresent(k -> flags.add("error_kind=" + k));
+    flags.add("cost_units=" + costUnits);
     return flags;
   }
 
@@ -393,9 +513,9 @@ public final class PackRegime implements RegimeProvider {
     return table.rows().get(table.rows().size() - 1).source();
   }
 
-  private static List<Citation> resolve(LoadedPack pack, TableRow row) {
+  private static List<Citation> resolve(LoadedPack pack, List<CitationRef> refs) {
     List<Citation> resolved = new ArrayList<>();
-    for (CitationRef ref : row.cite()) {
+    for (CitationRef ref : refs) {
       resolved.add(
           new Citation(
               ref.sourceId(),

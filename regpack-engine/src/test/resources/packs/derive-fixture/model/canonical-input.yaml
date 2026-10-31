@@ -1,0 +1,13 @@
+variables:
+  event.kind: {type: ENUM, enum: LifecycleKind}
+  event.tradedAt: {type: TIMESTAMP}
+  venue.mic: {type: STRING}
+  firm.lei: {type: STRING}
+  instrument.tradedOnVenue: {type: BOOL}
+  client.lei: {type: STRING, optional: true}
+  trade.quantity: {type: DECIMAL}
+  trade.price: {type: DECIMAL}
+  trade.side: {type: ENUM, enum: Side, optional: true}
+  trade.capacity: {type: STRING, optional: true}
+  trade.counterparty: {type: STRING, optional: true}
+  trade.executionWithin: {type: STRING, optional: true}
