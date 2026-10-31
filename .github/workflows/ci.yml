@@ -57,7 +57,7 @@ jobs:
         run: bash scripts/check-gates.sh
       - name: Upload build evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-evidence-${{ matrix.os }}
           path: |
@@ -67,7 +67,7 @@ jobs:
             **/target/failsafe-reports/TEST-*.xml
           if-no-files-found: warn
       - name: Upload toy crash digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: toy-digest-${{ matrix.os }}
           path: |
@@ -76,7 +76,7 @@ jobs:
           if-no-files-found: error
       - name: Upload distribution (built once, installed on every target)
         if: matrix.os == 'ubuntu-24.04'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: regpack-dist
           path: |
@@ -168,7 +168,7 @@ jobs:
         run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-postgres/target
       - name: Upload ledger test reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ledger-pg-reports
           path: |
@@ -320,7 +320,7 @@ jobs:
       - name: Upload sampler files and read-outs
         if: always()
         timeout-minutes: 10
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ledger-capacity-${{ matrix.variant }}
           path: |
@@ -386,7 +386,7 @@ jobs:
         run: docker rm -f regpack-primary regpack-standby
       - name: Upload durability test reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ledger-durability-reports
           path: regpack-postgres/target/failsafe-reports/TEST-*.xml
@@ -459,7 +459,7 @@ jobs:
         run: java -cp regpack-tools/target/classes dev.regpack.tools.Gates annotate --scan regpack-evidence-s3/target --scan regpack-postgres/target
       - name: Upload P-WORM test reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence-worm-reports
           path: |
