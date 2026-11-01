@@ -1,0 +1,31 @@
+{
+  "id": "GC-N08-3",
+  "node": "N08",
+  "description": "The cancel of an equity traded on a venue is reportable as a cancel (consistency-only, synthetic).",
+  "author": "agent:w1-golden",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "SYNT00FIRM0000000152",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-107",
+    "eventKind": "CANCEL",
+    "tradedAt": "2026-10-30T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000016",
+    "tradedOnVenue": true,
+    "clientKind": "LEGAL_ENTITY",
+    "clientLei": "SYNT00CLIENT00000167",
+    "quantity": 100,
+    "price": 12.25,
+    "currency": "EUR",
+    "side": "BUY",
+    "capacity": "AOTC",
+    "counterparty": "SYNT00CCP00000000194",
+    "executionWithinFirm": "ALGO-1"
+  },
+  "expected": {
+    "outcome": "REPORT",
+    "reasonCode": "DEMO.N08.IN_SCOPE",
+    "ruleIdsHit": ["S-N08-cancel"]
+  }
+}

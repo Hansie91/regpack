@@ -1,0 +1,23 @@
+# Synthetic demo pack (plan W1a, task T10): no regulatory text and no third-party artefact. It has
+# the shape of a transaction-reporting path (a scope table, a derive table, validation rules, an
+# enrichment plan, a lifecycle file and a destination profile for a file-drop simulator) and is
+# NON-PRODUCTION. Every legal statement it makes is a recollection of the planner, not a fact; the
+# content sheet docs/slice/w1-content.md says so. Sealed with scripts/pack.sh seal after every edit.
+id: demo.tr.s1
+semver: 0.1.0
+regime: demo.tr.s1
+jurisdiction: EU
+valid: {legal: {from: 2000-01-01}}
+# The as-at field is a Legal decision (spec 6.4); the value only shows the shape.
+as_at_field: event.tradedAt
+engine_min: 1.0.0+lib1
+input_schema: 7cf9828f4eada0828798ea48bbbbeb2ec6f788366ac0bf699ee8020d5fcfff56
+reports:
+  - id: demo.tr.s1
+    input: model/canonical-input.yaml
+    scope_tables: [scope/scope.yaml]
+    derive_tables: [derive/report.yaml]
+    validate: [validate/rules.yaml]
+    lifecycle: lifecycle.yaml
+    endpoint_profiles: [endpoints/sim.yaml]
+    legs: [MARKET]

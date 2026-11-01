@@ -1,0 +1,79 @@
+# The scope table of the demo pack: first match by ascending priority. Synthetic: no regulatory
+# text. The citations name the synthetic sources of sources.yaml only.
+table: {id: demo.tr.s1.scope, hit_policy: FIRST, priority: explicit, inputs: [client.kind, client.lei, event.kind, instrument.assetClass, instrument.tradedOnVenue, trade.capacity], catch_all: S-DEFAULT-catch-all}
+rows:
+  - id: S-N03-novation
+    node: N03
+    priority: 300
+    when: "event.kind in ['NOVATION','ASSIGNMENT']"
+    outcome: DO_NOT_REPORT
+    reason: DEMO.N03.EXCLUDED
+    cite: [{source_id: sample-law, provision_path: sample/1, role: BASIS}]
+    rationale: RAT-0001
+    valid: {legal: {from: 2000-01-01}}
+  - id: S-N13-natural-person
+    node: N13
+    priority: 400
+    when: "client.kind == 'NATURAL_PERSON'"
+    outcome: UNDETERMINED
+    reason: DEMO.N13.NATURAL_PERSON
+    cite: [{source_id: regpack-spec, provision_path: D14, role: INTERPRETATION}]
+    rationale: RAT-0002
+    valid: {legal: {from: 2000-01-01}}
+  - id: S-N13-client-id-missing
+    node: N13
+    priority: 450
+    when: "client.kind == 'LEGAL_ENTITY' && !has(client.lei)"
+    outcome: UNDETERMINED
+    reason: DEMO.N13.CLIENT_ID_MISSING
+    cite: [{source_id: regpack-spec, provision_path: D14, role: INTERPRETATION}]
+    rationale: RAT-0003
+    valid: {legal: {from: 2000-01-01}}
+  - id: S-N18-amend
+    node: N18
+    priority: 500
+    when: "event.kind in ['AMEND','CORRECTION']"
+    outcome: UNDETERMINED
+    reason: DEMO.N18.AMEND_NOT_IN_SLICE
+    cite: [{source_id: sample-law, provision_path: sample/1, role: BASIS}]
+    rationale: RAT-0004
+    valid: {legal: {from: 2000-01-01}}
+  - id: S-N11-capacity
+    node: N11
+    priority: 700
+    when: "!has(trade.capacity) || !(trade.capacity in ['AOTC','MTCH'])"
+    outcome: UNDETERMINED
+    reason: DEMO.N11.CAPACITY_ABSENT_OR_NOT_IN_SLICE
+    cite: [{source_id: sample-law, provision_path: sample/2, role: BASIS}]
+    rationale: RAT-0005
+    valid: {legal: {from: 2000-01-01}}
+  - id: S-N08-new
+    node: N08
+    priority: 800
+    when: "instrument.assetClass == 'EQUITY' && instrument.tradedOnVenue && event.kind == 'NEW'"
+    outcome: REPORT
+    reason: DEMO.N08.IN_SCOPE
+    cite: [{source_id: sample-law, provision_path: sample/2, role: BASIS}]
+    rationale: RAT-0006
+    valid: {legal: {from: 2000-01-01}}
+    legs: [MARKET]
+    set: {action: NEWT}
+  - id: S-N08-cancel
+    node: N08
+    priority: 810
+    when: "instrument.assetClass == 'EQUITY' && instrument.tradedOnVenue && event.kind == 'CANCEL'"
+    outcome: REPORT
+    reason: DEMO.N08.IN_SCOPE
+    cite: [{source_id: sample-law, provision_path: sample/2, role: BASIS}]
+    rationale: RAT-0007
+    valid: {legal: {from: 2000-01-01}}
+    legs: [MARKET]
+    set: {action: CANC}
+  - id: S-DEFAULT-catch-all
+    node: DEFAULT
+    priority: 9999
+    when: "true"
+    outcome: UNDETERMINED
+    reason: DEMO.DEFAULT.NO_RULE_HIT
+    cite: [{source_id: regpack-spec, provision_path: I5, role: GUIDANCE}]
+    rationale: RAT-0008

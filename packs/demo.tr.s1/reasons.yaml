@@ -1,0 +1,12 @@
+# The prefix and the nodes are declared by the pack. The owner text names no Compliance owner for
+# this pack: gate G1 is open, so every entry here is a placeholder.
+prefix: DEMO
+nodes: [N03, N08, N11, N13, N18, DEFAULT]
+reasons:
+  - {code: DEMO.N03.EXCLUDED, label: EXCLUDED, category: EXCLUSION, default_outcome: DO_NOT_REPORT, owner: agent.w1-demo, valid: {from: 2000-01-01}}
+  - {code: DEMO.N13.NATURAL_PERSON, label: NATURAL_PERSON, category: OUT_OF_SCOPE, default_outcome: UNDETERMINED, owner: agent.w1-demo, valid: {from: 2000-01-01}}
+  - {code: DEMO.N13.CLIENT_ID_MISSING, label: CLIENT_ID_MISSING, category: DATA_QUALITY, default_outcome: UNDETERMINED, owner: agent.w1-demo, valid: {from: 2000-01-01}}
+  - {code: DEMO.N18.AMEND_NOT_IN_SLICE, label: AMEND_NOT_IN_SLICE, category: OUT_OF_SCOPE, default_outcome: UNDETERMINED, owner: agent.w1-demo, valid: {from: 2000-01-01}}
+  - {code: DEMO.N11.CAPACITY_ABSENT_OR_NOT_IN_SLICE, label: CAPACITY_ABSENT_OR_NOT_IN_SLICE, category: OUT_OF_SCOPE, default_outcome: UNDETERMINED, owner: agent.w1-demo, valid: {from: 2000-01-01}}
+  - {code: DEMO.N08.IN_SCOPE, label: IN_SCOPE, category: INCLUSION, default_outcome: REPORT, owner: agent.w1-demo, valid: {from: 2000-01-01}}
+  - {code: DEMO.DEFAULT.NO_RULE_HIT, label: NO_RULE_HIT, category: DEFAULT, default_outcome: UNDETERMINED, owner: agent.w1-demo, valid: {from: 2000-01-01}}

@@ -1,0 +1,9 @@
+rules:
+  S-N03-novation: "agent:w1-implementer"
+  S-N13-natural-person: "agent:w1-implementer"
+  S-N13-client-id-missing: "agent:w1-implementer"
+  S-N18-amend: "agent:w1-implementer"
+  S-N11-capacity: "agent:w1-implementer"
+  S-N08-new: "agent:w1-implementer"
+  S-N08-cancel: "agent:w1-implementer"
+  S-DEFAULT-catch-all: "agent:w1-implementer"

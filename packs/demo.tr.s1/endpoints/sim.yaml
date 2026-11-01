@@ -1,0 +1,25 @@
+# endpoints/sim.yaml (DEMO)
+version: 1
+endpoint: demo.sim.file-drop
+valid: {from: 2026-10-31, to: null}
+environment: SIMULATOR
+submission_route: SELF
+destination_authority: SIM
+channel: {type: file-drop, upload: temp_name_then_rename, probe_proof: retains_delivered}
+file: {name_pattern: "DEMO_{msgId}.xml", max_name_len: 40, max_reports: 1, order: [CANC, NEWT], separate_files: true}
+correlation: [business_key, file_id]
+ack:
+  model: async-file
+  feedback_horizon: PT10M
+  pdng_horizon: PT30M
+  successor_gate: {mode: FEEDBACK_ACCEPTED, max_wait: PT0S, on_expiry: ESCALATE}
+confirmation: ON_ACCEPT
+implicit_accept: false
+refdata_wait: NONE
+hold_max: PT0S
+hold_margin: PT0S  # no HOLD in W1a (Departure 10)
+vocabulary: {record: {ACPT: ACCEPTED, PDNG: PENDING, RJCT: REJECTED}, file: {CRPT: FILE_REJECTED, INCF: FILE_REJECTED, RJCT: FILE_REJECTED}, file_non_content: [INCF], in_doubt_codes: [DEMO-DUP]}
+schemas: {projection: "demo-tx-1@inline", ack: "demo-ack-1@inline"}
+projection: endpoints/projection.yaml
+parser: DemoAckParser
+resolvers: [file_drop_directory_probe]

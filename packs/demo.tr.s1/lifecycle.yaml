@@ -1,0 +1,5 @@
+# Lifecycle of the demo pack: the key of a report, how its number is derived and what a later
+# version waits for. Synthetic and NON-PRODUCTION.
+business_key: "executing_lei|trn"
+trn: {policy: derive, length: 32}
+successor_gate: {mode: FEEDBACK_ACCEPTED, max_wait: PT0S, on_expiry: ESCALATE}

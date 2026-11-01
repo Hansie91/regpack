@@ -1,0 +1,30 @@
+{
+  "id": "GC-N13-1",
+  "node": "N13",
+  "description": "A natural person client needs a policy decision so the result is undetermined (consistency-only, synthetic).",
+  "author": "agent:w1-golden",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "SYNT00FIRM0000000152",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-102",
+    "eventKind": "NEW",
+    "tradedAt": "2026-10-30T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000016",
+    "tradedOnVenue": true,
+    "clientKind": "NATURAL_PERSON",
+    "quantity": 30,
+    "price": 7.5,
+    "currency": "EUR",
+    "side": "BUY",
+    "capacity": "AOTC",
+    "counterparty": "SYNT00CCP00000000194",
+    "executionWithinFirm": "ALGO-1"
+  },
+  "expected": {
+    "outcome": "UNDETERMINED",
+    "reasonCode": "DEMO.N13.NATURAL_PERSON",
+    "ruleIdsHit": ["S-N13-natural-person"]
+  }
+}

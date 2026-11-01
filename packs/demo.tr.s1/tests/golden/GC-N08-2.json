@@ -1,0 +1,31 @@
+{
+  "id": "GC-N08-2",
+  "node": "N08",
+  "description": "An equity traded on a venue is reportable as a new report, matched principal sale (consistency-only, synthetic).",
+  "author": "agent:w1-golden",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "SYNT00FIRM0000000152",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-108",
+    "eventKind": "NEW",
+    "tradedAt": "2026-10-30T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000024",
+    "tradedOnVenue": true,
+    "clientKind": "LEGAL_ENTITY",
+    "clientLei": "SYNT00CLIENT00000264",
+    "quantity": 250.5,
+    "price": 8.1,
+    "currency": "EUR",
+    "side": "SELL",
+    "capacity": "MTCH",
+    "counterparty": "SYNT00CCP00000000194",
+    "executionWithinFirm": "ALGO-1"
+  },
+  "expected": {
+    "outcome": "REPORT",
+    "reasonCode": "DEMO.N08.IN_SCOPE",
+    "ruleIdsHit": ["S-N08-new"]
+  }
+}

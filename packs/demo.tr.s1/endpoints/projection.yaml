@@ -1,0 +1,7 @@
+# endpoints/projection.yaml
+projection: {id: demo-tx-1, media_type: application/xml, namespace: "urn:regpack:demo:tx:1", root: Doc, label: "DEMO ONLY, NO REGULATOR CONTENT"}
+header: [{element: MsgId, from: file.messageId}, {element: Sender, from: file.sender}, {element: Created, from: file.createdAt}, {element: RecCount, from: file.recordCount}]
+record: {wrapper: Tx, element_by_action: {NEWT: New, CANC: Cxl}}
+fields:
+  NEWT: [{element: Trn, from: trn}, {element: ExecEntity, from: executing_lei}, {element: SubmitEntity, from: submitting_lei}, {element: Buyer, from: buyer}, {element: Seller, from: seller}, {element: TradeTime, from: trading_datetime}, {element: Capacity, from: capacity}, {element: Quantity, from: quantity}, {element: Price, from: price}, {element: PriceCcy, from: price_currency}, {element: Venue, from: venue}, {element: Instrument, from: instrument}, {element: ExecWithin, from: execution_within_firm, optional: true}, {element: Transmission, from: transmission}]
+  CANC: [{element: Trn, from: trn}, {element: ExecEntity, from: executing_lei}, {element: SubmitEntity, from: submitting_lei}]

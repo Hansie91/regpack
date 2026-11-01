@@ -1,0 +1,31 @@
+{
+  "id": "GC-N03-1",
+  "node": "N03",
+  "description": "A novation is not reported (consistency-only, synthetic).",
+  "author": "agent:w1-golden",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "SYNT00FIRM0000000152",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-101",
+    "eventKind": "NOVATION",
+    "tradedAt": "2026-10-30T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000016",
+    "tradedOnVenue": true,
+    "clientKind": "LEGAL_ENTITY",
+    "clientLei": "SYNT00CLIENT00000167",
+    "quantity": 100,
+    "price": 12.25,
+    "currency": "EUR",
+    "side": "BUY",
+    "capacity": "AOTC",
+    "counterparty": "SYNT00CCP00000000194",
+    "executionWithinFirm": "ALGO-1"
+  },
+  "expected": {
+    "outcome": "DO_NOT_REPORT",
+    "reasonCode": "DEMO.N03.EXCLUDED",
+    "ruleIdsHit": ["S-N03-novation"]
+  }
+}

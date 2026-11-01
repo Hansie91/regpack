@@ -1,0 +1,31 @@
+{
+  "id": "GC-N11-1",
+  "node": "N11",
+  "description": "A capacity the demo does not build gives undetermined (consistency-only, synthetic).",
+  "author": "agent:w1-golden",
+  "provenance": {"kind": "CONSISTENCY_ONLY"},
+  "input": {
+    "firmLei": "SYNT00FIRM0000000152",
+    "venueMic": "XPAR",
+    "venueExecutionId": "EX-105",
+    "eventKind": "NEW",
+    "tradedAt": "2026-10-30T09:30:00.123456Z",
+    "assetClass": "EQUITY",
+    "isin": "ZZ0000000016",
+    "tradedOnVenue": true,
+    "clientKind": "LEGAL_ENTITY",
+    "clientLei": "SYNT00CLIENT00000167",
+    "quantity": 100,
+    "price": 12.25,
+    "currency": "EUR",
+    "side": "BUY",
+    "capacity": "DEAL",
+    "counterparty": "SYNT00CCP00000000194",
+    "executionWithinFirm": "ALGO-1"
+  },
+  "expected": {
+    "outcome": "UNDETERMINED",
+    "reasonCode": "DEMO.N11.CAPACITY_ABSENT_OR_NOT_IN_SLICE",
+    "ruleIdsHit": ["S-N11-capacity"]
+  }
+}

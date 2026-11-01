@@ -1,0 +1,4 @@
+# Enrichment plan of the demo pack: the client identifier is looked up in the static data source by
+# the account when the trade row has none. A miss makes the decision undetermined. Synthetic.
+fields:
+  - {field: client.lei, needed_by: SCOPE, on_miss: UNDETERMINED, sources: [{source: static-data, key: account, max_staleness: P30D}]}
