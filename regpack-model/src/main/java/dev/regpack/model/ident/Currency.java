@@ -10,7 +10,10 @@ import java.util.TreeSet;
  * regulator-published list).
  */
 public final class Currency {
-  /** The DEMO list of codes that are not a trade currency, in ascending order. */
+  /**
+   * The DEMO list of codes that are not a trade currency, in ascending order. A test vector only:
+   * the validator does not read it, the list of the rule in the pack is the source.
+   */
   public static final Set<String> NON_CURRENCY =
       Collections.unmodifiableSet(new TreeSet<>(Set.of("XAU", "XDR", "XXX")));
 

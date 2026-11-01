@@ -34,6 +34,7 @@ import dev.regpack.ports.regime.RegimeProvider;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -284,25 +285,51 @@ class DemoPackTest {
         .containsOnlyKeys("sample-law", "regpack-spec", "fixture-law");
   }
 
-  /** The fields a golden case derives, by name in row order. */
-  private static Map<String, String> derivedFields(PackRegime regime, String caseId) {
+  /**
+   * The result of a golden case's input with some keys replaced; a null override removes the key.
+   * The input goes through the codec, so it is a real canonical execution.
+   */
+  private static RegimeProvider.Result evaluateGolden(
+      PackRegime regime, String caseId, Map<String, Object> overrides) {
     GoldenCase golden =
         PackGoldenLoader.load(source()).cases().stream()
             .filter(c -> c.id().equals(caseId))
             .findFirst()
             .orElseThrow();
-    RegimeProvider.Result result =
-        regime.evaluate(
-            CanonicalExecutionCodec.fromMap(golden.input()),
-            new EvaluationContext(
-                regime.decisionContext(),
-                new IngestKey("golden", caseId, 1),
-                Instant.parse(PackTester.EVALUATED_AT),
-                regime.recordBudget()));
-    assertThat(result.decision().outcome()).as(caseId).isEqualTo(Outcome.REPORT);
+    Map<String, Object> input = new LinkedHashMap<>(golden.input());
+    overrides.forEach(
+        (key, value) -> {
+          if (value == null) {
+            input.remove(key);
+          } else {
+            input.put(key, value);
+          }
+        });
+    return regime.evaluate(
+        CanonicalExecutionCodec.fromMap(input),
+        new EvaluationContext(
+            regime.decisionContext(),
+            new IngestKey("golden", caseId, 1),
+            Instant.parse(PackTester.EVALUATED_AT),
+            regime.recordBudget()));
+  }
+
+  private static Map<String, String> fieldsOf(RegimeProvider.Result result) {
     Map<String, String> fields = new LinkedHashMap<>();
     result.fields().forEach(field -> fields.put(field.name(), field.value()));
     return fields;
+  }
+
+  /** The fields a golden case derives, by name in row order. */
+  private static Map<String, String> derivedFields(PackRegime regime, String caseId) {
+    return derivedFields(regime, caseId, new HashMap<>());
+  }
+
+  private static Map<String, String> derivedFields(
+      PackRegime regime, String caseId, Map<String, Object> overrides) {
+    RegimeProvider.Result result = evaluateGolden(regime, caseId, overrides);
+    assertThat(result.decision().outcome()).as(caseId + overrides).isEqualTo(Outcome.REPORT);
+    return fieldsOf(result);
   }
 
   private static Map<String, String> ordered(String... namesAndValues) {
@@ -357,6 +384,172 @@ class DemoPackTest {
             ordered(
                 "executing_lei", "SYNT00FIRM0000000152",
                 "submitting_lei", "SYNT00FIRM0000000152"));
+  }
+
+  private static final String FIRM = "SYNT00FIRM0000000152";
+  private static final String CLIENT = "SYNT00CLIENT00000167";
+  private static final String COUNTERPARTY = "SYNT00CCP00000000194";
+
+  private static PackRegime demoRegime() {
+    return PackRegime.create(load(), PACK_ID, new MeteredExecutor(), Rulings.load());
+  }
+
+  @Test
+  void buyerAndSellerFollowSideAndCapacityInAllFourCombinations() {
+    PackRegime regime = demoRegime();
+    // rows D-BUYER and D-SELLER: the side that is the firm's own gives the client (AOTC) or the
+    // firm (MTCH); the other side is the counterparty
+    String[][] cases = {
+      // side, capacity, buyer, seller
+      {"BUY", "AOTC", CLIENT, COUNTERPARTY},
+      {"BUY", "MTCH", FIRM, COUNTERPARTY},
+      {"SELL", "AOTC", COUNTERPARTY, CLIENT},
+      {"SELL", "MTCH", COUNTERPARTY, FIRM},
+    };
+    for (String[] c : cases) {
+      Map<String, Object> overrides = new HashMap<>();
+      overrides.put("side", c[0]);
+      overrides.put("capacity", c[1]);
+
+      Map<String, String> fields = derivedFields(regime, "GC-N08-1", overrides);
+
+      assertThat(fields)
+          .as(c[0] + "/" + c[1])
+          .containsEntry("buyer", c[2])
+          .containsEntry("seller", c[3]);
+      assertThat(fields).containsEntry("capacity", c[1]);
+      assertThat(fields.keySet())
+          .as("the field list does not depend on side or capacity")
+          .hasSize(13);
+    }
+  }
+
+  @Test
+  void quantityRoundsToFourPlacesAndPriceToSixHalfEvenAndKeepsExactValues() {
+    PackRegime regime = demoRegime();
+    String[][] cases = {
+      // quantity, reported, price, reported
+      {"12.34565", "12.3456", "1.2345665", "1.234566"}, // ties go to the even digit: down
+      {"12.34575", "12.3458", "1.2345675", "1.234568"}, // and up
+      {"12.34566", "12.3457", "1.2345666", "1.234567"},
+      {"12.34564", "12.3456", "1.2345664", "1.234566"},
+      {"12.3456", "12.3456", "1.234566", "1.234566"},
+      {"250.5", "250.5", "8.1", "8.1"},
+    };
+    for (String[] c : cases) {
+      Map<String, Object> overrides = new HashMap<>();
+      overrides.put("quantity", new BigDecimal(c[0]));
+      overrides.put("price", new BigDecimal(c[2]));
+
+      Map<String, String> fields = derivedFields(regime, "GC-N08-1", overrides);
+
+      assertThat(fields)
+          .as(c[0] + " " + c[2])
+          .containsEntry("quantity", c[1])
+          .containsEntry("price", c[3]);
+    }
+  }
+
+  @Test
+  void aNewWithoutExecutionWithinReportsWithoutThatFieldAndWithoutError() {
+    PackRegime regime = demoRegime();
+    Map<String, Object> overrides = new HashMap<>();
+    overrides.put("executionWithinFirm", null);
+
+    RegimeProvider.Result result = evaluateGolden(regime, "GC-N08-1", overrides);
+
+    assertThat(result.decision().outcome()).isEqualTo(Outcome.REPORT);
+    assertThat(result.decision().reasonCode().value()).isEqualTo("DEMO.N08.IN_SCOPE");
+    Map<String, String> with = derivedFields(regime, "GC-N08-1");
+    Map<String, String> without = fieldsOf(result);
+    assertThat(without).doesNotContainKey("execution_within_firm");
+    Map<String, String> expected = new LinkedHashMap<>(with);
+    expected.remove("execution_within_firm");
+    assertThat(without).containsExactlyEntriesOf(expected);
+  }
+
+  @Test
+  void aNewNotTradedOnAVenueFallsToTheDefaultAndNotToReport() {
+    PackRegime regime = demoRegime();
+    Map<String, Object> overrides = new HashMap<>();
+    overrides.put("tradedOnVenue", false);
+
+    RegimeProvider.Result result = evaluateGolden(regime, "GC-N08-1", overrides);
+
+    assertThat(result.decision().outcome()).isEqualTo(Outcome.UNDETERMINED);
+    assertThat(result.decision().reasonCode().value()).isEqualTo("DEMO.DEFAULT.NO_RULE_HIT");
+    assertThat(result.decision().ruleIdsHit()).containsExactly("S-DEFAULT-catch-all");
+    assertThat(result.fields()).isEmpty();
+  }
+
+  @Test
+  void anAssignmentIsNotReportedAndACorrectionIsUndeterminedLikeAnAmend() {
+    PackRegime regime = demoRegime();
+
+    Map<String, Object> assignment = new HashMap<>();
+    assignment.put("eventKind", "ASSIGNMENT");
+    RegimeProvider.Result assigned = evaluateGolden(regime, "GC-N08-1", assignment);
+    Map<String, Object> novation = new HashMap<>();
+    novation.put("eventKind", "NOVATION");
+    RegimeProvider.Result novated = evaluateGolden(regime, "GC-N08-1", novation);
+    Map<String, Object> correction = new HashMap<>();
+    correction.put("eventKind", "CORRECTION");
+    RegimeProvider.Result corrected = evaluateGolden(regime, "GC-N08-1", correction);
+
+    assertThat(assigned.decision().outcome()).isEqualTo(Outcome.DO_NOT_REPORT);
+    assertThat(assigned.decision().ruleIdsHit()).containsExactly("S-N03-novation");
+    assertThat(assigned.decision().reasonCode().value()).isEqualTo("DEMO.N03.EXCLUDED");
+    assertThat(novated.decision().ruleIdsHit()).containsExactly("S-N03-novation");
+    assertThat(corrected.decision().outcome()).isEqualTo(Outcome.UNDETERMINED);
+    assertThat(corrected.decision().ruleIdsHit()).containsExactly("S-N18-amend");
+    assertThat(corrected.decision().reasonCode().value()).isEqualTo("DEMO.N18.AMEND_NOT_IN_SLICE");
+    assertThat(assigned.fields()).isEmpty();
+    assertThat(corrected.fields()).isEmpty();
+  }
+
+  @Test
+  void everyReportFieldAValidationRuleNamesIsTheFieldOfADeriveRowThatAppliesToNewAndCancel()
+      throws IOException {
+    PackSource source = source();
+    DeriveTable derive =
+        DeriveTable.parse(
+                "derive/report.yaml",
+                StrictYaml.parse(source.text("derive/report.yaml")),
+                ProblemSink.forFile())
+            .orElseThrow();
+    Set<String> deriveFields = new java.util.TreeSet<>();
+    derive.rows().forEach(row -> deriveFields.add(row.field()));
+    String fixture;
+    try (InputStream in = DemoPackTest.class.getResourceAsStream("/fixtures/rules.yaml")) {
+      assertThat(in).as("the validation fixture of T9").isNotNull();
+      fixture = new String(in.readAllBytes(), UTF_8);
+    }
+    PackRegime regime = demoRegime();
+    Map<String, String> onNew = derivedFields(regime, "GC-N08-1");
+    Map<String, String> onCancel = derivedFields(regime, "GC-N08-3");
+
+    for (String text : List.of(source.text("validate/rules.yaml"), fixture)) {
+      ValidationRules rules =
+          ValidationRules.parse("rules.yaml", StrictYaml.parse(text), ProblemSink.forFile())
+              .orElseThrow();
+      Set<String> named = new java.util.TreeSet<>();
+      for (ValidationRules.Rule rule : rules.rules()) {
+        for (String field : rule.list("fields")) {
+          if (field.startsWith("report.")) {
+            named.add(field.substring("report.".length()));
+          }
+        }
+      }
+      assertThat(named).as("the derived fields the rules name").isNotEmpty();
+      // a name that no derive row gives would be skipped by the validator and pass silently
+      assertThat(deriveFields)
+          .as("every report.<name> of the rules is a derive field")
+          .containsAll(named);
+      // V09 (the closed-world check of the executing LEI) must see its field on every report
+      assertThat(named).contains("executing_lei");
+      assertThat(onNew).containsKey("executing_lei");
+      assertThat(onCancel).containsKey("executing_lei");
+    }
   }
 
   @Test

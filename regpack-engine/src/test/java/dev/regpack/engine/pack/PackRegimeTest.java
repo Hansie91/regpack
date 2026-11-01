@@ -18,6 +18,8 @@ import dev.regpack.model.decision.DecisionBody;
 import dev.regpack.model.decision.DecisionContext;
 import dev.regpack.pack.model.LoadedPack;
 import dev.regpack.ports.exec.CostBudget;
+import dev.regpack.ports.exec.ExecutionResult;
+import dev.regpack.ports.exec.ExecutionResult.Completed;
 import dev.regpack.ports.regime.RegimeProvider;
 import dev.regpack.ports.regime.RegimeProvider.Descriptor;
 import dev.regpack.ports.regime.RegimeProvider.EvaluationContext;
@@ -229,6 +231,63 @@ class PackRegimeTest {
     assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, pinned)))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("overlay");
+  }
+
+  @Test
+  void aGivenContextOutsideTheBatchInputBoundsIsRefusedAsContextForWouldRefuseIt() {
+    PackRegime regime = create(SamplePacks.load(), REPORT);
+    DecisionContext own = regime.decisionContext();
+    List<String> sixtyFive = new ArrayList<>();
+    for (int i = 0; i < 65; i++) {
+      sixtyFive.add("ref-" + i);
+    }
+    CanonicalExecution event = execution(AssetClass.EQUITY);
+    List<DecisionContext> outOfBounds =
+        List.of(
+            withBatch(own, "m@1", "p-1", sixtyFive, List.of()),
+            withBatch(own, "m@1", "p-1", List.of(), sixtyFive),
+            withBatch(own, "m".repeat(257), "p-1", List.of(), List.of()),
+            withBatch(own, "m@1", " ", List.of(), List.of()),
+            withBatch(own, "", "p-1", List.of(), List.of()),
+            withBatch(own, "m@1", "a\u0001b", List.of(), List.of()),
+            withBatch(own, "m@1", "p-1", List.of("x".repeat(257)), List.of()),
+            withBatch(own, "m@1", "p-1", List.of(), List.of("a\u0000b")));
+
+    for (DecisionContext given : outOfBounds) {
+      assertThatThrownBy(() -> regime.evaluate(event, contextOf(regime, given)))
+          .as(given.mappingVersion().length() + "/" + given.firmProfileVersion().length())
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    // a context in bounds is accepted, whether built by hand or by contextFor
+    DecisionContext inBounds = withBatch(own, "m@1", "p-1", List.of("r-1"), List.of("e-1"));
+    assertThat(regime.evaluate(event, contextOf(regime, inBounds)).decision().decisionContextId())
+        .isEqualTo(inBounds.id());
+    DecisionContext built =
+        regime.contextFor(new BatchInputs("m@1", "p-1", List.of("r-1"), List.of("e-1")));
+    assertThat(regime.evaluate(event, contextOf(regime, built)).decision().decisionContextId())
+        .isEqualTo(built.id());
+    assertThat(built).isEqualTo(inBounds);
+    // the provider's own context (versions "none") is unaffected
+    assertThat(decide(regime, event).decisionContextId()).isEqualTo(own.id());
+  }
+
+  private static DecisionContext withBatch(
+      DecisionContext own,
+      String mappingVersion,
+      String firmProfileVersion,
+      List<String> referenceSnapshotIds,
+      List<String> enrichmentSnapshotIds) {
+    return new DecisionContext(
+        own.packDigest(),
+        own.overlayDigest(),
+        own.interpretationPins(),
+        referenceSnapshotIds,
+        enrichmentSnapshotIds,
+        firmProfileVersion,
+        mappingVersion,
+        own.engineBuild(),
+        own.executor(),
+        own.circuitEpoch());
   }
 
   @Test
@@ -462,9 +521,18 @@ class PackRegimeTest {
 
     RegimeProvider.Result result = evaluate(regime, DeriveFixture.newExecution());
 
+    ExecutionResult<List<DeriveProgram.Derived>> derive =
+        EXECUTOR.execute(
+            new DeriveProgram(regime.compiled()),
+            new CanonicalBindings(DeriveFixture.newExecution()),
+            new CostBudget(1_000_000));
+    long deriveUnits = ((Completed<List<DeriveProgram.Derived>>) derive).costUnits();
     assertThat(regime.recordBudget().maxUnits())
+        .as("at least the scope budget")
         .isGreaterThanOrEqualTo(regime.compiled().budget().perRecordUnits());
-    assertThat(regime.recordBudget().maxUnits()).isEqualTo(regime.compiled().recordUnits());
+    assertThat(regime.recordBudget().maxUnits())
+        .as("and at least what the derive rows really cost")
+        .isGreaterThanOrEqualTo(deriveUnits);
     assertThat(result.decision().outcome()).isEqualTo(Outcome.REPORT);
     assertThat(result.fields()).hasSize(11);
   }

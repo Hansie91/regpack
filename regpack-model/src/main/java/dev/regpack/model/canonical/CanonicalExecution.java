@@ -13,7 +13,8 @@ import java.util.Optional;
  * <p>The last four components are optional: {@code side}, {@code capacity}, {@code counterparty}
  * and {@code executionWithinFirm}. Each text is a {@link KeyText} (at most {@value
  * KeyText#MAX_CHARS} characters, no control character, no unpaired surrogate); a refusal names the
- * field and never echoes the value. The 13-argument constructor leaves the four empty.
+ * field and never echoes the value, and a present text is not blank. The 13-argument constructor
+ * leaves the four empty.
  */
 public record CanonicalExecution(
     String firmLei,
@@ -88,15 +89,30 @@ public record CanonicalExecution(
     Objects.requireNonNull(capacity, "capacity");
     Objects.requireNonNull(counterparty, "counterparty");
     Objects.requireNonNull(executionWithinFirm, "executionWithinFirm");
-    capacity.ifPresent(v -> KeyText.require("capacity", v));
-    counterparty.ifPresent(v -> KeyText.require("counterparty", v));
-    executionWithinFirm.ifPresent(v -> KeyText.require("executionWithinFirm", v));
+    capacity.ifPresent(v -> optionalText("capacity", v));
+    counterparty.ifPresent(v -> optionalText("counterparty", v));
+    executionWithinFirm.ifPresent(v -> optionalText("executionWithinFirm", v));
+  }
+
+  /** A present optional text is a key text and not blank: a blank is not the same as absent. */
+  private static void optionalText(String field, String value) {
+    requireText(value, field);
+    KeyText.require(field, value);
   }
 
   private static void requireText(String value, String field) {
     if (value == null || value.isBlank()) {
       throw new IllegalArgumentException("CanonicalExecution " + field + " must not be blank");
     }
+  }
+
+  /**
+   * Only the event kind: the identifiers, the price and the quantity of an execution are never
+   * printed (a message, a log line or an assertion failure may show this text).
+   */
+  @Override
+  public String toString() {
+    return "CanonicalExecution[eventKind=" + eventKind + "]";
   }
 
   @Override

@@ -447,7 +447,9 @@ public final class PackRegime implements RegimeProvider {
    * come from the caller of a batch (see {@link #contextFor}): a context that differs from {@link
    * #decisionContext()} in those four only is accepted and every decision is stamped with it. The
    * circuit epoch is a fact of this provider's circuit (INTERP-3): a context from before a close of
-   * an open rule is refused as stale, and the batch that holds it must be pinned again.
+   * an open rule is refused as stale, and the batch that holds it must be pinned again. The four
+   * caller components obey the bounds of {@link BatchInputs} (key text, at most {@value
+   * BatchInputs#MAX_SNAPSHOT_IDS} ids, versions not blank) whoever built the context.
    *
    * @param current the snapshot taken at the start of the call
    */
@@ -487,6 +489,13 @@ public final class PackRegime implements RegimeProvider {
           "the decision context differs from the one of this provider in its overlay or pins; only"
               + " the mapping version, the Firm Profile version and the snapshot ids may differ");
     }
+    // the four caller components obey the bounds of BatchInputs also when the context was not
+    // built by contextFor (the refusal names the component and never echoes the value)
+    new BatchInputs(
+        given.mappingVersion(),
+        given.firmProfileVersion(),
+        given.referenceSnapshotIds(),
+        given.enrichmentSnapshotIds());
   }
 
   private static String bounded(String text) {

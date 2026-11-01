@@ -92,6 +92,52 @@ class IsinTest {
     }
   }
 
+  /** The check digit by an independent Luhn: letters expand to two digits, A is 10 and Z is 35. */
+  private static char luhnCheckDigit(String base11) {
+    StringBuilder digits = new StringBuilder();
+    for (char c : base11.toCharArray()) {
+      digits.append(c >= 'A' ? Integer.toString(c - 'A' + 10) : Character.toString(c));
+    }
+    int sum = 0;
+    boolean doubling = true; // the digit next to the check digit is doubled
+    for (int i = digits.length() - 1; i >= 0; i--) {
+      int d = digits.charAt(i) - '0';
+      if (doubling) {
+        d *= 2;
+        if (d > 9) {
+          d -= 9;
+        }
+      }
+      sum += d;
+      doubling = !doubling;
+    }
+    return (char) ('0' + (10 - sum % 10) % 10);
+  }
+
+  @Test
+  void withCheckDigitFindsEveryCheckDigitFromZeroToNine() {
+    String[] found = new String[10];
+    for (int i = 0; i < 1000 && java.util.Arrays.asList(found).contains(null); i++) {
+      String base = "ZZ00000" + String.format(java.util.Locale.ROOT, "%04d", i);
+      char expected = luhnCheckDigit(base);
+      if (found[expected - '0'] == null) {
+        found[expected - '0'] = base;
+      }
+    }
+    assertThat(found).as("a base for each of the ten check digits").doesNotContainNull();
+    for (int digit = 0; digit <= 9; digit++) {
+      String base = found[digit];
+      String isin = Isin.withCheckDigit(base);
+      assertThat(isin).as(base).hasSize(12).startsWith(base);
+      assertThat(isin.charAt(11)).as("check digit of " + base).isEqualTo((char) ('0' + digit));
+      assertThat(Isin.isValid(isin)).as(isin).isTrue();
+    }
+    // the independent computation agrees with the published examples
+    for (String isin : PUBLISHED) {
+      assertThat(luhnCheckDigit(isin.substring(0, 11))).isEqualTo(isin.charAt(11));
+    }
+  }
+
   @Test
   void withCheckDigitRefusesABaseThatIsNot11Characters() {
     assertThatThrownBy(() -> Isin.withCheckDigit("ZZ00000001"))

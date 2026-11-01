@@ -23,6 +23,8 @@ import org.junit.jupiter.api.Test;
 /** The derive program: rows to text values (plan W1a, task T5, decision D-W5). */
 class DeriveProgramTest {
   private static final MeteredExecutor EXECUTOR = new MeteredExecutor();
+  private static final long ONE_ROW_UNITS = 4;
+  private static final long TWO_ROW_UNITS = 8;
 
   private static CompiledPack compiled(LoadedPack pack) {
     return CompiledPack.compile(pack, DeriveFixture.REPORT, Rulings.load()).pack().orElseThrow();
@@ -303,5 +305,94 @@ class DeriveProgramTest {
     assertThat(short1).isInstanceOf(BudgetExhausted.class);
     assertThat(tiny).isInstanceOf(BudgetExhausted.class);
     assertThat(((BudgetExhausted<List<DeriveProgram.Derived>>) tiny).ruleId()).isEqualTo("D-EXEC");
+  }
+
+  /** The units one run of the table costs; the budget is large, so the run completes. */
+  private static long unitsOf(String... idFieldWhenValue) {
+    DeriveProgram program = program(DeriveFixture.loadSealed(derive(idFieldWhenValue)));
+    ExecutionResult<List<DeriveProgram.Derived>> result =
+        run(program, DeriveFixture.newExecution(), 10_000);
+    assertThat(result).isInstanceOf(Completed.class);
+    return ((Completed<List<DeriveProgram.Derived>>) result).costUnits();
+  }
+
+  @Test
+  void everyRowChargesItsOwnUnitOnTopOfItsExpressions() {
+    // known answers of one and of two rows (the literals cost the same in every row), so that the
+    // row charge of DeriveProgram.run is pinned: without it each count is lower by one per row
+    long one = unitsOf("D-A", "field_a", "true", "'x'");
+    long two = unitsOf("D-A", "field_a", "true", "'x'", "D-B", "field_b", "true", "'x'");
+
+    assertThat(one)
+        .as("one row: its charge plus a literal when and a literal value")
+        .isEqualTo(ONE_ROW_UNITS);
+    assertThat(two).as("two rows").isEqualTo(TWO_ROW_UNITS);
+    assertThat(two - one)
+        .as("a second identical row adds exactly the cost of a row")
+        .isEqualTo(one);
+  }
+
+  @Test
+  void aRowThatDoesNotApplyStillChargesItsRowAndItsWhen() {
+    long applies = unitsOf("D-A", "field_a", "true", "'x'");
+    long skipped = unitsOf("D-A", "field_a", "false", "'x'");
+
+    assertThat(skipped).as("the value of a skipped row is not evaluated").isLessThan(applies);
+    assertThat(skipped).as("the row charge and the when remain").isGreaterThanOrEqualTo(2);
+  }
+
+  @Test
+  void roundingToFourAndSixPlacesGoesToTheEvenDigitOnATie() {
+    // D-W5: HALF_EVEN. 12.34565 and 1.2345665 are ties that go down (the kept digit 6 is even);
+    // 12.34575 and 1.2345675 are ties that go up (7 is odd); HALF_UP would move the first two
+    DeriveProgram program =
+        program(
+            DeriveFixture.loadSealed(
+                derive(
+                    "D-QTY",
+                    "quantity",
+                    "true",
+                    "string(round(trade.quantity, 4, 'HALF_EVEN'))",
+                    "D-PRICE",
+                    "price",
+                    "true",
+                    "string(round(trade.price, 6, 'HALF_EVEN'))")));
+    String[][] cases = {
+      {"12.34565", "12.3456", "1.2345665", "1.234566"},
+      {"12.34575", "12.3458", "1.2345675", "1.234568"},
+      {"12.34566", "12.3457", "1.2345666", "1.234567"},
+      {"12.34564", "12.3456", "1.2345664", "1.234566"},
+      {"12.3456", "12.3456", "1.234566", "1.234566"},
+      {"100.5", "100.5", "12.25", "12.25"},
+    };
+    for (String[] c : cases) {
+      CanonicalExecution base = DeriveFixture.newExecution();
+      CanonicalExecution event =
+          new CanonicalExecution(
+              base.firmLei(),
+              base.venueMic(),
+              base.venueExecutionId(),
+              base.eventKind(),
+              base.tradedAt(),
+              base.assetClass(),
+              base.isin(),
+              base.tradedOnVenue(),
+              base.clientKind(),
+              base.clientLei(),
+              new BigDecimal(c[0]),
+              new BigDecimal(c[2]),
+              base.currency(),
+              base.side(),
+              base.capacity(),
+              base.counterparty(),
+              base.executionWithinFirm());
+
+      Map<String, String> values = valuesOf(run(program, event, 10_000));
+
+      assertThat(values)
+          .as(c[0] + " and " + c[2])
+          .containsEntry("quantity", c[1])
+          .containsEntry("price", c[3]);
+    }
   }
 }

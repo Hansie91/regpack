@@ -73,7 +73,8 @@ class CanonicalExecutionCodecTest {
     assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(bogus))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("eventKind")
-        .hasMessageContaining("BOGUS");
+        .hasMessageNotContaining("BOGUS")
+        .hasNoCause();
   }
 
   @Test
@@ -286,7 +287,106 @@ class CanonicalExecutionCodecTest {
     map.put("side", "HOLD");
     assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("side");
+        .hasMessage("field side has an unknown value")
+        .hasMessageNotContaining("HOLD")
+        .hasNoCause();
+    for (String leak :
+        new String[] {"LEAKSIDE-SYNT00CLIENT00000167", "x".repeat(5000), "ev\u0001il"}) {
+      map.put("side", leak);
+      assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+          .isInstanceOf(IllegalArgumentException.class)
+          .satisfies(e -> assertThat(e.getMessage().length()).isLessThan(100))
+          .hasMessageNotContaining(leak)
+          .hasNoCause();
+    }
+  }
+
+  @Test
+  void aTextThatIsNotAnInstantIsRefusedWithoutEchoingItOrChainingTheParserException() {
+    Map<String, Object> map = new LinkedHashMap<>(CanonicalExecutionCodec.toMap(full()));
+    for (String leak : new String[] {"LEAKTIME-ACC-9", "nope", "x".repeat(5000)}) {
+      map.put("tradedAt", leak);
+      assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("field tradedAt is not an instant")
+          .hasMessageNotContaining(leak)
+          .hasNoCause();
+    }
+  }
+
+  @Test
+  void aBlankOptionalTextIsRefusedAsClientLeiIs() {
+    String[] fields = {"capacity", "counterparty", "executionWithinFirm"};
+    for (String field : fields) {
+      for (String blank : new String[] {"", " ", "   "}) {
+        Map<String, Object> map = new LinkedHashMap<>(CanonicalExecutionCodec.toMap(full()));
+        map.put(field, blank);
+        assertThatThrownBy(() -> CanonicalExecutionCodec.fromMap(map))
+            .as(field + " [" + blank + "]")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining(field);
+      }
+    }
+    // the constructor refuses them too, one field at a time
+    for (int slot = 0; slot < 3; slot++) {
+      Optional<String> blank = Optional.of("  ");
+      int at = slot;
+      assertThatThrownBy(
+              () ->
+                  new CanonicalExecution(
+                      "F",
+                      "XPAR",
+                      "EX-1",
+                      LifecycleKind.NEW,
+                      Instant.parse("2026-10-09T09:30:00Z"),
+                      AssetClass.EQUITY,
+                      "FR0000120271",
+                      true,
+                      PartyKind.LEGAL_ENTITY,
+                      Optional.empty(),
+                      BigDecimal.ONE,
+                      BigDecimal.ONE,
+                      "EUR",
+                      Optional.empty(),
+                      at == 0 ? blank : Optional.empty(),
+                      at == 1 ? blank : Optional.empty(),
+                      at == 2 ? blank : Optional.empty()))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining(fields[slot]);
+    }
+    // absent stays absent and a one-character text stays valid
+    Map<String, Object> absent = new LinkedHashMap<>(CanonicalExecutionCodec.toMap(full()));
+    absent.remove("capacity");
+    assertThat(CanonicalExecutionCodec.fromMap(absent).capacity()).isEmpty();
+    absent.put("capacity", "M");
+    assertThat(CanonicalExecutionCodec.fromMap(absent).capacity()).contains("M");
+  }
+
+  @Test
+  void toStringPrintsTheEventKindAndNoIdentifierOrValue() {
+    CanonicalExecution e = full();
+
+    String text = e.toString();
+
+    assertThat(text).isEqualTo("CanonicalExecution[eventKind=NEW]");
+    for (String secret :
+        new String[] {
+          e.firmLei(),
+          e.venueMic(),
+          e.venueExecutionId(),
+          e.isin(),
+          e.clientLei().orElseThrow(),
+          e.quantity().toPlainString(),
+          e.price().toPlainString(),
+          e.counterparty().orElseThrow(),
+          e.executionWithinFirm().orElseThrow(),
+          e.capacity().orElseThrow(),
+          e.tradedAt().toString()
+        }) {
+      assertThat(text).as(secret).doesNotContain(secret);
+    }
+    assertThat(execution(Optional.empty()).toString())
+        .isEqualTo("CanonicalExecution[eventKind=NEW]");
   }
 
   @Test

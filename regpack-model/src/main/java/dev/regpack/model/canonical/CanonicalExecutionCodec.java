@@ -164,7 +164,8 @@ public final class CanonicalExecutionCodec {
         try {
           yield Instant.parse(s);
         } catch (DateTimeParseException e) {
-          throw new IllegalArgumentException("field " + field + " is not an instant: " + s, e);
+          // no value and no library exception: the text is the caller's data
+          throw new IllegalArgumentException("field " + field + " is not an instant");
         }
       }
       default -> throw new IllegalArgumentException("field " + field + " must be an instant");
@@ -177,8 +178,8 @@ public final class CanonicalExecutionCodec {
     try {
       return Enum.valueOf(type, name);
     } catch (IllegalArgumentException e) {
-      throw new IllegalArgumentException(
-          "field " + field + " has unknown value " + name + " for " + type.getSimpleName(), e);
+      // no value and no library exception: the text is the caller's data
+      throw new IllegalArgumentException("field " + field + " has an unknown value");
     }
   }
 }
