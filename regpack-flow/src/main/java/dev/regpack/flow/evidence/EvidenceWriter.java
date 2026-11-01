@@ -133,6 +133,10 @@ public final class EvidenceWriter {
    * first delivery puts the object once). An object that was found in the store, and not written by
    * the caller, is recorded with {@link #recordStored}, which completes a missing copy.
    *
+   * <p>Only for an object the caller has just written through {@link JournalWriter#write}: this
+   * method skips the completion of a second copy, so for any other object it would silently leave a
+   * missing copy missing.
+   *
    * @throws IllegalStateException the store does not hold the key
    */
   public void recordWritten(EvidenceKey key, ManifestLedger.ObjectClass objectClass) {

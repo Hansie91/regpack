@@ -55,12 +55,11 @@ import java.util.function.IntSupplier;
  * conflict of versions, a conflict of sources) and a redelivery have their items written after the
  * commit and <b>before</b> the acknowledge, which is the last act of the batch: the answer of the
  * ledger is known by then, so nothing is gained by moving the file first, and a refused record
- * would be left without an item if the move came first and the write then failed. (The text of plan
- * task T7 puts the acknowledge before these items.) When writing one of these items fails, the call
- * throws and the file stays in the inbox; the next call takes the redelivery path below, which
- * writes the same items on the same keys from the stored result of the commit, so exactly one item
- * per record stands after the recovery. An accepted side effect: the recovered replay also writes
- * one {@code FILE_REDELIVERED} warning, as every redelivery does.
+ * would be left without an item if the move came first and the write then failed. When writing one
+ * of these items fails, the call throws and the file stays in the inbox; the next call takes the
+ * redelivery path below, which writes the same items on the same keys from the stored result of the
+ * commit, so exactly one item per record stands after the recovery. An accepted side effect: the
+ * recovered replay also writes one {@code FILE_REDELIVERED} warning, as every redelivery does.
  *
  * <p>A bad value is a quarantined record, not a failed call (SF4): the mapper never throws for one.
  * A bad file is refused as a whole with its coordinates, and the next file is still read (SF9). A
@@ -230,12 +229,41 @@ public final class FileIngest {
      * The source is acknowledged right after the ledger commit and before the items that the answer
      * of the ledger calls for (a stale version, a conflict, a redelivery) are written.
      */
-    ACKNOWLEDGE_BEFORE_DISPOSITIONS
+    ACKNOWLEDGE_BEFORE_DISPOSITIONS,
+    /**
+     * On the redelivery path the source is acknowledged before the items of the stored result and
+     * the note of the redelivery are written.
+     */
+    ACKNOWLEDGE_BEFORE_REDELIVERY_ITEMS
   }
 
   /** The file being ingested: where it came from and what it is called. */
   private record Delivery(
       BatchStream stream, FileSourceConnector connector, Batch batch, String file) {}
+
+  /**
+   * What the landed bytes and the marker say about a batch, with no ledger and no write.
+   *
+   * @param verdict what would become of the file
+   * @param items the data-quality items that come from the bytes and the marker
+   * @param read the bytes as read, when they could be read as a table of this mapping
+   * @param toCommit the rows the ledger would be given; empty commits an empty batch
+   * @param ingested the rows that would be handed to the ledger
+   * @param quarantined the rows that would not be (all rows of a batch that is held back)
+   */
+  private record Analysis(
+      Verdict verdict,
+      List<Dq> items,
+      Optional<ParsedBatch> read,
+      Optional<ParsedBatch> toCommit,
+      int ingested,
+      int quarantined) {}
+
+  /** The verdict and counts a redelivery is reported with. */
+  private record Outcome(Verdict verdict, int ingested, int quarantined) {}
+
+  /** The kind and the code of the item that a disposition of the ledger calls for. */
+  private record ItemKind(Dq.Kind kind, String code) {}
 
   /** The value the marker must give for {@code data_class}. */
   static final String SYNTHETIC = "SYNTHETIC";
@@ -330,8 +358,12 @@ public final class FileIngest {
 
   /**
    * Takes up to {@code credits} files from the stream and ingests each, in order. The files that
-   * wait (no marker, an invalid marker, over the limit) are reported as items: an oversized file at
-   * once, any other once it has waited past the completion deadline.
+   * wait are reported as items after the read and before the first file is ingested (see {@link
+   * #reportWaiting}): an oversized file ({@code OVERSIZED}) at once as a {@code BATCH_REJECTED}
+   * item; a file that waits for any other reason ({@code NO_MARKER}, {@code MARKER_INVALID}, {@code
+   * MARKER_MISMATCH}, {@code NOT_REGULAR}, {@code NAME_INVALID}, {@code UNREADABLE}, {@code
+   * MOVE_FAILED}) as a {@code COMPLETION_PENDING} item once it has waited past the completion
+   * deadline.
    *
    * <p>One stream per call. The acknowledge of a stream is cumulative (it moves every file the
    * stream delivered up to the checkpoint), so a stream that is used again after a failure could
@@ -371,6 +403,23 @@ public final class FileIngest {
     }
   }
 
+  /**
+   * Writes the items for the files that wait, as the connector lists them after the last look at
+   * the inbox. A file is told by the digest of its name, and one item stands per file and reason
+   * (the same key on every tick).
+   *
+   * <ul>
+   *   <li>{@code OVERSIZED}: a {@code BATCH_REJECTED} item with the code {@code OVERSIZED} and the
+   *       note {@code RELEASE_NEEDS_NEW_BYTES} (severity BLOCKER) at once, whatever the time
+   *       waited; the file is never read and stays in the inbox until it is replaced.
+   *   <li>every other reason, that is {@code NO_MARKER}, {@code MARKER_INVALID}, {@code
+   *       MARKER_MISMATCH}, {@code NOT_REGULAR}, {@code NAME_INVALID}, {@code UNREADABLE} and
+   *       {@code MOVE_FAILED}: a {@code COMPLETION_PENDING} item (severity WARNING) whose code is
+   *       the name of the reason, but only once the clock is strictly past the instant the file was
+   *       first seen waiting plus the completion deadline (for {@code MOVE_FAILED} that instant is
+   *       the first failure of the move). Before that nothing is written.
+   * </ul>
+   */
   private void reportWaiting(FileSourceConnector connector) {
     for (Waiting waiting : connector.waiting()) {
       String scope = Sha256.ofUtf8(waiting.file()).hex();
@@ -470,24 +519,6 @@ public final class FileIngest {
     }
   }
 
-  /**
-   * What the landed bytes and the marker say about a batch, with no ledger and no write.
-   *
-   * @param verdict what would become of the file
-   * @param items the data-quality items that come from the bytes and the marker
-   * @param read the bytes as read, when they could be read as a table of this mapping
-   * @param toCommit the rows the ledger would be given; empty commits an empty batch
-   * @param ingested the rows that would be handed to the ledger
-   * @param quarantined the rows that would not be (all rows of a batch that is held back)
-   */
-  private record Analysis(
-      Verdict verdict,
-      List<Dq> items,
-      Optional<ParsedBatch> read,
-      Optional<ParsedBatch> toCommit,
-      int ingested,
-      int quarantined) {}
-
   private Analysis analyze(byte[] bytes, Manifest manifest, String scope, List<String> defects) {
     ParsedBatch parsed;
     try {
@@ -553,9 +584,6 @@ public final class FileIngest {
         Verdict.PROCESSED, items, Optional.of(parsed), Optional.of(parsed), ingested, quarantined);
   }
 
-  /** The verdict and counts a redelivery is reported with. */
-  private record Outcome(Verdict verdict, int ingested, int quarantined) {}
-
   /**
    * The same bytes again (plan D-W2: a redelivery is a recorded no-op). The bytes are read once
    * more, but only to learn the verdict and the lines of the entries of the stored result; nothing
@@ -574,6 +602,10 @@ public final class FileIngest {
     Manifest manifest = batch.payload().manifest();
     Analysis again = analyze(batch.payload().bytes(), manifest, scope, defects);
     Outcome outcome = redeliveryOutcome(stored, again);
+    boolean early = flaw == Flaw.ACKNOWLEDGE_BEFORE_REDELIVERY_ITEMS;
+    if (early) {
+      acknowledge(delivery, outcome.verdict());
+    }
     for (IngestLedger.EntryResult entry : stored.entries()) {
       dispositionItem(
           entry,
@@ -581,7 +613,9 @@ public final class FileIngest {
           () -> again.read().map(p -> p.lines().getOrDefault(entry.key(), 0)).orElse(0));
     }
     dq.write(redeliveredItem(delivery.file()));
-    acknowledge(delivery, outcome.verdict());
+    if (!early) {
+      acknowledge(delivery, outcome.verdict());
+    }
     return new BatchReport(
         batchId,
         delivery.file(),
@@ -718,15 +752,14 @@ public final class FileIngest {
         new IngestLedger.Commit(
             batchId, sourceId, entries, Optional.of(delivery.batch().checkpoint()));
 
-    boolean acknowledged = false;
+    boolean early =
+        flaw == Flaw.ACKNOWLEDGE_BEFORE_COMMIT || flaw == Flaw.ACKNOWLEDGE_BEFORE_DISPOSITIONS;
     if (flaw == Flaw.ACKNOWLEDGE_BEFORE_COMMIT) {
       acknowledge(delivery, verdict);
-      acknowledged = true;
     }
     IngestLedger.Result result = commit(commit);
     if (flaw == Flaw.ACKNOWLEDGE_BEFORE_DISPOSITIONS) {
       acknowledge(delivery, verdict);
-      acknowledged = true;
     }
 
     // the answer of the ledger is known: the items it calls for are written before the source is
@@ -747,7 +780,7 @@ public final class FileIngest {
     if (result.redelivery()) {
       dq.write(redeliveredItem(delivery.file()));
     }
-    if (!acknowledged) {
+    if (!early) {
       acknowledge(delivery, verdict);
     }
     return new BatchReport(
@@ -769,42 +802,20 @@ public final class FileIngest {
    */
   private void dispositionItem(
       IngestLedger.EntryResult entry, String scope, IntSupplier lineOfTheEntry) {
-    switch (entry.disposition()) {
-      case NEW_VERSION, NOOP_SAME_VERSION_SAME_HASH -> {}
-      case STALE ->
-          dq.write(
-              new Dq(
-                  Dq.Kind.STALE_VERSION,
-                  scope,
-                  lineOfTheEntry.getAsInt(),
-                  "",
-                  "STALE",
-                  "",
-                  LAYER,
-                  WARNING));
-      case CONFLICT_SAME_VERSION_DIFFERENT_HASH ->
-          dq.write(
-              new Dq(
-                  Dq.Kind.VERSION_CONFLICT,
-                  scope,
-                  lineOfTheEntry.getAsInt(),
-                  "",
-                  "CONFLICT_SAME_VERSION",
-                  "",
-                  LAYER,
-                  WARNING));
-      case SOURCE_CONFLICT ->
-          dq.write(
-              new Dq(
-                  Dq.Kind.SOURCE_CONFLICT,
-                  scope,
-                  lineOfTheEntry.getAsInt(),
-                  "",
-                  "SOURCE_CONFLICT",
-                  "",
-                  LAYER,
-                  WARNING));
-    }
+    Optional<ItemKind> item =
+        switch (entry.disposition()) {
+          case NEW_VERSION, NOOP_SAME_VERSION_SAME_HASH -> Optional.empty();
+          case STALE -> Optional.of(new ItemKind(Dq.Kind.STALE_VERSION, "STALE"));
+          case CONFLICT_SAME_VERSION_DIFFERENT_HASH ->
+              Optional.of(new ItemKind(Dq.Kind.VERSION_CONFLICT, "CONFLICT_SAME_VERSION"));
+          case SOURCE_CONFLICT ->
+              Optional.of(new ItemKind(Dq.Kind.SOURCE_CONFLICT, "SOURCE_CONFLICT"));
+        };
+    item.ifPresent(
+        i ->
+            dq.write(
+                new Dq(
+                    i.kind(), scope, lineOfTheEntry.getAsInt(), "", i.code(), "", LAYER, WARNING)));
   }
 
   /** Tells the connector the verdict (the folder of the move), then acknowledges the source. */
@@ -840,14 +851,14 @@ public final class FileIngest {
   /**
    * Puts the {@code BatchAdmitted} object of the batch (control scope, epoch 0, ordinal 1) and
    * records the stored object in the manifest. The key is the batch id, the digest of the bytes.
-   * When the key holds an object, that object stands as the admission of the batch and nothing is
-   * put (the clock instant of the stored object stays), whatever its payload says: it is
-   * write-once, and a payload that differs (the pack or the mapping changed between a crash and the
-   * bytes coming again) is no reason to refuse the batch, because the decide stage stamps the pack
-   * it runs with. The manifest row and the retention claim are completed from the stored object,
-   * never from the newly built bytes. A stored object is put again before its row is completed
-   * ({@code recordStored}), so that a put that stopped between the copies of a store that keeps
-   * several is finished before the batch is committed and the file moved.
+   * When the key holds an object, that object stands as the admission of the batch, whatever its
+   * payload says: it is write-once, and a payload that differs (the pack or the mapping changed
+   * between a crash and the bytes coming again) is no reason to refuse the batch, because the
+   * decide stage stamps the pack it runs with. No new object is put and the stored object keeps its
+   * clock instant; the stored object itself is put again unchanged ({@code recordStored}) so that a
+   * missing copy of a store that keeps several is completed before the batch is committed and the
+   * file moved. The manifest row and the retention claim are completed from the stored object,
+   * never from the newly built bytes.
    */
   private void admit(BatchId batchId) {
     if (flaw == Flaw.SKIP_ADMITTED_PUT) {

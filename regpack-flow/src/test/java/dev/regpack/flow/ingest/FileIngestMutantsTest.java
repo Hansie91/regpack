@@ -34,6 +34,11 @@ class FileIngestMutantsTest {
     FileIngestTest.redeliveryAfterAFixedDefect(root.resolve("i"), Flaw.NONE);
     FileIngestTest.failedStaleItem(new IngestFixture(root.resolve("j"), Flaw.NONE));
     FileIngestTest.failedVersionConflictItem(new IngestFixture(root.resolve("k"), Flaw.NONE));
+    FileIngestTest.lostAnswerThenFailedRedeliveredItem(
+        new IngestFixture(root.resolve("l"), Flaw.NONE));
+    FileIngestTest.failedRedeliveredNote(new IngestFixture(root.resolve("m"), Flaw.NONE));
+    FileIngestTest.failedRedeliveredDispositionItem(
+        new IngestFixture(root.resolve("n"), Flaw.NONE));
   }
 
   @Test
@@ -150,6 +155,35 @@ class FileIngestMutantsTest {
   }
 
   @Test
+  void acknowledgingBeforeTheDispositionItemsAlsoFailsTheFailedRedeliveredNoteAfterALostAnswer() {
+    // the commit is applied, the answer is lost, the re-issue says redelivery, and the source is
+    // acknowledged before the note of the redelivery is written: the write fails, the file is gone
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.lostAnswerThenFailedRedeliveredItem(
+                    new IngestFixture(root, Flaw.ACKNOWLEDGE_BEFORE_DISPOSITIONS)))
+        .isInstanceOf(AssertionError.class);
+  }
+
+  @Test
+  void acknowledgingBeforeTheItemsOfARedeliveryFailsTheFailedRedeliveryItemScenarios() {
+    // the same bytes come again, the source is acknowledged and the file moves, then the note of
+    // the
+    // redelivery cannot be written: the file is gone from the inbox and the gap stays open
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.failedRedeliveredNote(
+                    new IngestFixture(root.resolve("a"), Flaw.ACKNOWLEDGE_BEFORE_REDELIVERY_ITEMS)))
+        .isInstanceOf(AssertionError.class);
+    // and so does the item of the stored result (a stale version) written on the redelivery path
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.failedRedeliveredDispositionItem(
+                    new IngestFixture(root.resolve("b"), Flaw.ACKNOWLEDGE_BEFORE_REDELIVERY_ITEMS)))
+        .isInstanceOf(AssertionError.class);
+  }
+
+  @Test
   void everyFlawIsNamedHere() {
     assertThat(Flaw.values())
         .extracting(Flaw::name)
@@ -162,6 +196,7 @@ class FileIngestMutantsTest {
             "NO_DEFECT_HANDLER",
             "SKIP_REDELIVERY_CHECK",
             "VERDICT_FROM_NEW_PARSE",
-            "ACKNOWLEDGE_BEFORE_DISPOSITIONS");
+            "ACKNOWLEDGE_BEFORE_DISPOSITIONS",
+            "ACKNOWLEDGE_BEFORE_REDELIVERY_ITEMS");
   }
 }

@@ -12,6 +12,7 @@ import dev.regpack.model.BatchId;
 import dev.regpack.model.Checkpoint;
 import dev.regpack.model.IngestKey;
 import dev.regpack.model.Sha256;
+import dev.regpack.ports.Clock;
 import dev.regpack.ports.connector.SourceConnector.Batch;
 import dev.regpack.ports.connector.SourceConnector.BatchPayload;
 import dev.regpack.ports.connector.SourceConnector.BatchStream;
@@ -275,6 +276,139 @@ class FileIngestTest {
   }
 
   @Test
+  void aFailedRedeliveredItemAfterALostAnswerLeavesTheFileInTheInboxAndTheNextRunWritesIt() {
+    lostAnswerThenFailedRedeliveredItem(new IngestFixture(root));
+  }
+
+  /**
+   * The commit is applied and its answer is lost, the in-call re-issue answers with a redelivery,
+   * and the FILE_REDELIVERED item that {@code conclude} writes cannot be written. The call throws
+   * with the file still in the inbox and no acknowledge; the next run takes the redelivery path and
+   * ends with one such item and the file in processed/.
+   */
+  static void lostAnswerThenFailedRedeliveredItem(IngestFixture fx) {
+    byte[] csv = twoRows();
+    fx.drop("a.csv", csv, 2, "20");
+    fx.failAfterApplying = true;
+    EvidenceUnavailableException outage = new EvidenceUnavailableException("outage");
+    fx.failNextPut = outage;
+    fx.failNextPutPrefix = "dq/" + hexOfName("a.csv") + "/FILE_REDELIVERED";
+
+    assertThatThrownBy(fx::run).isSameAs(outage);
+
+    assertThat(fx.commits).hasSize(2);
+    assertThat(fx.ledgerStore.ingestResult(idOf(csv))).isPresent();
+    assertThat(fx.log).doesNotContain("acknowledge", "moved");
+    assertThat(fx.names(fx.inbox.inbox)).containsExactly("a.csv", "a.csv.done");
+    assertThat(fx.names(fx.inbox.processed)).isEmpty();
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).isEmpty();
+
+    BatchReport again = only(fx.run());
+
+    assertThat(again.redelivery()).isTrue();
+    assertThat(fx.commits).as("the next run commits nothing").hasSize(2);
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).hasSize(1);
+    assertThat(fx.keys("dq/" + hexOfName("a.csv") + "/FILE_REDELIVERED")).hasSize(1);
+    assertThat(fx.names(fx.inbox.inbox)).isEmpty();
+    assertThat(fx.names(fx.inbox.processed)).containsExactly("a.csv", "a.csv.done");
+  }
+
+  // ------------------------------------------------------------------ a stream that fails
+
+  /** A stream whose reads fail or whose delegate is real, and whose close fails; counts closes. */
+  private static final class BrokenStream implements BatchStream {
+    private final BatchStream delegate;
+    private final RuntimeException onNext;
+    private final RuntimeException onClose;
+    int closes;
+
+    BrokenStream(BatchStream delegate, RuntimeException onNext, RuntimeException onClose) {
+      this.delegate = delegate;
+      this.onNext = onNext;
+      this.onClose = onClose;
+    }
+
+    @Override
+    public List<Batch> next(int credits) {
+      if (onNext != null) {
+        throw onNext;
+      }
+      return delegate.next(credits);
+    }
+
+    @Override
+    public void acknowledge(Checkpoint checkpoint) {
+      delegate.acknowledge(checkpoint);
+    }
+
+    @Override
+    public boolean exhausted() {
+      return delegate != null && delegate.exhausted();
+    }
+
+    @Override
+    public void close() {
+      closes++;
+      if (delegate != null) {
+        delegate.close();
+      }
+      throw onClose;
+    }
+  }
+
+  @Test
+  void aFailedReadThrowsTheOriginalExceptionWithTheFailedCloseSuppressed() {
+    IngestFixture fx = new IngestFixture(root);
+    RuntimeException original = new IllegalStateException("the read failed");
+    RuntimeException closing = new UncheckedIOException(new IOException("the close failed"));
+    BrokenStream stream = new BrokenStream(null, original, closing);
+
+    // the class only: the text of the connector's own closed-stream failure is not pinned here
+    assertThatThrownBy(() -> fx.ingest.ingest(stream, fx.connector, 10)).isSameAs(original);
+
+    assertThat(original.getSuppressed()).containsExactly(closing);
+    assertThat(stream.closes).isEqualTo(1);
+  }
+
+  @Test
+  void aFailureWhileReportingTheWaitingFilesClosesTheStreamAndKeepsTheOriginalException() {
+    IngestFixture fx = new IngestFixture(root);
+    fx.inbox.write("late.csv", twoRows()); // no marker: the file waits, so the clock is asked
+    RuntimeException original = new IllegalStateException("the clock failed");
+    Clock failing =
+        new Clock() {
+          @Override
+          public Instant now() {
+            throw original;
+          }
+
+          @Override
+          public long monotonicNanos() {
+            return 0;
+          }
+        };
+    FileIngest stage =
+        new FileIngest(
+            failing,
+            fx.writer,
+            fx.ledger,
+            fx.mapping,
+            IngestFixture.PACK_DIGEST,
+            IngestFixture.SOURCE,
+            fx.dq,
+            IngestFixture.DEADLINE);
+    RuntimeException closing = new UncheckedIOException(new IOException("the close failed"));
+    ReadRequest request = new ReadRequest(Optional.empty(), new ReadLimits(100, 1_000_000L));
+    BrokenStream stream = new BrokenStream(fx.connector.read(request), null, closing);
+
+    assertThatThrownBy(() -> stage.ingest(stream, fx.connector, 10)).isSameAs(original);
+
+    assertThat(original.getSuppressed()).containsExactly(closing);
+    assertThat(stream.closes).isEqualTo(1);
+    assertThat(fx.names(fx.inbox.inbox)).containsExactly("late.csv");
+  }
+
+  @Test
   void anOutageOfTheEvidenceTierOrTheKeyServicePropagatesAndMovesNothing() {
     List<RuntimeException> failures =
         List.of(new EvidenceUnavailableException("outage"), new KeyUnavailableException());
@@ -357,6 +491,79 @@ class FileIngestTest {
     assertThat(fx.manifest("")).hasSize(manifest);
     assertThat(fx.retention("")).hasSize(retention);
     assertThat(items(fx, Kind.FILE_REDELIVERED)).hasSize(1);
+  }
+
+  @Test
+  void aFailedItemOfARedeliveryLeavesTheFileInTheInboxAndTheNextRunWritesIt() {
+    failedRedeliveredNote(new IngestFixture(root));
+  }
+
+  /**
+   * A processed sample is dropped again and the put of the note of the redelivery fails (a crash of
+   * the process): nothing is acknowledged or moved, the file and its marker stay, and the next run
+   * writes the note and moves the file.
+   */
+  static void failedRedeliveredNote(IngestFixture fx) {
+    fx.dropSample("trades-day1.csv");
+    assertThat(only(fx.run()).verdict()).isEqualTo(Verdict.PROCESSED);
+    int commitsBefore = fx.commits.size();
+    fx.dropSample("trades-day1.csv");
+    int logBefore = fx.log.size();
+    SimulatedCrash crash = new SimulatedCrash("put");
+    fx.failNextPut = crash;
+    fx.failNextPutPrefix = "dq/";
+
+    assertThatThrownBy(fx::run).isSameAs(crash);
+
+    assertThat(fx.log.subList(logBefore, fx.log.size())).doesNotContain("acknowledge", "moved");
+    assertThat(fx.names(fx.inbox.inbox)).containsExactly("trades-day1.csv", "trades-day1.csv.done");
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).isEmpty();
+
+    BatchReport again = only(fx.run());
+
+    assertThat(again.redelivery()).isTrue();
+    assertThat(again.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(fx.commits).hasSize(commitsBefore);
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).hasSize(1);
+    assertThat(fx.names(fx.inbox.inbox)).isEmpty();
+  }
+
+  @Test
+  void aFailedDispositionItemOfARedeliveryLeavesTheFileInTheInboxAndTheNextRunWritesIt() {
+    failedRedeliveredDispositionItem(new IngestFixture(root));
+  }
+
+  /**
+   * A file whose commit was answered STALE is dropped again and the put of the item of the stale
+   * version fails: the item comes before the note and before the acknowledge, so nothing is
+   * acknowledged or moved and the next run finishes.
+   */
+  static void failedRedeliveredDispositionItem(IngestFixture fx) {
+    fx.drop("a.csv", IngestFixture.csv(IngestFixture.row("T-1", 2, "EX-1", "10")), 1, "10");
+    fx.run();
+    byte[] stale = IngestFixture.csv(IngestFixture.row("T-1", 1, "EX-1", "10"));
+    fx.drop("b.csv", stale, 1, "10");
+    fx.run();
+    assertThat(items(fx, Kind.STALE_VERSION)).hasSize(1);
+    int commitsBefore = fx.commits.size();
+    fx.drop("b.csv", stale, 1, "10");
+    int logBefore = fx.log.size();
+    SimulatedCrash crash = new SimulatedCrash("put");
+    fx.failNextPut = crash;
+    fx.failNextPutPrefix = "dq/" + Sha256.of(stale).hex() + "/STALE_VERSION";
+
+    assertThatThrownBy(fx::run).isSameAs(crash);
+
+    assertThat(fx.log.subList(logBefore, fx.log.size())).doesNotContain("acknowledge", "moved");
+    assertThat(fx.names(fx.inbox.inbox)).containsExactly("b.csv", "b.csv.done");
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).isEmpty();
+
+    assertThat(only(fx.run()).redelivery()).isTrue();
+
+    assertThat(fx.commits).hasSize(commitsBefore);
+    assertThat(items(fx, Kind.STALE_VERSION)).hasSize(1);
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).hasSize(1);
+    assertThat(fx.names(fx.inbox.inbox)).isEmpty();
   }
 
   // ------------------------------------------------------------------ the same bytes again
