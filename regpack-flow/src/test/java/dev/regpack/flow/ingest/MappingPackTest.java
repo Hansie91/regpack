@@ -10,6 +10,7 @@ import dev.regpack.model.Sha256;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class MappingPackTest {
@@ -233,6 +234,60 @@ class MappingPackTest {
         .isEqualTo("MAPPING_CONTROL_TOTALS");
     assertThat(refused(with("sum_column: quantity", "sum_column: nowhere")).code())
         .isEqualTo("MAPPING_CONTROL_TOTALS");
+  }
+
+  @Test
+  void aColumnPrintsItsTargetCastAndOptionalButNeverASourceNameAConstantOrAnEnumValue() {
+    MappingPack.Column column =
+        new MappingPack.Column(
+            Optional.of("secret_source_col"),
+            Optional.of("SECRET-CONSTANT"),
+            "firm.lei",
+            List.of("SECRET-ENUM"),
+            MappingPack.Cast.STRING,
+            false);
+    assertThat(column.toString())
+        .doesNotContain("SECRET")
+        .doesNotContain("secret")
+        .isEqualTo("Column[to=firm.lei, cast=STRING, optional=false]");
+  }
+
+  @Test
+  void aSumColumnThatIsAlsoMappedAsTextIsRefusedAtLoadWhateverTheOrder() throws IOException {
+    String quantity = "  - {column: quantity, to: trade.quantity, cast: DECIMAL}\n";
+    String text = "  - {column: quantity, to: attribute.qty_text}\n";
+    assertThat(refused(with(quantity, quantity + text)).code()).isEqualTo("MAPPING_CONTROL_TOTALS");
+    assertThat(refused(with(quantity, text + quantity)).code()).isEqualTo("MAPPING_CONTROL_TOTALS");
+    // every column of that source name with the cast DECIMAL is fine: nothing can then fail a file
+    MappingPack twice =
+        MappingPack.parse(
+            with(
+                "  - {column: price, to: trade.price, cast: DECIMAL}\n",
+                "  - {column: quantity, to: trade.price, cast: DECIMAL}\n"));
+    assertThat(twice.controlTotals().sumColumn()).isEqualTo("quantity");
+  }
+
+  @Test
+  void aConstantWithAPipeForAnEventIdentityTargetIsRefusedAtLoad() throws IOException {
+    assertThat(
+            refused(
+                    with(
+                        "{constant: SYNT00FIRM0000000152, to: firm.lei}",
+                        "{constant: SYNT00|FIRM, to: firm.lei}"))
+                .code())
+        .isEqualTo("MAPPING_CONSTANT");
+    assertThat(
+            refused(with("{column: venue_mic, to: venue.mic}", "{constant: X|Y, to: venue.mic}"))
+                .code())
+        .isEqualTo("MAPPING_CONSTANT");
+    // the rule is for the event identity only: another text target may hold a pipe
+    assertThat(
+            MappingPack.parse(
+                    with(
+                        "  - {column: currency, to: trade.currency}\n",
+                        "  - {constant: E|R, to: trade.currency}\n"))
+                .columns())
+        .isNotEmpty();
   }
 
   @Test

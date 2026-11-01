@@ -11,8 +11,11 @@ import java.util.regex.Pattern;
 /**
  * A data-quality item (plan D-W3): a bad file, batch or record that must not vanish, with the place
  * where it was found and the reason, and never a value of the data (SF8). Every field is checked
- * against a closed alphabet, so a text that could hold a value is refused when the item is built,
- * and a message never echoes the field it refuses.
+ * against a pattern of characters and a length, and a message never echoes the field it refuses.
+ * The patterns bound the characters and the length only: they are not closed vocabularies, and an
+ * identifier, an account key or a record id fits them as well as a code does. What keeps a value
+ * out of an item is the caller: every caller must pass fixed codes, column names taken from the
+ * mapping and rule notes of fixed text, and never a text read from the data.
  *
  * <p>An item is stored as canonical JSON under {@code dq/<scope>/<kind>-<line>-<rule or code>}: the
  * rule id for a {@link Kind#VALIDATION_BLOCKER}, the code for every other kind. There is no

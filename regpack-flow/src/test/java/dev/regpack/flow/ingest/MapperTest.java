@@ -1,6 +1,5 @@
 package dev.regpack.flow.ingest;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.regpack.flow.ingest.Mapper.Mapped;
@@ -19,7 +18,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class MapperTest {
@@ -369,7 +367,30 @@ class MapperTest {
         .doesNotContain("XPAR");
     assertThat(m.record().toString()).doesNotContain("SECRET").doesNotContain("T-001");
     assertThat(quarantined("event", "SECRET-EVENT").toString()).doesNotContain("SECRET");
-    assertThat("ACC-SECRET".getBytes(UTF_8)).isNotEmpty();
-    assertThat(Optional.of(m.record().attributes())).isPresent();
+  }
+
+  @Test
+  void aConversionResultPrintsNoValue() throws IOException {
+    MappingPack pack = MappingPackTest.sample();
+    MappingPack.Column account =
+        pack.columns().stream().filter(c -> c.to().equals("attribute.account")).findFirst().get();
+    Mapper.Conv ok = Mapper.convert(account, "ACC-SECRET");
+    assertThat(ok).isInstanceOf(Mapper.Ok.class);
+    assertThat(ok.toString()).doesNotContain("SECRET").isEqualTo("Ok[]");
+  }
+
+  @Test
+  void aRecordIdOfBlanksQuarantinesKeyText() throws IOException {
+    assertQuarantined("record_id", "   ", "KEY_TEXT");
+    assertQuarantined("record_id", " ".repeat(40), "KEY_TEXT");
+    assertQuarantined("record_id", "", "MISSING");
+  }
+
+  @Test
+  void aLeapSecondIsQuarantinedAndNotFoldedIntoTheNextDay() throws IOException {
+    assertQuarantined("traded_at", "2026-10-30T23:59:60Z", "INSTANT_FORMAT");
+    assertQuarantined("traded_at", "2026-10-30T23:59:60.5Z", "INSTANT_FORMAT");
+    assertThat(mapped("traded_at", "2026-10-30T23:59:59Z").record().execution().tradedAt())
+        .isEqualTo(Instant.parse("2026-10-30T23:59:59Z"));
   }
 }

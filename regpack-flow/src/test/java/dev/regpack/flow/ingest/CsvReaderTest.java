@@ -170,6 +170,26 @@ class CsvReaderTest {
   }
 
   @Test
+  void noRowAndNoTablePrintsAHeaderNameOrACell() {
+    Table table = read("HDR-ALPHA,HDR-BETA\nCELL-ONE,CELL-TWO\nCELL-THREE,CELL-FOUR\n");
+    for (String printed : List.of(table.toString(), table.rows().getFirst().toString())) {
+      assertThat(printed).doesNotContain("HDR").doesNotContain("CELL");
+    }
+    assertThat(table.toString()).isEqualTo("Table[columns=2, rows=2]");
+    assertThat(table.rows().getLast().toString()).isEqualTo("Row[line=3, cells=2]");
+  }
+
+  @Test
+  void aSingleTrailingBlankLineRefusesTheWholeFileAsARaggedRow() {
+    // plan-conformant (Convention 7): a structural fault refuses the file; pinned so that a later
+    // change to accept one trailing empty line is a deliberate decision
+    CsvException e = refused("a,b\n1,2\n\n");
+    assertThat(e.code()).isEqualTo("RAGGED_ROW");
+    assertThat(e.line()).isEqualTo(3);
+    assertThat(e.column()).isEqualTo(1);
+  }
+
+  @Test
   void noMessageHoldsACellValue() {
     String secret = "SECRET-CELL-VALUE";
     List<byte[]> bad =

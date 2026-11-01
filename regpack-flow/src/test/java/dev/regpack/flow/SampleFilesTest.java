@@ -64,6 +64,8 @@ class SampleFilesTest {
   private static final List<String> SEED_FILES =
       List.of("static-data.csv", "lei-status.csv", "mic.csv", "isin-mic.csv");
 
+  private static final String MAPPING = "mapping-csv-trades-v1.yaml";
+
   private static final String DAY3 = "trades-day3-badtotals.csv";
   private static final String DAY4 = "trades-day4-broken.csv";
   private static final String DAY5 = "trades-day5-notsynth.csv";
@@ -340,6 +342,30 @@ class SampleFilesTest {
       }
     }
     assertThat(shaped).as("the scan sees the synthetic identifiers").isGreaterThan(40);
+
+    // Convention 5 reaches the mapping, the demo pack and the test resources of this module too
+    int scanned = 0;
+    assertThat(unknownIdentifiers(text(MAPPING))).as(MAPPING).isEmpty();
+    scanned++;
+    Path root = Path.of(System.getProperty("regpack.repo.root"));
+    for (Path dir :
+        List.of(
+            root.resolve("packs/demo.tr.s1"), root.resolve("regpack-flow/src/test/resources"))) {
+      List<Path> files;
+      try (Stream<Path> walk = Files.walk(dir)) {
+        files = walk.filter(Files::isRegularFile).sorted().toList();
+      }
+      assertThat(files).as("the files under " + dir.getFileName()).isNotEmpty();
+      for (Path file : files) {
+        assertThat(unknownIdentifiers(Files.readString(file, UTF_8)))
+            .as(root.relativize(file).toString())
+            .isEmpty();
+        scanned++;
+      }
+    }
+    assertThat(scanned)
+        .as("the mapping, the 24 pack files and the test resources")
+        .isGreaterThan(25);
 
     // the scan can fail: the published examples (unit tests only) and a one-character change
     assertThat(unknownIdentifiers("a,US0378331005,b")).containsExactly("US0378331005");

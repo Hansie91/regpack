@@ -36,6 +36,12 @@ public final class CsvReader {
     public Row {
       cells = List.copyOf(cells);
     }
+
+    /** The line and the number of cells, never a cell (SF8). */
+    @Override
+    public String toString() {
+      return "Row[line=" + line + ", cells=" + cells.size() + "]";
+    }
   }
 
   /**
@@ -48,6 +54,12 @@ public final class CsvReader {
     public Table {
       header = List.copyOf(header);
       rows = List.copyOf(rows);
+    }
+
+    /** The number of columns and rows, never a header name or a cell (SF8). */
+    @Override
+    public String toString() {
+      return "Table[columns=" + header.size() + ", rows=" + rows.size() + "]";
     }
   }
 

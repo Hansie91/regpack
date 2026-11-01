@@ -40,8 +40,9 @@ import java.util.regex.Pattern;
  *   <li>{@code event_identity}: the tuple {@code [firm.lei, venue.mic, venue.executionId]}, the one
  *       the model hard-wires; any other is refused.
  *   <li>{@code control_totals}: {@code records_key} (the key of the marker that declares the number
- *       of rows), {@code sum_column} (a column with the cast {@code DECIMAL}) and {@code sum_key}
- *       (the key of the marker that declares the sum of that column).
+ *       of rows), {@code sum_column} (a source column that is mapped, and every time it is mapped
+ *       with the cast {@code DECIMAL}) and {@code sum_key} (the key of the marker that declares the
+ *       sum of that column).
  *   <li>{@code expected_population}: {@code none}.
  *   <li>{@code absence}: {@code {empty_cell: absent}}: an empty cell is an absent optional field
  *       and a missing required one.
@@ -115,6 +116,12 @@ public final class MappingPack {
       Objects.requireNonNull(to, "to");
       allowed = List.copyOf(allowed);
       Objects.requireNonNull(cast, "cast");
+    }
+
+    /** The target, the cast and the flag only: no source name, constant or allowed value. */
+    @Override
+    public String toString() {
+      return "Column[to=" + to + ", cast=" + cast + ", optional=" + optional + "]";
     }
   }
 
@@ -318,17 +325,16 @@ public final class MappingPack {
               name(totalsNode, "sum_key"));
       List<Column> columns = columns(top.entries().get("columns"));
       checkTargets(columns, top.entries().get("columns").line());
-      boolean sumOk =
-          columns.stream()
-              .anyMatch(
-                  c ->
-                      c.column().equals(Optional.of(totals.sumColumn()))
-                          && c.cast() == Cast.DECIMAL);
-      if (!sumOk) {
+      // every mapping of the sum column must be a DECIMAL: the control total and the mapper both
+      // read its cells as numbers, and a second mapping of the same cells as text would make
+      // every file fail
+      List<Column> sumSources =
+          columns.stream().filter(c -> c.column().equals(Optional.of(totals.sumColumn()))).toList();
+      if (sumSources.isEmpty() || !sumSources.stream().allMatch(c -> c.cast() == Cast.DECIMAL)) {
         throw refused(
             "MAPPING_CONTROL_TOTALS",
             totalsNode.line(),
-            "the sum column must be a mapped column with the cast DECIMAL");
+            "every mapping of the sum column must have the cast DECIMAL");
       }
       return new MappingPack(id, recordId, version, totals, columns, Json.canonical(tree(root)));
     }

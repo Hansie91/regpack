@@ -71,7 +71,13 @@ public final class Mapper {
   /** The conversion of one cell (internal). */
   sealed interface Conv permits Ok, Bad {}
 
-  record Ok(Object value) implements Conv {}
+  record Ok(Object value) implements Conv {
+    /** No value (SF8). */
+    @Override
+    public String toString() {
+      return "Ok[]";
+    }
+  }
 
   record Bad(String code) implements Conv {}
 
@@ -149,11 +155,6 @@ public final class Mapper {
         return new Quarantined(line, name, bad.code());
       }
       Object value = ((Ok) conv).value();
-      if (value instanceof String s
-          && MappingPack.EVENT_IDENTITY.contains(column.to())
-          && s.indexOf('|') >= 0) {
-        return new Quarantined(line, name, "KEY_TEXT");
-      }
       if (column.to().startsWith("attribute.")) {
         attributes.put(column.to().substring("attribute.".length()), (String) value);
       } else {
@@ -238,6 +239,11 @@ public final class Mapper {
     try {
       KeyText.require("cell", text);
     } catch (IllegalArgumentException e) {
+      return new Bad("KEY_TEXT");
+    }
+    // the separator of the event identity is not a character of a part of it; the mapping reader
+    // converts its constants with this method too, so a constant is refused when it is read
+    if (MappingPack.EVENT_IDENTITY.contains(column.to()) && text.indexOf('|') >= 0) {
       return new Bad("KEY_TEXT");
     }
     return new Ok(text);
