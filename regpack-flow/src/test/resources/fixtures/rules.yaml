@@ -1,0 +1,17 @@
+# DEMO validation rules: every limit and list is a planner value, not a regulator figure.
+rules:
+  - {id: V01, layer: L1, severity: BLOCKER, disposition: QUARANTINE, check: DECIMAL_RANGE, args: {fields: [trade.quantity], min_exclusive: 0, max_integer_digits: 12, max_fraction_digits: 4}, regulator_id: null}
+  - {id: V02, layer: L1, severity: BLOCKER, disposition: QUARANTINE, check: DECIMAL_RANGE, args: {fields: [trade.price], min_exclusive: 0, max_integer_digits: 12, max_fraction_digits: 6}, regulator_id: null}
+  - {id: V03, layer: L1, severity: BLOCKER, disposition: QUARANTINE, check: CURRENCY_SHAPE, args: {fields: [trade.currency]}, regulator_id: null}
+  - {id: V04, layer: L2, severity: BLOCKER, disposition: QUARANTINE, check: LEI, args: {fields: [firm.lei]}, regulator_id: null}
+  - {id: V05, layer: L2, severity: BLOCKER, disposition: QUARANTINE, check: LEI, args: {fields: [client.lei, trade.counterparty]}, regulator_id: null}
+  - {id: V06, layer: L2, severity: BLOCKER, disposition: QUARANTINE, check: ISIN, args: {fields: [instrument.isin]}, regulator_id: null}
+  - {id: V07, layer: L2, severity: BLOCKER, disposition: QUARANTINE, check: MIC_SHAPE, args: {fields: [venue.mic]}, regulator_id: null}
+  - {id: V08, layer: L2, severity: BLOCKER, disposition: QUARANTINE, check: CURRENCY_NOT_IN, args: {fields: [trade.currency], values: [XAU, XDR, XXX]}, regulator_id: null}
+  - {id: V09, layer: L3, severity: BLOCKER, disposition: QUARANTINE, check: REF_STATUS, args: {dataset: lei-status, fields: [report.executing_lei], attribute: status, allowed: [ACTIVE]}, regulator_id: null}
+  - {id: V10, layer: L3, severity: BLOCKER, disposition: QUARANTINE, check: REF_STATUS, args: {dataset: lei-status, fields: [client.lei, trade.counterparty], attribute: status, allowed: [ACTIVE], warn_values: [LAPSED], warn_code: LEI_LAPSED}, regulator_id: null}
+  - {id: V11, layer: L3, severity: WARNING, disposition: PASS, check: REF_LISTED, args: {dataset: isin-mic, fields: [instrument.isin, venue.mic]}, regulator_id: null}
+  - {id: V12, layer: L3, severity: BLOCKER, disposition: QUARANTINE, check: REF_KNOWN, args: {dataset: mic, fields: [venue.mic]}, regulator_id: null}
+  - {id: V13, layer: L4, severity: BLOCKER, disposition: QUARANTINE, check: TIME_NOT_AFTER_RECEIPT, args: {fields: [event.tradedAt]}, regulator_id: null}
+  - {id: V14, layer: L4, severity: BLOCKER, disposition: QUARANTINE, check: TIME_NOT_OLDER, args: {fields: [event.tradedAt], years: 3}, regulator_id: null}
+  - {id: V15, layer: L5, severity: BLOCKER, disposition: QUARANTINE, check: CHAIN_FIT, args: {new_action: NEWT, cancel_action: CANC}, regulator_id: null}

@@ -448,6 +448,29 @@ An enrichment plan (`enrich/plan.yaml`) is read by `EnrichmentPlan.parse` in `re
 | `ENRICH_PLAN_STALENESS_INVALID` | `max_staleness` is not a positive ISO-8601 duration of days, hours, minutes and seconds |
 | `ENRICH_PLAN_BAD_CHARACTER` | a plan cell with a character the pack text policy refuses (a line feed included) |
 
+### 6.14 Validation rules
+
+A validation rules file (`validate/rules.yaml`, listed under `validate` of a report) is read by `ValidationRules.parse` in `regpack-pack` (task T9 of the W1a plan, spec 8.1). The file is `rules`, a list of entries `{id, layer, severity, disposition, check, args, regulator_id}`, in the order in which they run. The `layer` is `L1` to `L5`, the `severity` is `BLOCKER`, `WARNING` or `INFO`, the `disposition` is `PASS` or `QUARANTINE`, and the `check` is one word of a closed vocabulary (`DECIMAL_RANGE`, `LEI`, `ISIN`, `MIC_SHAPE`, `CURRENCY_SHAPE`, `CURRENCY_NOT_IN`, `REF_STATUS`, `REF_LISTED`, `REF_KNOWN`, `TIME_NOT_AFTER_RECEIPT`, `TIME_NOT_OLDER`, `CHAIN_FIT`) that the validator in `regpack-flow` implements. A `BLOCKER` rule is `QUARANTINE` and a `WARNING` or `INFO` rule is `PASS`. Each check takes its own arguments, all read by exact name: a field list is `fields` (a canonical path, or `report.` and the name of a derived field), a single value is a name, a plain decimal or a whole number from 0 to 99, and a word list is upper-case words. `regulator_id` is `null` or the short identifier of the regulator's rule that the rule mirrors; a pack of the slice has none. The reader does not know the canonical model or the datasets: the validator refuses a field it cannot bind or read when it is built. The words are read by exact name; none is a problem code.
+
+| code | meaning |
+|---|---|
+| `VALIDATE_SHAPE` | the file, `rules`, a rule entry, `args` or a value has the wrong shape (not a mapping, list or single value) |
+| `VALIDATE_KEY_UNKNOWN` | a key that the file or a rule entry does not know |
+| `VALIDATE_KEY_MISSING` | a required key is missing (`rules`; in an entry `id`, `layer`, `severity`, `disposition`, `check`, `args`, `regulator_id`) |
+| `VALIDATE_RULES_EMPTY` | a file without a rule: a file that validates nothing is refused and not accepted |
+| `VALIDATE_RULE_ID_INVALID` | a rule id is not `[A-Za-z][A-Za-z0-9_.-]{0,63}` |
+| `VALIDATE_RULE_ID_DUPLICATE` | a rule id used twice in a file |
+| `VALIDATE_LAYER_UNKNOWN` | `layer` is none of `L1` to `L5` |
+| `VALIDATE_SEVERITY_UNKNOWN` | `severity` is none of `BLOCKER`, `WARNING`, `INFO` |
+| `VALIDATE_DISPOSITION_UNKNOWN` | `disposition` is neither `PASS` nor `QUARANTINE` |
+| `VALIDATE_DISPOSITION_MISMATCH` | a `BLOCKER` rule that is not `QUARANTINE`, or a `WARNING` or `INFO` rule that is not `PASS` |
+| `VALIDATE_CHECK_UNKNOWN` | `check` is not a word of the closed vocabulary |
+| `VALIDATE_ARGS_UNKNOWN` | an argument that the check does not take |
+| `VALIDATE_ARGS_MISSING` | an argument that the check requires is missing |
+| `VALIDATE_ARGS_INVALID` | an argument of the wrong kind or form (a list that is not a list, an empty or repeated list value, a field name or word of the wrong form, a decimal or whole number out of form), or `warn_values` and `warn_code` not given together |
+| `VALIDATE_REGULATOR_ID_INVALID` | `regulator_id` is neither `null` nor an identifier of `[A-Za-z0-9][A-Za-z0-9_.-]{0,31}` |
+| `VALIDATE_BAD_CHARACTER` | a validation cell with a character the pack text policy refuses (a line feed included) |
+
 ## 7. Hand-offs
 
 - **P3:** the decision schema needs `attributes` (JSON, nullable) and the stored `engine_build` text; the leg type is closed until BRK-12 is decided; `lifecycle.yaml` content is reserved. BRK-04 and BRK-10 are ledger contracts that block the schema freeze: when a pack declares a status model, `state.status` is part of `input_digest` and `decision_context` (P2a reads it only through `Bindings` and adds no field); `attributes{}` is `DecisionBody.attributes`. The `unsigned` stamp of spec 6.5 step 6 is not produced by P2a. Every decision with reason `EXEC_CIRCUIT_OPEN` (flag `circuit=open`) must be enumerable per rule and pack digest, raise a data-quality item (spec 7.3) and be re-evaluated when the circuit closes; until then they are open UNDETERMINED items for I7. **The model as built does NOT supersede such a decision by itself:** nothing in the decision context or in the input digest changes between an `EXEC_CIRCUIT_OPEN` decision and the re-evaluation of the same record after `RuleCircuit.close`, so under the unique key (event_identity, decision_context_id, input_digest) of spec 6.3 the re-evaluation is a `NOOP_REDELIVERY` and the open decision stays current (`PackScopeEngineTest#aReEvaluationAfterCloseHasTheSameContextAndDigestSoTheLedgerTreatsItAsARedelivery` pins this). P3 must add one of two things before it freezes the decision schema: either a circuit epoch (a generation that `close` increments) stamped into the decision context, so that the re-evaluation has a new `decision_context_id`; or a re-evaluation ordinal (or the reason code) in the unique key. It also adds a ledger contract test that a re-evaluation of an `EXEC_CIRCUIT_OPEN` decision is `INSERTED`, not `NOOP_REDELIVERY`. Only a new pack digest changes the context today. They are to be counted and excluded from the determinism sample (no determinism-sample class exists at P2a).
