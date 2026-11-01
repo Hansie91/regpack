@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -972,6 +973,113 @@ class FileSourceConnectorTest {
   }
 
   @Test
+  void aMarkerLeftByAFailedMoveIsRetriedWhenTheNextStreamIsOpenedAndTheFileGetsAFreshSeq()
+      throws IOException {
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    fx.drop("a.csv", csv);
+    RefusingRemover remover = new RefusingRemover();
+    remover.refuse.add("a.csv.done");
+    FileSourceConnector connector = connectorWith(Seams.defaults().withRemover(remover));
+    try (BatchStream stream = connector.read(fromStart())) {
+      stream.acknowledge(stream.next(10).get(0).checkpoint());
+    }
+    // the CSV is moved, its marker is left behind and the failure is listed
+    assertThat(names(fx.inbox)).containsExactly("a.csv.done");
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple("a.csv", Reason.MOVE_FAILED));
+    remover.refuse.clear();
+
+    // the next tick opens a new stream: it delivers nothing and its open retries the marker
+    try (BatchStream next = connector.read(fromStart())) {
+      assertThat(next.next(10)).isEmpty();
+    }
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(names(fx.processed)).containsExactly("a.csv", "a.csv.done");
+    assertThat(connector.waiting()).isEmpty();
+
+    // the entry has left the flight: the same bytes dropped again are a new file, a new number
+    fx.drop("a.csv", csv);
+    assertThat(readAll(connector)).extracting(Batch::seq).containsExactly(2L);
+  }
+
+  @Test
+  void aMarkerWhoseRetryKeepsFailingStaysListedAsMoveFailedAndIsReportedAfterTheDeadline() {
+    IngestFixture ifx = new IngestFixture(root.resolve("ingest"));
+    dropIngestible(ifx, "a.csv");
+    RefusingRemover remover = new RefusingRemover();
+    remover.refuse.add("a.csv.done");
+    FileSourceConnector connector = connectorOver(ifx, Seams.defaults().withRemover(remover));
+    Instant first = ifx.clock.now();
+
+    assertThat(ingestWith(ifx, connector).batches())
+        .extracting(BatchReport::file)
+        .containsExactly("a.csv");
+    assertThat(ifx.names(ifx.inbox.inbox)).containsExactly("a.csv.done");
+    assertThat(pending(ifx)).isEmpty();
+
+    // a later tick: a new stream, the CSV is no longer in the inbox, the retry fails again
+    ifx.clock.advance(IngestFixture.DEADLINE.plusSeconds(1));
+    assertThat(ingestWith(ifx, connector).batches()).isEmpty();
+    assertThat(connector.waiting())
+        .containsExactly(new Waiting("a.csv", first, Reason.MOVE_FAILED));
+    assertThat(pending(ifx))
+        .extracting(Dq::code, Dq::scope)
+        .containsExactly(tuple("MOVE_FAILED", Sha256.ofUtf8("a.csv").hex()));
+
+    remover.refuse.clear();
+    assertThat(ingestWith(ifx, connector).batches()).isEmpty();
+    assertThat(ifx.names(ifx.inbox.inbox)).isEmpty();
+    assertThat(ifx.names(ifx.inbox.processed)).containsExactly("a.csv", "a.csv.done");
+    assertThat(connector.waiting()).isEmpty();
+  }
+
+  @Test
+  void aMarkerWithNoCsvAndNoFailedMoveStaysSilentAndWhereItIs() throws IOException {
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    // a marker nobody delivered a CSV for
+    fx.write("lone.csv.done", InboxFixture.markerFor("lone.csv", csv, 1).getBytes(UTF_8));
+    // a delivered file whose CSV was taken away by somebody else before any acknowledge
+    fx.drop("a.csv", csv);
+    FileSourceConnector connector = fx.connector();
+    try (BatchStream stream = connector.read(fromStart())) {
+      assertThat(stream.next(10)).extracting(Batch::seq).containsExactly(1L);
+      Files.delete(fx.inbox.resolve("a.csv"));
+    }
+    try (BatchStream next = connector.read(fromStart())) {
+      assertThat(next.next(10)).isEmpty();
+    }
+    assertThat(connector.waiting()).isEmpty();
+    assertThat(names(fx.inbox)).containsExactly("a.csv.done", "lone.csv.done");
+    assertThat(names(fx.processed)).isEmpty();
+  }
+
+  @Test
+  void aFileWhoseCsvIsStillInTheInboxIsNotRetriedByTheOpenOfTheNextStream() throws IOException {
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    fx.drop("a.csv", csv);
+    RefusingRemover remover = new RefusingRemover();
+    remover.refuse.add("a.csv");
+    FileSourceConnector connector = connectorWith(Seams.defaults().withRemover(remover));
+    try (BatchStream stream = connector.read(fromStart())) {
+      stream.acknowledge(stream.next(10).get(0).checkpoint());
+    }
+    assertThat(names(fx.inbox)).containsExactly("a.csv", "a.csv.done");
+    remover.refuse.clear();
+
+    try (BatchStream next = connector.read(fromStart())) {
+      // the open did not move it: the file is delivered again, with its number, and acknowledged
+      assertThat(names(fx.inbox)).containsExactly("a.csv", "a.csv.done");
+      List<Batch> again = next.next(10);
+      assertThat(again).extracting(Batch::seq).containsExactly(1L);
+      next.acknowledge(again.get(0).checkpoint());
+    }
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(names(fx.processed)).containsExactly("a.csv", "a.csv.done");
+    assertThat(connector.waiting()).isEmpty();
+  }
+
+  @Test
   void noFreeNameForAMovedFileFailsThatFileOnlyAndNothingIsOverwritten() throws IOException {
     byte[] taken = "taken".getBytes(UTF_8);
     for (String name : List.of("a.csv", "a.1.csv", "a.2.csv")) {
@@ -1136,7 +1244,8 @@ class FileSourceConnectorTest {
   // ------------------------------------------------------------------ the collision search
 
   private static byte[] variant(int i) {
-    return InboxFixture.oneRow(String.format("T-%04d", i), String.format("EX-%04d", i));
+    return InboxFixture.oneRow(
+        String.format(Locale.ROOT, "T-%04d", i), String.format(Locale.ROOT, "EX-%04d", i));
   }
 
   private static String copyName(String stem, int n) {

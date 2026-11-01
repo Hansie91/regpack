@@ -46,36 +46,45 @@ import java.util.stream.Stream;
  * with other bytes, is a new file with a new number. A checkpoint is the sequence number as 8
  * big-endian bytes.
  *
- * <p>{@code acknowledge} is cumulative and is the only thing that moves a file (SF10): every
- * delivered file of the stream with a number up to the checkpoint goes, the CSV first and its
- * marker second, to the folder of its {@link Verdict} (default {@link Verdict#PROCESSED}). A file
- * is moved only if it still is what was delivered: at acknowledge time the CSV in the inbox must
- * have the size and SHA-256 of the delivered bytes. If a producer has put other bytes under the
- * name since, nothing moves (the CSV and its marker stay in the inbox) and the next read delivers
- * the new file with a new number. A move never overwrites: into a free name by a hard link and a
- * delete of the source (where no link can be made, a copy to a temporary name in the target folder,
- * a rename to the final name that refuses to replace, and a delete of the source); onto a name that
- * holds the same bytes by deleting the source; onto a name that holds other bytes into {@code
- * <stem>.<n><ext>} with the smallest {@code n >= 1} for which the CSV name and the marker name
- * {@code <csv name>.done} are both usable (free, or holding the same bytes), so the pair keeps one
- * number. The search compares a candidate with the delivered digest and only when the sizes are
- * equal, never reads the source again for each candidate, and lists the target folder once. A crash
- * between the steps leaves the source in the inbox, delivers it again, and the retried move finds
- * its own earlier copy.
+ * <p>{@code acknowledge} is cumulative and is what moves a file (SF10; the one other move is the
+ * retry of a marker, below): every delivered file of the stream with a number up to the checkpoint
+ * goes, the CSV first and its marker second, to the folder of its {@link Verdict} (default {@link
+ * Verdict#PROCESSED}). A file is moved only if it still is what was delivered: at acknowledge time
+ * the CSV in the inbox must have the size and SHA-256 of the delivered bytes. If a producer has put
+ * other bytes under the name since, nothing moves (the CSV and its marker stay in the inbox) and
+ * the next read delivers the new file with a new number. A move never overwrites: into a free name
+ * by a hard link and a delete of the source (where no link can be made, a copy to a temporary name
+ * in the target folder, a rename to the final name that refuses to replace, and a delete of the
+ * source); onto a name that holds the same bytes by deleting the source; onto a name that holds
+ * other bytes into {@code <stem>.<n><ext>} with the smallest {@code n >= 1} for which the CSV name
+ * and the marker name {@code <csv name>.done} are both usable (free, or holding the same bytes), so
+ * the pair keeps one number. The search compares a candidate with the delivered digest and only
+ * when the sizes are equal, and never reads the source again for each candidate; it asks the file
+ * system about each name it tries, and {@code place} is the check that decides. A crash between the
+ * steps leaves the source in the inbox, delivers it again, and the retried move finds its own
+ * earlier copy.
  *
  * <p>The check of the bytes and the move are not one atomic step. Before the source is deleted the
- * connector checks that the name still holds the file it linked (a hard link: the same file) and
- * that the linked or copied bytes are the delivered bytes; if not, it removes only its own link or
- * copy and leaves the source in the inbox, to be delivered again with a new number. One window
- * remains, between that last check and the delete: a file that a producer puts under the name
- * between the check and the delete is deleted unread.
+ * connector checks that the name still holds the file it linked (a hard link: the same file) and,
+ * for a CSV, that the linked or copied bytes are the delivered bytes; if not, it removes only its
+ * own link or copy and leaves the source in the inbox, to be delivered again with a new number. Two
+ * windows remain. One is between that last check and the delete: a file that a producer puts under
+ * the name between the check and the delete is deleted unread. The other is a marker's own: a
+ * marker has no delivered digest, so a marker that a producer swaps in during its own copy (the
+ * fallback where no hard link can be made) is deleted unread, and its CSV then waits without a
+ * marker and is reported.
  *
  * <p>A failure of one file never stalls the others (SF9): a CSV or marker that cannot be looked at
  * or read waits as {@link Reason#UNREADABLE} and the next file is read; a move that fails (the
  * source cannot be deleted, no name is free, the target folder is missing) is listed as {@link
  * Reason#MOVE_FAILED}, the file stays in flight and in the inbox, the other files are moved, and
- * the next acknowledge that covers the file retries. Only a failure of the inbox as a whole (it
- * cannot be listed) is an {@link IllegalStateException}.
+ * the next acknowledge that covers the file retries. When the CSV was moved and only its marker is
+ * left, no later acknowledge covers the file (the next tick opens a new stream and the CSV is no
+ * longer listed): the open of a new stream retries that marker, the file stays listed as {@link
+ * Reason#MOVE_FAILED} while the retry fails, and after a retry that succeeds it is no longer in
+ * flight. The retry never touches a file whose CSV is still in the inbox, nor a marker whose file
+ * had no failed move (a marker with no CSV is not a file that waits). Only a failure of the inbox
+ * as a whole (it cannot be listed) is an {@link IllegalStateException}.
  *
  * <p>The directory is the trust boundary: the connector reads regular files only (links are not
  * followed: a link named like a CSV waits as {@link Reason#NOT_REGULAR}, a marker that is a link is
@@ -99,7 +108,10 @@ public final class FileSourceConnector implements SourceConnector {
     NAME_INVALID,
     /** The CSV or its marker could not be looked at or read (a lock, a permission, a fault). */
     UNREADABLE,
-    /** The file was delivered and committed, but moving it failed; the next acknowledge retries. */
+    /**
+     * The file was delivered and committed, but moving it failed; the next acknowledge retries, and
+     * the open of the next stream when only its marker is left.
+     */
     MOVE_FAILED
   }
 
@@ -238,8 +250,8 @@ public final class FileSourceConnector implements SourceConnector {
     final int size;
     Verdict verdict = Verdict.PROCESSED;
 
-    /** When a move of this file first failed, or null; the file is retried by the next move. */
-    Instant moveFailedSince;
+    /** When a move of this file first failed, if it did; the file is retried by a later move. */
+    Optional<Instant> moveFailedSince = Optional.empty();
 
     Entry(String name, Sha256 sha256, int size) {
       this.name = name;
@@ -393,10 +405,9 @@ public final class FileSourceConnector implements SourceConnector {
     synchronized (lock) {
       Map<String, Waiting> all = new TreeMap<>(waiting);
       for (Entry entry : inFlight.values()) {
-        if (entry.moveFailedSince != null) {
-          all.putIfAbsent(
-              entry.name, new Waiting(entry.name, entry.moveFailedSince, Reason.MOVE_FAILED));
-        }
+        entry.moveFailedSince.ifPresent(
+            since ->
+                all.putIfAbsent(entry.name, new Waiting(entry.name, since, Reason.MOVE_FAILED)));
       }
       return List.copyOf(all.values());
     }
@@ -453,14 +464,27 @@ public final class FileSourceConnector implements SourceConnector {
       names.sort(String::compareTo);
       Set<String> listed = new HashSet<>(names);
       waiting.keySet().retainAll(listed);
-      for (Entry entry : inFlight.values()) {
-        if (!listed.contains(entry.name)) {
-          // the CSV has left the inbox (a leftover marker is not a file that waits)
-          entry.moveFailedSince = null;
-        }
-      }
+      retryOrphanMarkers(listed);
     }
     return new FileStream(names, resumeAfter, cap);
+  }
+
+  /**
+   * Retries the move of a delivered file whose CSV has left the inbox after a failed move, so that
+   * its marker is all that is left: no acknowledge of a later stream covers that file, because the
+   * CSV is not listed and so is never delivered again. A file whose CSV is still in the inbox is
+   * left to the next acknowledge, and a file with no failed move is left as it is (a marker with no
+   * CSV is not a file that waits). A file that is settled leaves the flight; one that fails again
+   * stays listed as {@link Reason#MOVE_FAILED} with the instant of its first failure.
+   */
+  private void retryOrphanMarkers(Set<String> listed) {
+    inFlight
+        .values()
+        .removeIf(
+            entry ->
+                !listed.contains(entry.name)
+                    && entry.moveFailedSince.isPresent()
+                    && moveFile(entry));
   }
 
   private long position(Checkpoint checkpoint) {
@@ -554,7 +578,8 @@ public final class FileSourceConnector implements SourceConnector {
             inFlight.remove(pending);
           }
           // a file whose move failed stays in flight: the next acknowledge that covers it
-          // retries (the retried move finds its own earlier copy), and the others go on
+          // retries (the retried move finds its own earlier copy), and the others go on; if only
+          // its marker is left, the open of the next stream retries it (retryOrphanMarkers)
         }
       }
     }
@@ -727,7 +752,8 @@ public final class FileSourceConnector implements SourceConnector {
    *
    * @return true when the file is settled: moved, nothing left to move, or not what was delivered;
    *     false when the move failed (the entry is marked {@link Reason#MOVE_FAILED} and stays in
-   *     flight, so that the next acknowledge that covers it retries)
+   *     flight, so that the next acknowledge that covers it retries, or the open of the next stream
+   *     when only its marker is left)
    */
   private boolean moveFile(Entry entry) {
     Path dir =
@@ -748,7 +774,6 @@ public final class FileSourceConnector implements SourceConnector {
         return true;
       }
       String stem = entry.name.substring(0, entry.name.length() - CSV.length());
-      Names taken = new Names(dir);
       for (int n = 0; n <= seams.maxSuffix(); n++) {
         // one number for the pair: the marker is named after the CSV it ends up as
         String csvName = n == 0 ? entry.name : stem + "." + n + CSV;
@@ -758,23 +783,21 @@ public final class FileSourceConnector implements SourceConnector {
         // the CSV is compared with the digest it was delivered with, and only when the sizes are
         // equal; the source is not read again for each candidate
         boolean fits =
-            (!taken.has(csvName) || holds(csvTarget, entry))
-                && (!hasMarker || !taken.has(markerName) || sameBytes(marker, markerTarget));
+            (!taken(csvTarget) || holds(csvTarget, entry))
+                && (!hasMarker || !taken(markerTarget) || sameBytes(marker, markerTarget));
         if (!fits) {
-          taken.listed();
           continue;
         }
         if (found == Found.SAME) {
-          Placed placed = place(csv, csvTarget, entry);
+          Placed placed = place(csv, csvTarget, Optional.of(entry));
           if (placed == Placed.TAKEN) {
-            taken.listed();
             continue;
           }
           if (placed == Placed.CHANGED) {
             return true; // other bytes are under the name: nothing moved, delivered again later
           }
         }
-        if (hasMarker && place(marker, markerTarget, null) == Placed.TAKEN) {
+        if (hasMarker && place(marker, markerTarget, Optional.empty()) == Placed.TAKEN) {
           // somebody took the marker name since the check: it still never overwrites
           return move(marker, dir) || failed(entry);
         }
@@ -791,41 +814,13 @@ public final class FileSourceConnector implements SourceConnector {
 
   /** Records that the move of this file failed (the first instant is kept) and says so. */
   private boolean failed(Entry entry) {
-    if (entry.moveFailedSince == null) {
-      entry.moveFailedSince = clock.now();
-    }
+    entry.moveFailedSince = Optional.of(entry.moveFailedSince.orElseGet(clock::now));
     return false;
   }
 
-  /**
-   * The names in a target folder: looked up one by one while the names tried are free, and from one
-   * listing once a collision has made the search go on.
-   */
-  private static final class Names {
-    private final Path dir;
-    private Set<String> listing;
-
-    Names(Path dir) {
-      this.dir = dir;
-    }
-
-    boolean has(String name) {
-      if (listing != null) {
-        return listing.contains(name);
-      }
-      return Files.exists(dir.resolve(name), LinkOption.NOFOLLOW_LINKS);
-    }
-
-    /** A candidate was refused: the folder is listed, once, for the names that follow. */
-    void listed() throws IOException {
-      if (listing == null) {
-        Set<String> names = new HashSet<>();
-        try (Stream<Path> entries = Files.list(dir)) {
-          entries.forEach(p -> names.add(p.getFileName().toString()));
-        }
-        listing = names;
-      }
-    }
+  /** A name is in use in a target folder (a link is not followed; {@code place} decides). */
+  private static boolean taken(Path target) {
+    return Files.exists(target, LinkOption.NOFOLLOW_LINKS);
   }
 
   /** The target is a regular file with the bytes that were delivered. */
@@ -851,7 +846,7 @@ public final class FileSourceConnector implements SourceConnector {
     String ext = dot <= 0 ? "" : name.substring(dot);
     for (int n = 0; n <= seams.maxSuffix(); n++) {
       Path target = dir.resolve(n == 0 ? name : stem + "." + n + ext);
-      if (place(source, target, null) != Placed.TAKEN) {
+      if (place(source, target, Optional.empty()) != Placed.TAKEN) {
         return true;
       }
     }
@@ -870,11 +865,14 @@ public final class FileSourceConnector implements SourceConnector {
 
   /**
    * Puts {@code source} under {@code target} and deletes the source. Before the delete it checks
-   * that what was linked or copied is what the source still is and, when {@code delivered} is
-   * given, the bytes that were delivered; otherwise only the link or copy just made is removed and
-   * the source stays where it is.
+   * that what was linked or copied is what the source still is and, for a CSV, the bytes that were
+   * delivered; otherwise only the link or copy just made is removed and the source stays where it
+   * is.
+   *
+   * @param delivered the delivered file whose bytes a CSV must still have; empty for a marker,
+   *     which has no delivered digest
    */
-  private Placed place(Path source, Path target, Entry delivered) throws IOException {
+  private Placed place(Path source, Path target, Optional<Entry> delivered) throws IOException {
     while (true) {
       if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
         if (!sameBytes(source, target)) {
@@ -909,18 +907,19 @@ public final class FileSourceConnector implements SourceConnector {
    * The link or copy just made is the source (a hard link: the same file, which the source still is
    * a regular file of) and, for a delivered CSV, holds the bytes that were delivered.
    */
-  private boolean isWhatWasMoved(Path source, Path target, boolean linked, Entry delivered)
-      throws IOException {
+  private boolean isWhatWasMoved(
+      Path source, Path target, boolean linked, Optional<Entry> delivered) throws IOException {
     if (linked
         && (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)
             || !Files.isSameFile(source, target))) {
       return false;
     }
-    if (delivered == null) {
+    if (delivered.isEmpty()) {
       return true;
     }
-    byte[] bytes = seams.reader().read(target, delivered.size + 1);
-    return bytes.length == delivered.size && Sha256.of(bytes).equals(delivered.sha256);
+    Entry entry = delivered.get();
+    byte[] bytes = seams.reader().read(target, entry.size + 1);
+    return bytes.length == entry.size && Sha256.of(bytes).equals(entry.sha256);
   }
 
   /**
