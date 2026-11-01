@@ -34,13 +34,17 @@ import java.util.stream.Stream;
  * size and SHA-256 the file really has; a file without a valid marker waits and is listed by {@link
  * #waiting()} with the reason (SF9: it is never lost and never read half written). Every file,
  * marker included, is checked with its size before it is opened: a CSV over the cap is never read.
+ * Names are listed whatever the letter case of the extension, and a name whose extension is not
+ * exactly {@code .csv} in lower case (such as {@code TRADES.CSV}) waits as {@link
+ * Reason#NAME_INVALID}, so that it is reported and not ignored.
  *
  * <p>The batch is the whole file (media type {@code text/csv}); its manifest carries the record
  * count and the control totals the marker declares, not what the file holds: the stage after the
  * connector compares the two. The sequence number comes from a counter of this instance when a file
  * is first delivered; it is never reused or reset, a file still in the inbox keeps its number on a
- * new read, and a file dropped again after it was moved is a new file with a new number. A
- * checkpoint is the sequence number as 8 big-endian bytes.
+ * new read while its bytes are the same, and a file dropped again after it was moved, or rewritten
+ * with other bytes, is a new file with a new number. A checkpoint is the sequence number as 8
+ * big-endian bytes.
  *
  * <p>{@code acknowledge} is cumulative and is the only thing that moves a file (SF10): every
  * delivered file of the stream with a number up to the checkpoint goes, the CSV first and its
@@ -48,18 +52,34 @@ import java.util.stream.Stream;
  * is moved only if it still is what was delivered: at acknowledge time the CSV in the inbox must
  * have the size and SHA-256 of the delivered bytes. If a producer has put other bytes under the
  * name since, nothing moves (the CSV and its marker stay in the inbox) and the next read delivers
- * the new file with a new number; unread data is never moved. A move never overwrites: into a free
- * name by a hard link and a delete of the source (where no link can be made, a copy to a temporary
- * name in the target folder, a rename to the final name that refuses to replace, and a delete of
- * the source); onto a name that holds the same bytes by deleting the source; onto a name that holds
- * other bytes into {@code <stem>.<n><ext>} with the smallest {@code n >= 1} for which the CSV name
- * and the marker name {@code <csv name>.done} are both usable (free, or holding the same bytes), so
- * the pair keeps one number. A crash between the steps leaves the source in the inbox, delivers it
- * again, and the retried move finds its own earlier copy. The check of the bytes and the move are
- * not one atomic step: a file written in the instant between them is not detected.
+ * the new file with a new number. A move never overwrites: into a free name by a hard link and a
+ * delete of the source (where no link can be made, a copy to a temporary name in the target folder,
+ * a rename to the final name that refuses to replace, and a delete of the source); onto a name that
+ * holds the same bytes by deleting the source; onto a name that holds other bytes into {@code
+ * <stem>.<n><ext>} with the smallest {@code n >= 1} for which the CSV name and the marker name
+ * {@code <csv name>.done} are both usable (free, or holding the same bytes), so the pair keeps one
+ * number. The search compares a candidate with the delivered digest and only when the sizes are
+ * equal, never reads the source again for each candidate, and lists the target folder once. A crash
+ * between the steps leaves the source in the inbox, delivers it again, and the retried move finds
+ * its own earlier copy.
+ *
+ * <p>The check of the bytes and the move are not one atomic step. Before the source is deleted the
+ * connector checks that the name still holds the file it linked (a hard link: the same file) and
+ * that the linked or copied bytes are the delivered bytes; if not, it removes only its own link or
+ * copy and leaves the source in the inbox, to be delivered again with a new number. One window
+ * remains, between that last check and the delete: a file that a producer puts under the name
+ * between the check and the delete is deleted unread.
+ *
+ * <p>A failure of one file never stalls the others (SF9): a CSV or marker that cannot be looked at
+ * or read waits as {@link Reason#UNREADABLE} and the next file is read; a move that fails (the
+ * source cannot be deleted, no name is free, the target folder is missing) is listed as {@link
+ * Reason#MOVE_FAILED}, the file stays in flight and in the inbox, the other files are moved, and
+ * the next acknowledge that covers the file retries. Only a failure of the inbox as a whole (it
+ * cannot be listed) is an {@link IllegalStateException}.
  *
  * <p>The directory is the trust boundary: the connector reads regular files only (links are not
- * followed) and does not authenticate who wrote them. Failures are {@link IllegalStateException}s
+ * followed: a link named like a CSV waits as {@link Reason#NOT_REGULAR}, a marker that is a link is
+ * invalid) and does not authenticate who wrote them. Failures are {@link IllegalStateException}s
  * with a fixed text: no path and no cause. Thread-safe.
  */
 public final class FileSourceConnector implements SourceConnector {
@@ -76,7 +96,11 @@ public final class FileSourceConnector implements SourceConnector {
     /** The name is a directory, a link or another thing that is not a regular file. */
     NOT_REGULAR,
     /** The name is not one the source accepts (see {@code FileMarker}). */
-    NAME_INVALID
+    NAME_INVALID,
+    /** The CSV or its marker could not be looked at or read (a lock, a permission, a fault). */
+    UNREADABLE,
+    /** The file was delivered and committed, but moving it failed; the next acknowledge retries. */
+    MOVE_FAILED
   }
 
   /**
@@ -106,8 +130,84 @@ public final class FileSourceConnector implements SourceConnector {
     void link(Path link, Path existing) throws IOException;
   }
 
+  /**
+   * Looks at and reads files of the folders without following a link; a seam so that a test can
+   * make one named file fail with an {@link IOException} or count the bytes that are read.
+   */
+  interface Reader {
+    /** The attributes of the entry itself (a link is not followed). */
+    BasicFileAttributes attributes(Path path) throws IOException;
+
+    /** At most {@code limit} bytes of a file, opened without following a link. */
+    byte[] read(Path path, int limit) throws IOException;
+  }
+
+  /** Deletes the source of a move once its bytes are placed; a seam so that a test can refuse. */
+  @FunctionalInterface
+  interface Remover {
+    void delete(Path path) throws IOException;
+  }
+
+  /**
+   * What a test may replace.
+   *
+   * @param lister lists the candidate files of the inbox
+   * @param linker makes the hard link of a move
+   * @param reader looks at and reads files
+   * @param remover deletes a source after its bytes are placed
+   * @param maxSuffix the largest collision number {@code n} tried for a moved file
+   */
+  record Seams(Lister lister, Linker linker, Reader reader, Remover remover, int maxSuffix) {
+    Seams {
+      Objects.requireNonNull(lister, "lister");
+      Objects.requireNonNull(linker, "linker");
+      Objects.requireNonNull(reader, "reader");
+      Objects.requireNonNull(remover, "remover");
+    }
+
+    static Seams defaults() {
+      return new Seams(
+          FileSourceConnector::listCsv, Files::createLink, NATIVE, Files::delete, MAX_SUFFIX);
+    }
+
+    Seams withLister(Lister other) {
+      return new Seams(other, linker, reader, remover, maxSuffix);
+    }
+
+    Seams withLinker(Linker other) {
+      return new Seams(lister, other, reader, remover, maxSuffix);
+    }
+
+    Seams withReader(Reader other) {
+      return new Seams(lister, linker, other, remover, maxSuffix);
+    }
+
+    Seams withRemover(Remover other) {
+      return new Seams(lister, linker, reader, other, maxSuffix);
+    }
+
+    Seams withMaxSuffix(int other) {
+      return new Seams(lister, linker, reader, remover, other);
+    }
+  }
+
   /** The largest cap on the size of a CSV the constructor accepts (production uses 1 MiB). */
   static final long MAX_CAP_BYTES = 16L * 1024 * 1024;
+
+  private static final Reader NATIVE =
+      new Reader() {
+        @Override
+        public BasicFileAttributes attributes(Path path) throws IOException {
+          return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        }
+
+        @Override
+        public byte[] read(Path path, int limit) throws IOException {
+          try (InputStream in = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+            return in.readNBytes(limit);
+          }
+        }
+      };
 
   private static final String MEDIA_TYPE = "text/csv";
   private static final String CSV = ".csv";
@@ -123,8 +223,7 @@ public final class FileSourceConnector implements SourceConnector {
   private final Clock clock;
   private final String stream;
   private final long maxBytes;
-  private final Lister lister;
-  private final Linker linker;
+  private final Seams seams;
 
   private long nextSeq = 1;
   private boolean failureArmed;
@@ -138,6 +237,9 @@ public final class FileSourceConnector implements SourceConnector {
     final Sha256 sha256;
     final int size;
     Verdict verdict = Verdict.PROCESSED;
+
+    /** When a move of this file first failed, or null; the file is retried by the next move. */
+    Instant moveFailedSince;
 
     Entry(String name, Sha256 sha256, int size) {
       this.name = name;
@@ -164,15 +266,7 @@ public final class FileSourceConnector implements SourceConnector {
       Clock clock,
       String stream,
       ReadLimits limits) {
-    this(
-        inbox,
-        processed,
-        rejected,
-        quarantine,
-        clock,
-        stream,
-        limits,
-        FileSourceConnector::listCsv);
+    this(inbox, processed, rejected, quarantine, clock, stream, limits, Seams.defaults());
   }
 
   FileSourceConnector(
@@ -184,7 +278,15 @@ public final class FileSourceConnector implements SourceConnector {
       String stream,
       ReadLimits limits,
       Lister lister) {
-    this(inbox, processed, rejected, quarantine, clock, stream, limits, lister, Files::createLink);
+    this(
+        inbox,
+        processed,
+        rejected,
+        quarantine,
+        clock,
+        stream,
+        limits,
+        Seams.defaults().withLister(lister));
   }
 
   FileSourceConnector(
@@ -197,6 +299,26 @@ public final class FileSourceConnector implements SourceConnector {
       ReadLimits limits,
       Lister lister,
       Linker linker) {
+    this(
+        inbox,
+        processed,
+        rejected,
+        quarantine,
+        clock,
+        stream,
+        limits,
+        Seams.defaults().withLister(lister).withLinker(linker));
+  }
+
+  FileSourceConnector(
+      Path inbox,
+      Path processed,
+      Path rejected,
+      Path quarantine,
+      Clock clock,
+      String stream,
+      ReadLimits limits,
+      Seams seams) {
     this.inbox = Objects.requireNonNull(inbox, "inbox");
     this.processed = Objects.requireNonNull(processed, "processed");
     this.rejected = Objects.requireNonNull(rejected, "rejected");
@@ -211,17 +333,27 @@ public final class FileSourceConnector implements SourceConnector {
     if (maxBytes > MAX_CAP_BYTES) {
       throw new IllegalArgumentException("maxBytesPerBatch is above the ceiling of the source");
     }
-    this.lister = Objects.requireNonNull(lister, "lister");
-    this.linker = Objects.requireNonNull(linker, "linker");
+    this.seams = Objects.requireNonNull(seams, "seams");
   }
 
-  /** Every {@code *.csv} entry of {@code dir}, whatever it is. */
+  /**
+   * Every entry of {@code dir} whose name ends in {@code .csv} in any letter case, whatever it is:
+   * a name such as {@code TRADES.CSV} is listed so that it can wait as {@link Reason#NAME_INVALID}
+   * and be reported, not ignored.
+   */
   static List<Path> listCsv(Path dir) {
     try (Stream<Path> list = Files.list(dir)) {
-      return list.filter(p -> p.getFileName().toString().endsWith(CSV)).toList();
+      return list.filter(p -> hasCsvSuffix(p.getFileName().toString())).toList();
     } catch (IOException e) {
       throw new IllegalStateException("cannot list the inbox");
     }
+  }
+
+  /** True when {@code name} ends in {@code .csv}, in any letter case. */
+  private static boolean hasCsvSuffix(String name) {
+    int length = name.length();
+    return length >= CSV.length()
+        && name.regionMatches(true, length - CSV.length(), CSV, 0, CSV.length());
   }
 
   /** The next {@code next(n)} of any stream throws a {@link RuntimeException}, once. */
@@ -252,10 +384,21 @@ public final class FileSourceConnector implements SourceConnector {
     }
   }
 
-  /** The files that wait, by name, as of the last time the inbox was looked at. */
+  /**
+   * The files that wait, by name, as of the last time the inbox was looked at: those that are no
+   * batch yet, and those that were delivered but whose move failed ({@link Reason#MOVE_FAILED}; the
+   * instant is that of the first failure).
+   */
   public List<Waiting> waiting() {
     synchronized (lock) {
-      return List.copyOf(waiting.values());
+      Map<String, Waiting> all = new TreeMap<>(waiting);
+      for (Entry entry : inFlight.values()) {
+        if (entry.moveFailedSince != null) {
+          all.putIfAbsent(
+              entry.name, new Waiting(entry.name, entry.moveFailedSince, Reason.MOVE_FAILED));
+        }
+      }
+      return List.copyOf(all.values());
     }
   }
 
@@ -301,14 +444,21 @@ public final class FileSourceConnector implements SourceConnector {
         throw new IllegalArgumentException("Checkpoint is beyond the sequence numbers issued");
       }
       names = new ArrayList<>();
-      for (Path path : lister.list(inbox)) {
+      for (Path path : seams.lister().list(inbox)) {
         String name = path.getFileName().toString();
-        if (name.endsWith(CSV)) {
+        if (hasCsvSuffix(name)) {
           names.add(name);
         }
       }
       names.sort(String::compareTo);
-      waiting.keySet().retainAll(new HashSet<>(names));
+      Set<String> listed = new HashSet<>(names);
+      waiting.keySet().retainAll(listed);
+      for (Entry entry : inFlight.values()) {
+        if (!listed.contains(entry.name)) {
+          // the CSV has left the inbox (a leftover marker is not a file that waits)
+          entry.moveFailedSince = null;
+        }
+      }
     }
     return new FileStream(names, resumeAfter, cap);
   }
@@ -400,10 +550,11 @@ public final class FileSourceConnector implements SourceConnector {
               "Cannot acknowledge a seq this stream did not deliver");
         }
         for (Long pending : new ArrayList<>(inFlight.keySet())) {
-          if (pending <= seq && delivered.contains(pending)) {
-            moveFile(inFlight.get(pending));
+          if (pending <= seq && delivered.contains(pending) && moveFile(inFlight.get(pending))) {
             inFlight.remove(pending);
           }
+          // a file whose move failed stays in flight: the next acknowledge that covers it
+          // retries (the retried move finds its own earlier copy), and the others go on
         }
       }
     }
@@ -480,12 +631,13 @@ public final class FileSourceConnector implements SourceConnector {
     Path csv = inbox.resolve(name);
     BasicFileAttributes attributes;
     try {
-      attributes = Files.readAttributes(csv, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+      attributes = seams.reader().attributes(csv);
     } catch (NoSuchFileException e) {
       waiting.remove(name);
       return Optional.empty();
     } catch (IOException e) {
-      throw new IllegalStateException("cannot look at a source file");
+      waits(name, Reason.UNREADABLE);
+      return Optional.empty();
     }
     if (!attributes.isRegularFile()) {
       waits(name, Reason.NOT_REGULAR);
@@ -499,18 +651,18 @@ public final class FileSourceConnector implements SourceConnector {
     Path markerPath = inbox.resolve(name + MARKER);
     byte[] markerBytes;
     try {
-      BasicFileAttributes markerAttributes =
-          Files.readAttributes(markerPath, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+      BasicFileAttributes markerAttributes = seams.reader().attributes(markerPath);
       if (!markerAttributes.isRegularFile() || markerAttributes.size() > FileMarker.MAX_BYTES) {
         waits(name, Reason.MARKER_INVALID);
         return Optional.empty();
       }
-      markerBytes = readBounded(markerPath, FileMarker.MAX_BYTES);
+      markerBytes = seams.reader().read(markerPath, FileMarker.MAX_BYTES);
     } catch (NoSuchFileException e) {
       waits(name, Reason.NO_MARKER);
       return Optional.empty();
     } catch (IOException e) {
-      throw new IllegalStateException("cannot look at a marker");
+      waits(name, Reason.UNREADABLE);
+      return Optional.empty();
     }
     Optional<FileMarker> parsed = FileMarker.parse(markerBytes, name);
     if (parsed.isEmpty()) {
@@ -525,12 +677,13 @@ public final class FileSourceConnector implements SourceConnector {
     byte[] bytes;
     try {
       // size <= cap <= MAX_CAP_BYTES, so the cast cannot overflow
-      bytes = readBounded(csv, (int) size + 1);
+      bytes = seams.reader().read(csv, (int) size + 1);
     } catch (NoSuchFileException e) {
       waiting.remove(name);
       return Optional.empty();
     } catch (IOException e) {
-      throw new IllegalStateException("cannot read a source file");
+      waits(name, Reason.UNREADABLE);
+      return Optional.empty();
     }
     bytesRead += bytes.length;
     if (bytes.length != size || !Sha256.of(bytes).equals(marker.sha256())) {
@@ -539,13 +692,6 @@ public final class FileSourceConnector implements SourceConnector {
     }
     waiting.remove(name);
     return Optional.of(new Loaded(bytes, marker));
-  }
-
-  /** At most {@code limit} bytes of a file, opened without following a link. */
-  private static byte[] readBounded(Path path, int limit) throws IOException {
-    try (InputStream in = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
-      return in.readNBytes(limit);
-    }
   }
 
   /** What is under the name of a delivered file at acknowledge time. */
@@ -566,7 +712,7 @@ public final class FileSourceConnector implements SourceConnector {
       return Found.CHANGED;
     }
     try {
-      byte[] now = readBounded(csv, entry.size + 1);
+      byte[] now = seams.reader().read(csv, entry.size + 1);
       boolean same = now.length == entry.size && Sha256.of(now).equals(entry.sha256);
       return same ? Found.SAME : Found.CHANGED;
     } catch (NoSuchFileException e) {
@@ -578,8 +724,12 @@ public final class FileSourceConnector implements SourceConnector {
    * Moves the delivered file and its marker to the folder of the verdict, or moves nothing when the
    * name holds other bytes than were delivered (the caller drops the entry; the next read delivers
    * the new file).
+   *
+   * @return true when the file is settled: moved, nothing left to move, or not what was delivered;
+   *     false when the move failed (the entry is marked {@link Reason#MOVE_FAILED} and stays in
+   *     flight, so that the next acknowledge that covers it retries)
    */
-  private void moveFile(Entry entry) {
+  private boolean moveFile(Entry entry) {
     Path dir =
         switch (entry.verdict) {
           case PROCESSED -> processed;
@@ -591,93 +741,152 @@ public final class FileSourceConnector implements SourceConnector {
     try {
       Found found = inspect(entry, csv);
       if (found == Found.CHANGED) {
-        return;
+        return true;
       }
       boolean hasMarker = Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS);
       if (found == Found.GONE && !hasMarker) {
-        return;
+        return true;
       }
       String stem = entry.name.substring(0, entry.name.length() - CSV.length());
-      for (int n = 0; n <= MAX_SUFFIX; n++) {
+      Names taken = new Names(dir);
+      for (int n = 0; n <= seams.maxSuffix(); n++) {
         // one number for the pair: the marker is named after the CSV it ends up as
         String csvName = n == 0 ? entry.name : stem + "." + n + CSV;
+        String markerName = csvName + MARKER;
         Path csvTarget = dir.resolve(csvName);
-        Path markerTarget = dir.resolve(csvName + MARKER);
-        boolean csvFits =
-            found == Found.SAME
-                ? usable(csv, csvTarget)
-                : !Files.exists(csvTarget, LinkOption.NOFOLLOW_LINKS) || holds(csvTarget, entry);
-        if (!csvFits || (hasMarker && !usable(marker, markerTarget))) {
+        Path markerTarget = dir.resolve(markerName);
+        // the CSV is compared with the digest it was delivered with, and only when the sizes are
+        // equal; the source is not read again for each candidate
+        boolean fits =
+            (!taken.has(csvName) || holds(csvTarget, entry))
+                && (!hasMarker || !taken.has(markerName) || sameBytes(marker, markerTarget));
+        if (!fits) {
+          taken.listed();
           continue;
         }
-        if (found == Found.SAME && !place(csv, csvTarget)) {
-          continue;
+        if (found == Found.SAME) {
+          Placed placed = place(csv, csvTarget, entry);
+          if (placed == Placed.TAKEN) {
+            taken.listed();
+            continue;
+          }
+          if (placed == Placed.CHANGED) {
+            return true; // other bytes are under the name: nothing moved, delivered again later
+          }
         }
-        if (hasMarker && !place(marker, markerTarget)) {
+        if (hasMarker && place(marker, markerTarget, null) == Placed.TAKEN) {
           // somebody took the marker name since the check: it still never overwrites
-          move(marker, dir);
+          return move(marker, dir) || failed(entry);
         }
-        return;
+        return true;
       }
-      throw new IllegalStateException("No free name for a moved file");
+      return failed(entry); // no free name
     } catch (NoSuchFileException e) {
-      // a file is already gone: nothing is left to move
+      // a file is already gone, nothing is left to move; but a missing folder is a failed move
+      return Files.isDirectory(dir) || failed(entry);
     } catch (IOException e) {
-      throw new IllegalStateException("cannot move a source file");
+      return failed(entry);
     }
   }
 
-  /** The name is free, or holds the same bytes as {@code source} (so a move can delete it). */
-  private static boolean usable(Path source, Path target) throws IOException {
-    return !Files.exists(target, LinkOption.NOFOLLOW_LINKS) || sameBytes(source, target);
+  /** Records that the move of this file failed (the first instant is kept) and says so. */
+  private boolean failed(Entry entry) {
+    if (entry.moveFailedSince == null) {
+      entry.moveFailedSince = clock.now();
+    }
+    return false;
+  }
+
+  /**
+   * The names in a target folder: looked up one by one while the names tried are free, and from one
+   * listing once a collision has made the search go on.
+   */
+  private static final class Names {
+    private final Path dir;
+    private Set<String> listing;
+
+    Names(Path dir) {
+      this.dir = dir;
+    }
+
+    boolean has(String name) {
+      if (listing != null) {
+        return listing.contains(name);
+      }
+      return Files.exists(dir.resolve(name), LinkOption.NOFOLLOW_LINKS);
+    }
+
+    /** A candidate was refused: the folder is listed, once, for the names that follow. */
+    void listed() throws IOException {
+      if (listing == null) {
+        Set<String> names = new HashSet<>();
+        try (Stream<Path> entries = Files.list(dir)) {
+          entries.forEach(p -> names.add(p.getFileName().toString()));
+        }
+        listing = names;
+      }
+    }
   }
 
   /** The target is a regular file with the bytes that were delivered. */
-  private static boolean holds(Path target, Entry entry) throws IOException {
+  private boolean holds(Path target, Entry entry) throws IOException {
     return Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)
         && Files.size(target) == entry.size
-        && Sha256.of(Files.readAllBytes(target)).equals(entry.sha256);
+        && Sha256.of(seams.reader().read(target, entry.size + 1)).equals(entry.sha256);
   }
 
   /**
    * Moves {@code source} into {@code dir} under the smallest free {@code <stem>.<n><ext>} name and
    * overwrites nothing.
+   *
+   * @return false when no name up to the largest collision number is free
    */
-  private void move(Path source, Path dir) {
-    try {
-      if (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) {
-        return;
-      }
-      String name = source.getFileName().toString();
-      int dot = name.lastIndexOf('.');
-      String stem = dot <= 0 ? name : name.substring(0, dot);
-      String ext = dot <= 0 ? "" : name.substring(dot);
-      for (int n = 0; n <= MAX_SUFFIX; n++) {
-        Path target = dir.resolve(n == 0 ? name : stem + "." + n + ext);
-        if (place(source, target)) {
-          return;
-        }
-      }
-      throw new IllegalStateException("No free name for a moved file");
-    } catch (NoSuchFileException e) {
-      // the source is already gone: an earlier acknowledge got as far as the delete
-    } catch (IOException e) {
-      throw new IllegalStateException("cannot move a source file");
+  private boolean move(Path source, Path dir) throws IOException {
+    if (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)) {
+      return true;
     }
+    String name = source.getFileName().toString();
+    int dot = name.lastIndexOf('.');
+    String stem = dot <= 0 ? name : name.substring(0, dot);
+    String ext = dot <= 0 ? "" : name.substring(dot);
+    for (int n = 0; n <= seams.maxSuffix(); n++) {
+      Path target = dir.resolve(n == 0 ? name : stem + "." + n + ext);
+      if (place(source, target, null) != Placed.TAKEN) {
+        return true;
+      }
+    }
+    return false;
   }
 
-  /** True when the source is now gone and the bytes are at {@code target}; false: name is taken. */
-  private boolean place(Path source, Path target) throws IOException {
+  /** What became of an attempt to put a file under a name of the target folder. */
+  private enum Placed {
+    /** The bytes are at the target and the source is gone. */
+    DONE,
+    /** The name holds other bytes: try the next one. */
+    TAKEN,
+    /** The source is no longer what was linked or copied: only our own link or copy was removed. */
+    CHANGED
+  }
+
+  /**
+   * Puts {@code source} under {@code target} and deletes the source. Before the delete it checks
+   * that what was linked or copied is what the source still is and, when {@code delivered} is
+   * given, the bytes that were delivered; otherwise only the link or copy just made is removed and
+   * the source stays where it is.
+   */
+  private Placed place(Path source, Path target, Entry delivered) throws IOException {
     while (true) {
       if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
-        if (sameBytes(source, target)) {
-          Files.delete(source);
-          return true;
+        if (!sameBytes(source, target)) {
+          return Placed.TAKEN;
         }
-        return false;
+        seams.remover().delete(source);
+        return Placed.DONE;
       }
+      boolean linked;
       try {
-        linker.link(target, source);
+        seams.linker().link(target, source);
+        linked = true;
       } catch (FileAlreadyExistsException e) {
         continue; // somebody took the name between the check and the link: look again
       } catch (UnsupportedOperationException | IOException e) {
@@ -685,10 +894,33 @@ public final class FileSourceConnector implements SourceConnector {
         if (!copy(source, target)) {
           continue;
         }
+        linked = false;
       }
-      Files.delete(source);
+      if (!isWhatWasMoved(source, target, linked, delivered)) {
+        Files.deleteIfExists(target);
+        return Placed.CHANGED;
+      }
+      seams.remover().delete(source);
+      return Placed.DONE;
+    }
+  }
+
+  /**
+   * The link or copy just made is the source (a hard link: the same file, which the source still is
+   * a regular file of) and, for a delivered CSV, holds the bytes that were delivered.
+   */
+  private boolean isWhatWasMoved(Path source, Path target, boolean linked, Entry delivered)
+      throws IOException {
+    if (linked
+        && (!Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS)
+            || !Files.isSameFile(source, target))) {
+      return false;
+    }
+    if (delivered == null) {
       return true;
     }
+    byte[] bytes = seams.reader().read(target, delivered.size + 1);
+    return bytes.length == delivered.size && Sha256.of(bytes).equals(delivered.sha256);
   }
 
   /**
@@ -710,10 +942,16 @@ public final class FileSourceConnector implements SourceConnector {
     }
   }
 
-  private static boolean sameBytes(Path a, Path b) throws IOException {
-    if (!Files.isRegularFile(b, LinkOption.NOFOLLOW_LINKS) || Files.size(a) != Files.size(b)) {
+  private boolean sameBytes(Path a, Path b) throws IOException {
+    if (!Files.isRegularFile(b, LinkOption.NOFOLLOW_LINKS)) {
       return false;
     }
-    return Sha256.of(Files.readAllBytes(a)).equals(Sha256.of(Files.readAllBytes(b)));
+    long size = Files.size(a);
+    if (size != Files.size(b) || size >= Integer.MAX_VALUE) {
+      return false;
+    }
+    int limit = (int) size + 1;
+    return Sha256.of(seams.reader().read(a, limit))
+        .equals(Sha256.of(seams.reader().read(b, limit)));
   }
 }

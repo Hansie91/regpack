@@ -2,9 +2,15 @@ package dev.regpack.flow.ingest;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
+import dev.regpack.flow.ingest.FileIngest.IngestReport;
+import dev.regpack.flow.ingest.FileSourceConnector.Reader;
 import dev.regpack.flow.ingest.FileSourceConnector.Reason;
+import dev.regpack.flow.ingest.FileSourceConnector.Remover;
+import dev.regpack.flow.ingest.FileSourceConnector.Seams;
 import dev.regpack.flow.ingest.FileSourceConnector.Waiting;
 import dev.regpack.model.Checkpoint;
 import dev.regpack.model.Sha256;
@@ -16,17 +22,25 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 class FileSourceConnectorTest {
   @TempDir Path root;
@@ -129,7 +143,8 @@ class FileSourceConnectorTest {
     fx.write("other.csv", csv);
     fx.write("other.csv.done", InboxFixture.markerFor("form.csv", csv, 1).getBytes(UTF_8));
     fx.write("huge.csv", csv);
-    fx.write("huge.csv.done", ("{\"pad\":\"" + "x".repeat(5000) + "\"}").getBytes(UTF_8));
+    // a valid marker of 4,097 bytes (blanks after it): its size is the only thing wrong
+    fx.write("huge.csv.done", InboxFixture.paddedMarkerFor("huge.csv", csv, 4097));
     FileSourceConnector connector = fx.connector();
     assertThat(readAll(connector)).isEmpty();
     assertThat(connector.waiting())
@@ -639,5 +654,640 @@ class FileSourceConnectorTest {
     assertThat(connector.check().detail()).doesNotContain(root.toString());
     assertThat(connector.spec().name()).isNotBlank();
     assertThat(connector.discover().streams()).hasSize(1);
+  }
+
+  // ------------------------------------------------------------------ seams and helpers
+
+  private FileSourceConnector connectorWith(Seams seams) {
+    return new FileSourceConnector(
+        fx.inbox,
+        fx.processed,
+        fx.rejected,
+        fx.quarantine,
+        fx.clock,
+        "trades",
+        new ReadLimits(100, 1_048_576L),
+        seams);
+  }
+
+  /** A reader that fails with an IOException for named files while armed, and counts the bytes. */
+  private static final class SpyReader implements Reader {
+    private final Reader real = Seams.defaults().reader();
+    final Set<String> noAttributes = new HashSet<>();
+    final Set<String> noRead = new HashSet<>();
+    long bytes;
+
+    @Override
+    public BasicFileAttributes attributes(Path path) throws IOException {
+      if (noAttributes.contains(path.getFileName().toString())) {
+        throw new IOException("injected");
+      }
+      return real.attributes(path);
+    }
+
+    @Override
+    public byte[] read(Path path, int limit) throws IOException {
+      if (noRead.contains(path.getFileName().toString())) {
+        throw new IOException("injected");
+      }
+      byte[] out = real.read(path, limit);
+      bytes += out.length;
+      return out;
+    }
+
+    void heal() {
+      noAttributes.clear();
+      noRead.clear();
+    }
+  }
+
+  /** A remover that refuses to delete named files while armed. */
+  private static final class RefusingRemover implements Remover {
+    final Set<String> refuse = new HashSet<>();
+
+    @Override
+    public void delete(Path path) throws IOException {
+      if (refuse.contains(path.getFileName().toString())) {
+        throw new IOException("injected");
+      }
+      Files.delete(path);
+    }
+  }
+
+  /** What a producer does to re-drop a file: a temporary name, then a rename over the old name. */
+  private static void replaceByRename(Path file, byte[] bytes) throws IOException {
+    Path temporary = file.resolveSibling(file.getFileName() + ".swap");
+    Files.write(temporary, bytes);
+    Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
+  }
+
+  private static void symlinkOrSkip(Path link, Path target) {
+    boolean created;
+    try {
+      Files.createSymbolicLink(link, target);
+      created = true;
+    } catch (IOException | UnsupportedOperationException | SecurityException e) {
+      created = false;
+    }
+    Assumptions.assumeTrue(created, "a symbolic link cannot be created on this host");
+  }
+
+  private static IngestReport ingestWith(IngestFixture ifx, FileSourceConnector connector) {
+    ReadRequest request = new ReadRequest(Optional.empty(), new ReadLimits(100, 1_000_000L));
+    try (BatchStream stream = connector.read(request)) {
+      return ifx.ingest.ingest(stream, connector, 100);
+    }
+  }
+
+  private static FileSourceConnector connectorOver(IngestFixture ifx, Seams seams) {
+    return new FileSourceConnector(
+        ifx.inbox.inbox,
+        ifx.inbox.processed,
+        ifx.inbox.rejected,
+        ifx.inbox.quarantine,
+        ifx.clock,
+        "trades",
+        new ReadLimits(100, 1_048_576L),
+        seams);
+  }
+
+  private static List<Dq> pending(IngestFixture ifx) {
+    return ifx.dq.list().stream().filter(d -> d.kind() == Dq.Kind.COMPLETION_PENDING).toList();
+  }
+
+  private void dropIngestible(IngestFixture ifx, String name) {
+    String id = name.substring(0, name.length() - ".csv".length());
+    ifx.drop(name, IngestFixture.csv(IngestFixture.row("T-" + id, 1, "EX-" + id, "10")), 1, "10");
+  }
+
+  // ------------------------------------------------------------------ the limits of Convention 7
+
+  @Test
+  void aValidMarkerOfExactly4096BytesIsReadAndOneOf4097BytesWaits() throws IOException {
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    fx.dropWithMarker("fits.csv", csv, InboxFixture.paddedMarkerFor("fits.csv", csv, 4096));
+    fx.dropWithMarker("over.csv", csv, InboxFixture.paddedMarkerFor("over.csv", csv, 4097));
+    assertThat(Files.size(fx.inbox.resolve("fits.csv.done"))).isEqualTo(4096L);
+    assertThat(Files.size(fx.inbox.resolve("over.csv.done"))).isEqualTo(4097L);
+    FileSourceConnector connector = fx.connector();
+    assertThat(readAll(connector))
+        .extracting(Batch::sourceCoordinates)
+        .containsExactly("file:fits.csv");
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple("over.csv", Reason.MARKER_INVALID));
+    assertThat(connector.bytesRead()).isEqualTo(csv.length);
+  }
+
+  @Test
+  void aFileNameOf128CharactersIsReadAndOneOf129WaitsAsNameInvalid() {
+    String longest = "a".repeat(124) + ".csv";
+    String tooLong = "b".repeat(125) + ".csv";
+    assertThat(longest).hasSize(128);
+    assertThat(tooLong).hasSize(129);
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    fx.drop(longest, csv);
+    fx.drop(tooLong, InboxFixture.oneRow("T-2", "EX-2"));
+    FileSourceConnector connector = fx.connector();
+    assertThat(readAll(connector))
+        .extracting(Batch::sourceCoordinates)
+        .containsExactly("file:" + longest);
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple(tooLong, Reason.NAME_INVALID));
+    assertThat(connector.bytesRead()).isEqualTo(csv.length);
+  }
+
+  @Test
+  void anUpperCaseExtensionWaitsAsNameInvalidAndIsReported() {
+    byte[] ok = InboxFixture.oneRow("T-1", "EX-1");
+    fx.drop("ok.csv", ok);
+    fx.drop("TRADES.CSV", InboxFixture.oneRow("T-2", "EX-2"));
+    fx.drop("Mixed.Csv", InboxFixture.oneRow("T-3", "EX-3"));
+    FileSourceConnector connector = fx.connector();
+    assertThat(readAll(connector))
+        .extracting(Batch::sourceCoordinates)
+        .containsExactly("file:ok.csv");
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(
+            tuple("Mixed.Csv", Reason.NAME_INVALID), tuple("TRADES.CSV", Reason.NAME_INVALID));
+    assertThat(connector.bytesRead()).isEqualTo(ok.length);
+
+    // the ingest stage turns the wait into an item once it is past the completion deadline
+    IngestFixture ifx = new IngestFixture(root.resolve("ingest"));
+    dropIngestible(ifx, "TRADES.CSV");
+    assertThat(ifx.run().batches()).isEmpty();
+    assertThat(pending(ifx)).isEmpty();
+    ifx.clock.advance(IngestFixture.DEADLINE.plusSeconds(1));
+    assertThat(ifx.run().batches()).isEmpty();
+    assertThat(pending(ifx))
+        .extracting(Dq::code, Dq::scope)
+        .containsExactly(tuple("NAME_INVALID", Sha256.ofUtf8("TRADES.CSV").hex()));
+    assertThat(ifx.names(ifx.inbox.inbox)).containsExactly("TRADES.CSV", "TRADES.CSV.done");
+  }
+
+  // ------------------------------------------------------------------ a bad file never stalls
+
+  enum Failure {
+    CSV_ATTRIBUTES,
+    MARKER_READ,
+    CSV_READ
+  }
+
+  @ParameterizedTest
+  @EnumSource(Failure.class)
+  void anUnreadableFileWaitsAsUnreadableAndTheFilesAroundItAreStillRead(Failure failure) {
+    byte[] a = InboxFixture.oneRow("T-1", "EX-1");
+    byte[] b = InboxFixture.oneRow("T-2", "EX-2");
+    byte[] c = InboxFixture.oneRow("T-3", "EX-3");
+    fx.drop("a.csv", a);
+    fx.drop("b.csv", b);
+    fx.drop("c.csv", c);
+    SpyReader reader = new SpyReader();
+    switch (failure) {
+      case CSV_ATTRIBUTES -> reader.noAttributes.add("b.csv");
+      case MARKER_READ -> reader.noRead.add("b.csv.done");
+      case CSV_READ -> reader.noRead.add("b.csv");
+    }
+    FileSourceConnector connector = connectorWith(Seams.defaults().withReader(reader));
+
+    List<Batch> batches = readAll(connector);
+
+    assertThat(batches)
+        .extracting(Batch::sourceCoordinates)
+        .containsExactly("file:a.csv", "file:c.csv");
+    assertThat(connector.waiting())
+        .containsExactly(
+            new Waiting("b.csv", Instant.parse("2026-10-31T12:00:00Z"), Reason.UNREADABLE));
+    // a later tick finds the same fault, the same first instant, and still reads the others
+    fx.clock.advance(Duration.ofMinutes(5));
+    assertThat(readAll(connector)).hasSize(2);
+    assertThat(connector.waiting().get(0).firstSeen())
+        .isEqualTo(Instant.parse("2026-10-31T12:00:00Z"));
+    // the fault clears: the file is a batch on the next tick and the wait ends
+    reader.heal();
+    List<Batch> healed = readAll(connector);
+    assertThat(healed)
+        .extracting(Batch::sourceCoordinates)
+        .containsExactly("file:a.csv", "file:b.csv", "file:c.csv");
+    assertThat(healed.get(1).payload().bytes()).isEqualTo(b);
+    assertThat(connector.waiting()).isEmpty();
+  }
+
+  @Test
+  void anUnreadableFileIsReportedAfterTheDeadlineAndTheFilesAroundItAreIngested() {
+    IngestFixture ifx = new IngestFixture(root.resolve("ingest"));
+    for (String name : List.of("a.csv", "b.csv", "c.csv")) {
+      dropIngestible(ifx, name);
+    }
+    SpyReader reader = new SpyReader();
+    reader.noRead.add("b.csv");
+    FileSourceConnector connector = connectorOver(ifx, Seams.defaults().withReader(reader));
+
+    IngestReport report = ingestWith(ifx, connector);
+
+    assertThat(report.batches()).extracting(BatchReport::file).containsExactly("a.csv", "c.csv");
+    assertThat(report.batches()).allMatch(b -> b.ingested() == 1);
+    assertThat(ifx.names(ifx.inbox.inbox)).containsExactly("b.csv", "b.csv.done");
+    assertThat(pending(ifx)).isEmpty();
+    ifx.clock.advance(IngestFixture.DEADLINE.plusSeconds(1));
+    assertThat(ingestWith(ifx, connector).batches()).isEmpty();
+    assertThat(pending(ifx))
+        .extracting(Dq::code, Dq::scope)
+        .containsExactly(tuple("UNREADABLE", Sha256.ofUtf8("b.csv").hex()));
+    reader.heal();
+    assertThat(ingestWith(ifx, connector).batches())
+        .extracting(BatchReport::file)
+        .containsExactly("b.csv");
+    assertThat(ifx.names(ifx.inbox.inbox)).isEmpty();
+  }
+
+  @Test
+  void aSourceThatCannotBeDeletedDoesNotBlockTheNextFileAndIsRetried() throws IOException {
+    byte[] a = InboxFixture.oneRow("T-1", "EX-1");
+    byte[] b = InboxFixture.oneRow("T-2", "EX-2");
+    fx.drop("a.csv", a);
+    fx.drop("b.csv", b);
+    RefusingRemover remover = new RefusingRemover();
+    remover.refuse.add("a.csv");
+    FileSourceConnector connector = connectorWith(Seams.defaults().withRemover(remover));
+    Instant first = fx.clock.now();
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> batches = stream.next(10);
+      assertThatCode(() -> stream.acknowledge(batches.get(1).checkpoint()))
+          .doesNotThrowAnyException();
+    }
+    // b was moved in spite of a; a is still in the inbox and its bytes are also in processed
+    assertThat(names(fx.inbox)).containsExactly("a.csv", "a.csv.done");
+    assertThat(names(fx.processed)).containsExactly("a.csv", "b.csv", "b.csv.done");
+    assertThat(connector.waiting())
+        .containsExactly(new Waiting("a.csv", first, Reason.MOVE_FAILED));
+
+    // still failing on a later tick: the same instant of first failure, nothing thrown
+    fx.clock.advance(Duration.ofMinutes(10));
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> again = stream.next(10);
+      assertThat(again).extracting(Batch::seq).containsExactly(1L);
+      assertThatCode(() -> stream.acknowledge(again.get(0).checkpoint()))
+          .doesNotThrowAnyException();
+    }
+    assertThat(connector.waiting())
+        .containsExactly(new Waiting("a.csv", first, Reason.MOVE_FAILED));
+
+    // the lock is released: the retried move finds its own earlier link and finishes
+    remover.refuse.clear();
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> again = stream.next(10);
+      assertThat(again).extracting(Batch::seq).containsExactly(1L);
+      stream.acknowledge(again.get(0).checkpoint());
+    }
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(names(fx.processed)).containsExactly("a.csv", "a.csv.done", "b.csv", "b.csv.done");
+    assertThat(Files.readAllBytes(fx.processed.resolve("a.csv"))).isEqualTo(a);
+    assertThat(Files.readAllBytes(fx.processed.resolve("b.csv"))).isEqualTo(b);
+    assertThat(connector.waiting()).isEmpty();
+  }
+
+  @Test
+  void aMarkerThatCannotBeDeletedIsRetriedByTheNextAcknowledgeOfTheStream() throws IOException {
+    fx.drop("a.csv", InboxFixture.oneRow("T-1", "EX-1"));
+    RefusingRemover remover = new RefusingRemover();
+    remover.refuse.add("a.csv.done");
+    FileSourceConnector connector = connectorWith(Seams.defaults().withRemover(remover));
+    try (BatchStream stream = connector.read(fromStart())) {
+      Checkpoint checkpoint = stream.next(10).get(0).checkpoint();
+      assertThatCode(() -> stream.acknowledge(checkpoint)).doesNotThrowAnyException();
+      // the CSV is moved, the marker is still in the inbox and the failure is listed
+      assertThat(names(fx.inbox)).containsExactly("a.csv.done");
+      assertThat(connector.waiting())
+          .extracting(Waiting::file, Waiting::reason)
+          .containsExactly(tuple("a.csv", Reason.MOVE_FAILED));
+      remover.refuse.clear();
+      stream.acknowledge(checkpoint);
+    }
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(names(fx.processed)).containsExactly("a.csv", "a.csv.done");
+    assertThat(connector.waiting()).isEmpty();
+  }
+
+  @Test
+  void noFreeNameForAMovedFileFailsThatFileOnlyAndNothingIsOverwritten() throws IOException {
+    byte[] taken = "taken".getBytes(UTF_8);
+    for (String name : List.of("a.csv", "a.1.csv", "a.2.csv")) {
+      Files.write(fx.processed.resolve(name), taken);
+    }
+    fx.drop("a.csv", InboxFixture.oneRow("T-1", "EX-1"));
+    fx.drop("b.csv", InboxFixture.oneRow("T-2", "EX-2"));
+    FileSourceConnector connector = connectorWith(Seams.defaults().withMaxSuffix(2));
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> batches = stream.next(10);
+      assertThatCode(() -> stream.acknowledge(batches.get(1).checkpoint()))
+          .doesNotThrowAnyException();
+    }
+    assertThat(names(fx.inbox)).containsExactly("a.csv", "a.csv.done");
+    assertThat(names(fx.processed))
+        .containsExactly("a.1.csv", "a.2.csv", "a.csv", "b.csv", "b.csv.done");
+    assertThat(Files.readAllBytes(fx.processed.resolve("a.csv"))).isEqualTo(taken);
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple("a.csv", Reason.MOVE_FAILED));
+  }
+
+  @Test
+  void aMissingTargetFolderIsAFailedMoveAndNotAFileThatIsGone() throws IOException {
+    fx.drop("a.csv", InboxFixture.oneRow("T-1", "EX-1"));
+    fx.drop("b.csv", InboxFixture.oneRow("T-2", "EX-2"));
+    FileSourceConnector connector = fx.connector();
+    Files.delete(fx.rejected);
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> batches = stream.next(10);
+      connector.verdict(batches.get(1).seq(), Verdict.REJECTED);
+      assertThatCode(() -> stream.acknowledge(batches.get(1).checkpoint()))
+          .doesNotThrowAnyException();
+    }
+    // a was moved; b is still in the inbox and says why, instead of being taken for gone
+    assertThat(names(fx.processed)).containsExactly("a.csv", "a.csv.done");
+    assertThat(names(fx.inbox)).containsExactly("b.csv", "b.csv.done");
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple("b.csv", Reason.MOVE_FAILED));
+    // the folder is back: the next tick delivers b again and the move goes through
+    Files.createDirectory(fx.rejected);
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> again = stream.next(10);
+      assertThat(again).extracting(Batch::seq).containsExactly(2L);
+      connector.verdict(again.get(0).seq(), Verdict.REJECTED);
+      stream.acknowledge(again.get(0).checkpoint());
+    }
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(names(fx.rejected)).containsExactly("b.csv", "b.csv.done");
+    assertThat(connector.waiting()).isEmpty();
+  }
+
+  @Test
+  void aFailedMoveIsReportedAfterTheDeadlineAndRetriedByTheNextTick() {
+    IngestFixture ifx = new IngestFixture(root.resolve("ingest"));
+    dropIngestible(ifx, "a.csv");
+    dropIngestible(ifx, "b.csv");
+    RefusingRemover remover = new RefusingRemover();
+    remover.refuse.add("a.csv");
+    FileSourceConnector connector = connectorOver(ifx, Seams.defaults().withRemover(remover));
+
+    IngestReport report = ingestWith(ifx, connector);
+
+    assertThat(report.batches()).extracting(BatchReport::file).containsExactly("a.csv", "b.csv");
+    assertThat(ifx.names(ifx.inbox.inbox)).containsExactly("a.csv", "a.csv.done");
+    assertThat(pending(ifx)).isEmpty();
+    ifx.clock.advance(IngestFixture.DEADLINE.plusSeconds(1));
+    assertThatCode(() -> ingestWith(ifx, connector)).doesNotThrowAnyException();
+    assertThat(pending(ifx))
+        .extracting(Dq::code, Dq::scope)
+        .containsExactly(tuple("MOVE_FAILED", Sha256.ofUtf8("a.csv").hex()));
+    remover.refuse.clear();
+    ingestWith(ifx, connector);
+    assertThat(ifx.names(ifx.inbox.inbox)).isEmpty();
+    assertThat(ifx.names(ifx.inbox.processed))
+        .containsExactly("a.csv", "a.csv.done", "b.csv", "b.csv.done");
+  }
+
+  // ------------------------------------------------------------------ the swap during a move
+
+  enum Swap {
+    AFTER_THE_LINK,
+    BEFORE_THE_LINK,
+    BEFORE_THE_COPY
+  }
+
+  @ParameterizedTest
+  @EnumSource(Swap.class)
+  void aFilePutUnderTheNameWhileItIsMovedIsNotDeletedUnreadAndIsReadLater(Swap swap)
+      throws IOException {
+    byte[] r1 = InboxFixture.oneRow("T-1", "EX-1");
+    byte[] r2 = InboxFixture.oneRow("T-2", "EX-2");
+    fx.drop("a.csv", r1);
+    AtomicBoolean once = new AtomicBoolean();
+    FileSourceConnector.Linker linker =
+        (link, existing) -> {
+          boolean csv =
+              existing.getFileName().toString().equals("a.csv") && once.compareAndSet(false, true);
+          if (csv && swap != Swap.AFTER_THE_LINK) {
+            replaceByRename(existing, r2);
+            fx.write("a.csv.done", InboxFixture.markerFor("a.csv", r2, 1).getBytes(UTF_8));
+          }
+          if (swap == Swap.BEFORE_THE_COPY) {
+            throw new UnsupportedOperationException();
+          }
+          Files.createLink(link, existing);
+          if (csv && swap == Swap.AFTER_THE_LINK) {
+            replaceByRename(existing, r2);
+            fx.write("a.csv.done", InboxFixture.markerFor("a.csv", r2, 1).getBytes(UTF_8));
+          }
+        };
+    FileSourceConnector connector = connectorWith(Seams.defaults().withLinker(linker));
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> first = stream.next(10);
+      assertThat(first.get(0).payload().bytes()).isEqualTo(r1);
+      assertThatCode(() -> stream.acknowledge(first.get(0).checkpoint()))
+          .doesNotThrowAnyException();
+    }
+    // the unread replacement is still in the inbox; the link or copy that was made is gone
+    assertThat(names(fx.inbox)).containsExactly("a.csv", "a.csv.done");
+    assertThat(Files.readAllBytes(fx.inbox.resolve("a.csv"))).isEqualTo(r2);
+    assertThat(names(fx.processed)).isEmpty();
+    assertThat(connector.waiting()).isEmpty();
+    // it is delivered as a new file with a new number, and moved when it is acknowledged
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> again = stream.next(10);
+      assertThat(again).extracting(Batch::seq).containsExactly(2L);
+      assertThat(again.get(0).payload().bytes()).isEqualTo(r2);
+      stream.acknowledge(again.get(0).checkpoint());
+    }
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(Files.readAllBytes(fx.processed.resolve("a.csv"))).isEqualTo(r2);
+    assertThat(names(fx.processed)).containsExactly("a.csv", "a.csv.done");
+  }
+
+  @Test
+  void aMarkerReplacedWhileItIsMovedIsNotDeletedUnread() throws IOException {
+    byte[] r1 = InboxFixture.oneRow("T-1", "EX-1");
+    byte[] next =
+        InboxFixture.markerFor("a.csv", InboxFixture.oneRow("T-2", "EX-2"), 1).getBytes(UTF_8);
+    fx.drop("a.csv", r1);
+    AtomicBoolean once = new AtomicBoolean();
+    FileSourceConnector.Linker linker =
+        (link, existing) -> {
+          Files.createLink(link, existing);
+          if (existing.getFileName().toString().equals("a.csv.done")
+              && once.compareAndSet(false, true)) {
+            replaceByRename(existing, next);
+          }
+        };
+    FileSourceConnector connector = connectorWith(Seams.defaults().withLinker(linker));
+    try (BatchStream stream = connector.read(fromStart())) {
+      stream.acknowledge(stream.next(10).get(0).checkpoint());
+    }
+    // the CSV was moved as delivered; the replacement marker was not deleted and is not copied
+    assertThat(names(fx.processed)).containsExactly("a.csv");
+    assertThat(names(fx.inbox)).containsExactly("a.csv.done");
+    assertThat(Files.readAllBytes(fx.inbox.resolve("a.csv.done"))).isEqualTo(next);
+  }
+
+  // ------------------------------------------------------------------ the collision search
+
+  private static byte[] variant(int i) {
+    return InboxFixture.oneRow(String.format("T-%04d", i), String.format("EX-%04d", i));
+  }
+
+  private static String copyName(String stem, int n) {
+    return n == 0 ? stem + ".csv" : stem + "." + n + ".csv";
+  }
+
+  @Test
+  void aCollisionSearchReadsEachSameSizeCandidateOnceAndNeverTheSourceAgain() throws IOException {
+    byte[] mine = variant(9999);
+    for (int i = 0; i < 300; i++) {
+      Files.write(fx.processed.resolve(copyName("a", i)), variant(i));
+    }
+    assertThat(variant(0)).hasSameSizeAs(mine);
+    fx.drop("a.csv", mine);
+    SpyReader reader = new SpyReader();
+    FileSourceConnector connector = connectorWith(Seams.defaults().withReader(reader));
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> batches = stream.next(10);
+      long before = reader.bytes;
+      stream.acknowledge(batches.get(0).checkpoint());
+      // the source once, each of the 300 candidates once, the placed copy once
+      assertThat(reader.bytes - before).isLessThanOrEqualTo(302L * mine.length);
+    }
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(Files.readAllBytes(fx.processed.resolve("a.300.csv"))).isEqualTo(mine);
+    assertThat(fx.exists(fx.processed, "a.300.csv.done")).isTrue();
+    assertThat(Files.readAllBytes(fx.processed.resolve("a.csv"))).isEqualTo(variant(0));
+  }
+
+  @Test
+  void aCandidateOfAnotherSizeIsNeverRead() throws IOException {
+    byte[] mine = variant(9999);
+    byte[] longer = Arrays.copyOf(mine, mine.length + 1);
+    for (int i = 0; i < 10; i++) {
+      Files.write(fx.processed.resolve(copyName("a", i)), longer);
+    }
+    fx.drop("a.csv", mine);
+    SpyReader reader = new SpyReader();
+    FileSourceConnector connector = connectorWith(Seams.defaults().withReader(reader));
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> batches = stream.next(10);
+      long before = reader.bytes;
+      stream.acknowledge(batches.get(0).checkpoint());
+      // the source and the placed copy, and not one of the ten candidates
+      assertThat(reader.bytes - before).isLessThanOrEqualTo(2L * mine.length);
+    }
+    assertThat(Files.readAllBytes(fx.processed.resolve("a.10.csv"))).isEqualTo(mine);
+  }
+
+  @Test
+  void theSearchStopsAtTheFirstCandidateThatHoldsTheSameBytes() throws IOException {
+    byte[] mine = variant(9999);
+    for (int i = 0; i < 50; i++) {
+      Files.write(fx.processed.resolve(copyName("a", i)), i == 1 ? mine : variant(i));
+    }
+    fx.drop("a.csv", mine);
+    SpyReader reader = new SpyReader();
+    FileSourceConnector connector = connectorWith(Seams.defaults().withReader(reader));
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> batches = stream.next(10);
+      long before = reader.bytes;
+      stream.acknowledge(batches.get(0).checkpoint());
+      // the source, two candidates, and the final comparison of the source with the second
+      assertThat(reader.bytes - before).isLessThanOrEqualTo(5L * mine.length);
+    }
+    // the source is gone, nothing new was made for the CSV, the marker follows the CSV's name
+    assertThat(names(fx.inbox)).isEmpty();
+    assertThat(names(fx.processed)).hasSize(51).contains("a.1.csv.done");
+    assertThat(fx.exists(fx.processed, "a.50.csv")).isFalse();
+  }
+
+  // ------------------------------------------------------------------ links are never followed
+
+  @Test
+  void aSymbolicLinkNamedCsvWaitsAsNotRegularAndIsNeverRead() throws IOException {
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    Path outside = Files.createDirectories(root.resolve("outside"));
+    Path target = Files.write(outside.resolve("target.csv"), csv);
+    symlinkOrSkip(fx.inbox.resolve("x.csv"), target);
+    // a marker that is right for the bytes behind the link
+    fx.write("x.csv.done", InboxFixture.markerFor("x.csv", csv, 1).getBytes(UTF_8));
+    FileSourceConnector connector = fx.connector();
+    assertThat(readAll(connector)).isEmpty();
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple("x.csv", Reason.NOT_REGULAR));
+    assertThat(connector.bytesRead()).isZero();
+    assertThat(Files.readAllBytes(target)).isEqualTo(csv);
+  }
+
+  @Test
+  void aSymbolicLinkMarkerIsInvalid() throws IOException {
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    Path outside = Files.createDirectories(root.resolve("outside"));
+    Path real =
+        Files.write(
+            outside.resolve("real.done"), InboxFixture.markerFor("x.csv", csv, 1).getBytes(UTF_8));
+    fx.write("x.csv", csv);
+    symlinkOrSkip(fx.inbox.resolve("x.csv.done"), real);
+    FileSourceConnector connector = fx.connector();
+    assertThat(readAll(connector)).isEmpty();
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple("x.csv", Reason.MARKER_INVALID));
+    assertThat(connector.bytesRead()).isZero();
+  }
+
+  @Test
+  void aCsvSwappedForASymbolicLinkBeforeTheAcknowledgeIsNotMoved() throws IOException {
+    byte[] csv = InboxFixture.oneRow("T-1", "EX-1");
+    fx.drop("a.csv", csv);
+    Path outside = Files.createDirectories(root.resolve("outside"));
+    // the very same bytes: a link that is followed would look like the delivered file
+    Path target = Files.write(outside.resolve("target.csv"), csv);
+    FileSourceConnector connector = fx.connector();
+    try (BatchStream stream = connector.read(fromStart())) {
+      List<Batch> delivered = stream.next(10);
+      Files.delete(fx.inbox.resolve("a.csv"));
+      symlinkOrSkip(fx.inbox.resolve("a.csv"), target);
+      assertThatCode(() -> stream.acknowledge(delivered.get(0).checkpoint()))
+          .doesNotThrowAnyException();
+    }
+    assertThat(Files.isSymbolicLink(fx.inbox.resolve("a.csv"))).isTrue();
+    assertThat(names(fx.inbox)).containsExactly("a.csv", "a.csv.done");
+    assertThat(names(fx.processed)).isEmpty();
+    assertThat(Files.readAllBytes(target)).isEqualTo(csv);
+    assertThat(connector.waiting()).isEmpty();
+    // a new read lists the link as what it is and reads nothing
+    long before = connector.bytesRead();
+    assertThat(readAll(connector)).isEmpty();
+    assertThat(connector.waiting())
+        .extracting(Waiting::file, Waiting::reason)
+        .containsExactly(tuple("a.csv", Reason.NOT_REGULAR));
+    assertThat(connector.bytesRead()).isEqualTo(before);
+  }
+
+  // ------------------------------------------------------------------ the number of a file
+
+  @Test
+  void aFileRewrittenWithOtherBytesBeforeTheNextReadGetsANewSeqWithoutAnAcknowledge() {
+    byte[] v1 = InboxFixture.oneRow("T-1", "EX-1");
+    byte[] v2 = InboxFixture.oneRow("T-2", "EX-2");
+    fx.drop("a.csv", v1);
+    FileSourceConnector connector = fx.connector();
+    assertThat(readAll(connector)).extracting(Batch::seq).containsExactly(1L);
+    // the producer corrects the file; nobody has acknowledged the first delivery
+    fx.drop("a.csv", v2);
+    List<Batch> again = readAll(connector);
+    assertThat(again).extracting(Batch::seq).containsExactly(2L);
+    assertThat(again.get(0).payload().bytes()).isEqualTo(v2);
+    // the same bytes read again keep their number
+    assertThat(readAll(connector)).extracting(Batch::seq).containsExactly(2L);
   }
 }

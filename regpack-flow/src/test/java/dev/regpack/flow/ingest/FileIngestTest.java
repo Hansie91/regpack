@@ -988,6 +988,41 @@ class FileIngestTest {
     assertThat(fx.names(fx.inbox.rejected)).hasSize(4);
   }
 
+  /** The 18 mapped columns followed by {@code extra} columns the mapping does not use. */
+  private static byte[] withExtraColumns(String recordId, String execId, int extra) {
+    String header = InboxFixture.HEADER.substring(0, InboxFixture.HEADER.length() - 1);
+    String row = IngestFixture.row(recordId, 1, execId, "10");
+    row = row.substring(0, row.length() - 1);
+    StringBuilder head = new StringBuilder(header);
+    StringBuilder body = new StringBuilder(row);
+    for (int i = 1; i <= extra; i++) {
+      head.append(",extra").append(i);
+      body.append(",x");
+    }
+    return (head + "\n" + body + "\n").getBytes(UTF_8);
+  }
+
+  @Test
+  void aHeaderOf65ColumnsRefusesTheFileAndOneOf64ColumnsIsRead() {
+    IngestFixture fx = new IngestFixture(root);
+    byte[] sixtyFive = withExtraColumns("T-65", "EX-65", 47);
+    byte[] sixtyFour = withExtraColumns("T-64", "EX-64", 46);
+    fx.drop("cols65.csv", sixtyFive, 1, "10");
+    fx.drop("cols64.csv", sixtyFour, 1, "10");
+
+    IngestReport report = fx.run();
+
+    assertThat(report.batches())
+        .extracting(BatchReport::file, BatchReport::verdict, BatchReport::ingested)
+        .containsExactlyInAnyOrder(
+            tuple("cols65.csv", Verdict.REJECTED, 0), tuple("cols64.csv", Verdict.PROCESSED, 1));
+    assertThat(items(fx, Kind.BATCH_REJECTED))
+        .extracting(Dq::code, Dq::line, Dq::column)
+        .containsExactly(tuple("TOO_MANY_COLUMNS", 1, "65"));
+    assertThat(fx.names(fx.inbox.rejected)).containsExactly("cols65.csv", "cols65.csv.done");
+    assertThat(fx.names(fx.inbox.processed)).containsExactly("cols64.csv", "cols64.csv.done");
+  }
+
   @Test
   void aMarkerWhoseDataClassIsNotExactlySyntheticRejectsTheFile() {
     IngestFixture fx = new IngestFixture(root);

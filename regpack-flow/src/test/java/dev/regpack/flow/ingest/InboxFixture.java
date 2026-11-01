@@ -10,6 +10,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Arrays;
 
 /** Test helper: the four folders of a file source in a temporary directory, and files to drop. */
 final class InboxFixture {
@@ -73,6 +74,26 @@ final class InboxFixture {
         + ",\"sum_quantity\":\""
         + (10 * records)
         + "\"}\n";
+  }
+
+  /**
+   * The marker of {@code name} (one record) followed by blanks up to exactly {@code total} bytes.
+   */
+  static byte[] paddedMarkerFor(String name, byte[] csv, int total) {
+    byte[] marker = markerFor(name, csv, 1).getBytes(UTF_8);
+    if (marker.length > total) {
+      throw new IllegalArgumentException("the marker is longer than the size asked for");
+    }
+    byte[] padded = Arrays.copyOf(marker, total);
+    Arrays.fill(padded, marker.length, total, (byte) ' ');
+    return padded;
+  }
+
+  /** Drops a CSV and the given marker bytes (the marker last). */
+  Path dropWithMarker(String name, byte[] csv, byte[] marker) {
+    Path file = write(name, csv);
+    write(name + ".done", marker);
+    return file;
   }
 
   /** Drops a CSV and its marker (the marker last, as a producer would). */

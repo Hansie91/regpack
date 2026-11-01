@@ -171,10 +171,45 @@ class FileMarkerTest {
     }
     assertThat(FileMarker.parse(new byte[] {'{', (byte) 0xFF, '}'}, "a.csv")).isEmpty();
     assertThat(FileMarker.parse(new byte[0], "a.csv")).isEmpty();
-    // a marker over 4 KiB is no valid marker
-    String big = marker("a.csv", SHA, "").replace("}", ",\"x\":\"" + "y".repeat(5_000) + "\"}");
-    assertThat(parse(big, "a.csv")).isEmpty();
+  }
+
+  /** The valid marker of {@code a.csv} followed by JSON whitespace up to {@code total} bytes. */
+  private static String padded(int total) {
+    String json = marker("a.csv", SHA, "");
+    assertThat(json.getBytes(UTF_8).length).isLessThan(total);
+    return json + " ".repeat(total - json.getBytes(UTF_8).length);
+  }
+
+  @Test
+  void aValidMarkerOfExactly4096BytesIsReadAndOneOf4097BytesIsNot() {
+    // only blanks differ: the size is the one possible reason
+    assertThat(padded(4096).getBytes(UTF_8)).hasSize(4096);
+    assertThat(parse(padded(4096), "a.csv")).isPresent();
+    assertThat(parse(padded(4097), "a.csv")).isEmpty();
+    assertThat(parse(padded(5_000), "a.csv")).isEmpty();
+    assertThat(parse(padded(1_000_000), "a.csv")).isEmpty();
+    assertThat(parse(padded(200), "a.csv")).isPresent();
     assertThat(FileMarker.MAX_BYTES).isEqualTo(4096);
+  }
+
+  @Test
+  void aNameIsValidUpToTheLimitAndOnlyWithTheExactLowerCaseCsvExtension() {
+    String longest = "a".repeat(124) + ".csv";
+    String tooLong = "a".repeat(125) + ".csv";
+    assertThat(longest).hasSize(128);
+    assertThat(tooLong).hasSize(129);
+    assertThat(parse(marker(longest, SHA, ""), longest)).isPresent();
+    assertThat(parse(marker(tooLong, SHA, ""), tooLong)).isEmpty();
+    assertThat(FileMarker.validName(longest)).isTrue();
+    assertThat(FileMarker.validName(tooLong)).isFalse();
+    assertThat(FileMarker.validName("a.csv")).isTrue();
+    for (String name :
+        new String[] {
+          "TRADES.CSV", "Trades.Csv", "trades.cSv", "a.csv.txt", "a.txt", "trades", "csv", ".csv"
+        }) {
+      assertThat(FileMarker.validName(name)).as(name).isFalse();
+      assertThat(parse(marker(name, SHA, ""), name)).as(name).isEmpty();
+    }
   }
 
   @Test

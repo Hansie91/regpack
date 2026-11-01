@@ -50,6 +50,7 @@ public record FileMarker(
   private static final Set<String> KEYS =
       Set.of("file", "size", "sha256", "records", DATA_CLASS, SUM_QUANTITY);
   private static final int MAX_FILE_NAME = 128;
+  private static final String CSV_EXTENSION = ".csv";
   private static final int MAX_DECIMAL_CHARS = 40;
 
   public FileMarker {
@@ -70,9 +71,15 @@ public record FileMarker(
     return Map.copyOf(totals);
   }
 
-  /** True when {@code name} is a file name the source accepts (and a marker may name). */
+  /**
+   * True when {@code name} is a file name the source accepts (and a marker may name): at most 128
+   * characters, ASCII letters, digits, dot, underscore and hyphen (none of the last three first),
+   * no two dots in a row, and the extension exactly {@code .csv} in lower case (a name such as
+   * {@code TRADES.CSV} is a name the source does not accept, so that it is reported as waiting and
+   * not ignored).
+   */
   static boolean validName(String name) {
-    if (name.isEmpty() || name.length() > MAX_FILE_NAME) {
+    if (name.isEmpty() || name.length() > MAX_FILE_NAME || !name.endsWith(CSV_EXTENSION)) {
       return false;
     }
     for (int i = 0; i < name.length(); i++) {
