@@ -62,6 +62,25 @@ class ValidatorMutantsTest {
   }
 
   @Test
+  void countingAnInDoubtReportAsDeadFailsTheLiveAndDeadScenario() {
+    ValidatorTest.everyDeliveryStateIsLiveOrDead(new ValidatorFixture(Flaw.NONE));
+    assertThatThrownBy(
+            () ->
+                ValidatorTest.everyDeliveryStateIsLiveOrDead(
+                    new ValidatorFixture(Flaw.IN_DOUBT_COUNTS_AS_DEAD)))
+        .isInstanceOf(AssertionError.class);
+  }
+
+  @Test
+  void theBoundaryScenariosPassOnTheUnflawedValidatorAndDropTheFlagWithoutIt() {
+    ValidatorTest.snapshotAgeBoundary(new ValidatorFixture(Flaw.NONE));
+    ValidatorTest.v11JudgesTheSnapshotByItsLoadDate(new ValidatorFixture(Flaw.NONE));
+    assertThatThrownBy(
+            () -> ValidatorTest.snapshotAgeBoundary(new ValidatorFixture(Flaw.NO_STALE_FLAG)))
+        .isInstanceOf(AssertionError.class);
+  }
+
+  @Test
   void anchoringLookupsToTheReceiptDateFailsTheTradeDateScenario() {
     assertThatThrownBy(
             () ->

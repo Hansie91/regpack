@@ -276,6 +276,59 @@ class ValidationRulesTest {
         .isEmpty();
   }
 
+  private static List<String> warnCodeCodes(String warnCode) {
+    String status =
+        "dataset: lei-status, fields: [client.lei], attribute: status, allowed: [ACTIVE],"
+            + " warn_values: [LAPSED], warn_code: ";
+    return codes(
+        file(rule("V1", "BLOCKER", "QUARANTINE", "REF_STATUS", "{" + status + warnCode + "}", "")));
+  }
+
+  @Test
+  void aWarnCodeThatAFindingCouldNotCarryIsRefusedWhenThePackIsRead() {
+    // D-02: the reader used to take any name here; Finding then threw at decide time
+    for (String bad :
+        List.of("lei-lapsed", "lei.lapsed", "L", "Lei_Lapsed", "1LAPSED", "_LAPSED")) {
+      assertThat(warnCodeCodes(bad)).as(bad).containsExactly("VALIDATE_ARGS_INVALID");
+    }
+  }
+
+  @Test
+  void theWarnCodeFormEqualsTheFormOfAFindingCode() {
+    // the two patterns are in two modules and must stay equal: every sample is judged alike
+    List<String> samples =
+        List.of(
+            "LEI_LAPSED",
+            "AB",
+            "A1",
+            "A_",
+            "A",
+            "a",
+            "ab",
+            "Ab",
+            "1A",
+            "_A",
+            "A-B",
+            "A.B",
+            "A B",
+            "A".repeat(64),
+            "A".repeat(65),
+            "A".repeat(63) + "9");
+    for (String sample : samples) {
+      boolean readerTakesIt = warnCodeCodes(sample).isEmpty();
+      boolean findingTakesIt;
+      try {
+        new Finding("V1", Layer.L3, Severity.WARNING, sample);
+        findingTakesIt = true;
+      } catch (IllegalArgumentException e) {
+        findingTakesIt = false;
+      }
+      assertThat(readerTakesIt)
+          .as("reader and Finding agree on '" + sample + "'")
+          .isEqualTo(findingTakesIt);
+    }
+  }
+
   @Test
   void theRegulatorIdIsNullOrAShortIdentifier() {
     ProblemSink sink = ProblemSink.forFile();

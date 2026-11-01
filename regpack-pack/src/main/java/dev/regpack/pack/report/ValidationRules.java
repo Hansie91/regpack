@@ -84,6 +84,12 @@ public record ValidationRules(String path, List<Rule> rules) {
     WORDS(true, Pattern.compile("[A-Z][A-Z0-9_]{0,31}")),
     /** One name. */
     NAME(false, Pattern.compile("[A-Za-z][A-Za-z0-9_.-]{0,63}")),
+    /**
+     * One finding code. The validator puts it into a finding, which takes exactly this form; the
+     * pattern must stay equal to the one of {@code dev.regpack.flow.validate.Finding} ({@code
+     * ValidationRulesTest} compares the two on samples).
+     */
+    CODE(false, Pattern.compile("[A-Z][A-Z0-9_]{1,63}")),
     /** One non-negative plain decimal. */
     DECIMAL(false, Pattern.compile("[0-9]{1,18}(\\.[0-9]{1,18})?")),
     /** One whole number from 0 to 99. */
@@ -137,11 +143,12 @@ public record ValidationRules(String path, List<Rule> rules) {
             .and("attribute", ArgKind.NAME)
             .and("allowed", ArgKind.WORDS)
             .and("warn_values", ArgKind.WORDS)
-            .and("warn_code", ArgKind.NAME),
+            .and("warn_code", ArgKind.CODE),
         Set.of("dataset", "fields", "attribute", "allowed")),
     /**
      * A listing at the trade date: the key is the values of all the fields joined by a bar. A miss
-     * is a warning, never a failure.
+     * has the severity of the rule (the demo rule is a WARNING, so a miss only flags the record; a
+     * BLOCKER with the disposition QUARANTINE would quarantine it).
      */
     REF_LISTED(
         args("dataset", ArgKind.NAME).and("fields", ArgKind.FIELDS), Set.of("dataset", "fields")),

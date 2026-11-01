@@ -132,6 +132,82 @@ class ValidatorTest {
     assertPasses(f.run(exec()));
   }
 
+  /** The states a delivery can be in whose report no longer counts for V15 (plan V15, content). */
+  private static final java.util.Set<DeliveryState> DEAD =
+      java.util.EnumSet.of(
+          DeliveryState.REJECTED,
+          DeliveryState.IN_REPAIR,
+          DeliveryState.WITHDRAWN,
+          DeliveryState.WRITTEN_OFF);
+
+  /**
+   * D-03: for every delivery state, a NEWT of a fresh execution in that state. A dead state accepts
+   * a NEW and refuses a CANCEL; every other state, SUPERSEDED and a version that was only committed
+   * (PREPARED) included, refuses a NEW and accepts a CANCEL.
+   */
+  static void everyDeliveryStateIsLiveOrDead(ValidatorFixture f) {
+    for (DeliveryState state : DeliveryState.values()) {
+      String id = "EX-S" + state.ordinal();
+      if (state == DeliveryState.PREPARED) {
+        f.commitVersion(id, "NEWT"); // a committed version has the state PREPARED already
+      } else if (state == DeliveryState.SENDING) {
+        // the ledger lets a delivery into SENDING only through beginSending, under a lease
+        var delivery = f.commitVersion(id, "NEWT");
+        f.setState(delivery, DeliveryState.QUEUED);
+        var granted =
+            (dev.regpack.ports.ledger.LeaseLedger.LeaseResult.Granted)
+                f.ledger.acquire(
+                    ValidatorFixture.ENDPOINT, "validator-test", Duration.ofMinutes(5));
+        var sending =
+            f.ledger.beginSending(
+                delivery,
+                f.ledger.allocateAttemptId(),
+                granted.grant().token(),
+                new dev.regpack.ports.ledger.DeliveryLedger.AttemptIntent(
+                    dev.regpack.model.Sha256.ofUtf8("sealed"), "demo-file.xml"));
+        assertThat(sending.status())
+            .isEqualTo(dev.regpack.ports.ledger.DeliveryLedger.SendingStatus.APPLIED);
+      } else {
+        f.newt(id, state);
+      }
+      if (DEAD.contains(state)) {
+        assertThat(f.run(fresh(id)).pass()).as("a NEW over a NEWT in " + state).isTrue();
+        assertFails(f.run(cancel(id)), "V15:CANCEL_WITHOUT_LIVE_NEWT");
+      } else {
+        assertFails(f.run(fresh(id)), "V15:NEWT_OVER_LIVE_NEWT");
+        assertThat(f.run(cancel(id)).pass()).as("a CANCEL over a NEWT in " + state).isTrue();
+      }
+    }
+  }
+
+  /** D-06: a snapshot exactly as old as its maximum age is not stale; one microsecond more is. */
+  static void snapshotAgeBoundary(ValidatorFixture f) {
+    f.clock.advance(ValidatorFixture.MAX_AGE);
+    assertPasses(f.run(exec()));
+    f.clock.advance(Duration.ofNanos(1_000));
+    ValidationResult r = f.run(exec());
+    assertThat(r.pass()).isTrue();
+    assertThat(r.flags()).containsExactly("SNAPSHOT_STALE");
+  }
+
+  /**
+   * D-06: V11 judges the trade date against the day the snapshot was loaded, not against the day of
+   * receipt. The seeds are loaded on 2026-10-31; the batch is received three days later.
+   */
+  static void v11JudgesTheSnapshotByItsLoadDate(ValidatorFixture f) {
+    f.clock.advance(Duration.ofDays(3));
+    Exec onTheLoadDay = exec();
+    onTheLoadDay.isin = SyntheticIds.ISIN_6;
+    onTheLoadDay.tradedAt = Instant.parse("2026-10-31T09:00:00Z");
+    ValidationResult lag = f.run(onTheLoadDay);
+    assertThat(findings(lag)).containsExactly("V11:REFDATA_LAG_EXPECTED");
+
+    Exec theDayBefore = exec();
+    theDayBefore.isin = SyntheticIds.ISIN_6;
+    ValidationResult unknown = f.run(theDayBefore);
+    assertThat(findings(unknown)).containsExactly("V11:REFDATA_UNKNOWN");
+  }
+
   // -- L1 -------------------------------------------------------------------------------------
 
   @Test
@@ -142,6 +218,22 @@ class ValidatorTest {
     assertPasses(f.run(e));
     e.quantity = new BigDecimal("0.0001");
     assertPasses(f.run(e));
+  }
+
+  @Test
+  void v01RejectsAnExtremeExponentThatWouldWrapTheDigitCount() {
+    // D-09: no mapper output has this scale; a hand-built canonical value does
+    ValidatorFixture f = world();
+    for (int scale : List.of(Integer.MIN_VALUE + 1, Integer.MIN_VALUE, -2_000_000_000, -13)) {
+      Exec e = exec();
+      e.quantity = new BigDecimal(java.math.BigInteger.ONE, scale);
+      ValidationResult r = f.run(e);
+      assertThat(findings(r)).as("scale " + scale).contains("V01:DECIMAL_INTEGER_DIGITS");
+      assertThat(r.pass()).isFalse();
+    }
+    Exec edge = exec();
+    edge.quantity = new BigDecimal(java.math.BigInteger.ONE, -11); // 1E+11: twelve digits
+    assertPasses(f.run(edge));
   }
 
   @Test
@@ -296,6 +388,26 @@ class ValidatorTest {
   }
 
   @Test
+  void v09RejectsAnExecutingLeiWhoseSeedRowHasNoStatus() {
+    // F-7: an empty status cell leaves the attribute out; the check fails closed
+    ValidatorFixture f = world();
+    f.refs.load(
+        new DatasetId("lei-status"),
+        dev.regpack.flow.enrich.RefDataSeed.parse(
+            "key,status,valid_from,valid_to\n"
+                + SyntheticIds.FIRM_LEI
+                + ",,2020-01-01,\n"
+                + SyntheticIds.CCP_LEI
+                + ",ACTIVE,2020-01-01,\n"
+                + SyntheticIds.CLIENT1_LEI
+                + ",ACTIVE,2020-01-01,\n"),
+        ValidatorFixture.MAX_AGE);
+    ValidationResult r = f.run(exec());
+    assertFails(r, "V09:REF_STATUS_NOT_ALLOWED");
+    assertThat(findings(r)).doesNotContain("V09:REF_NOT_FOUND");
+  }
+
+  @Test
   void v09ReadsTheDerivedExecutingLeiNotOnlyTheCanonicalOne() {
     ValidatorFixture f = world();
     ValidationResult r =
@@ -353,6 +465,11 @@ class ValidatorTest {
     assertThat(r.pass()).isTrue();
     assertThat(findings(r)).containsExactly("V11:REFDATA_LAG_EXPECTED");
     assertThat(r.flags()).containsExactly("REFDATA_LAG_EXPECTED");
+  }
+
+  @Test
+  void v11FlagsByTheDayTheSnapshotWasLoadedNotByTheDayOfReceipt() {
+    v11JudgesTheSnapshotByItsLoadDate(world());
   }
 
   @Test
@@ -492,6 +609,11 @@ class ValidatorTest {
   }
 
   @Test
+  void v15SplitsEveryDeliveryStateIntoLiveAndDead() {
+    everyDeliveryStateIsLiveOrDead(world());
+  }
+
+  @Test
   void v15JudgesTheChainOfItsOwnRegimeAndLegOnly() {
     ValidatorFixture f = world();
     f.newt("EX-001", DeliveryState.ACCEPTED_CONFIRMED);
@@ -515,6 +637,11 @@ class ValidatorTest {
   @Test
   void aStaleSnapshotFlagsAndStillValidates() {
     staleSnapshot(world());
+  }
+
+  @Test
+  void aSnapshotExactlyAsOldAsItsMaximumAgeIsNotStaleAndOneMicrosecondMoreIs() {
+    snapshotAgeBoundary(world());
   }
 
   @Test

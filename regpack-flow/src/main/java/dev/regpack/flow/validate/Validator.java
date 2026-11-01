@@ -65,6 +65,14 @@ import java.util.Set;
  * The chain check reads committed state only (the report ledger and the delivery ledger). A dataset
  * that is not loaded is a defect: the call throws {@link IllegalArgumentException} and the record
  * is not taken as valid.
+ *
+ * <p><b>Only the LEIs are a closed world.</b> The lookups of the executing, client and counterparty
+ * LEI (V09, V10) fail a record whose LEI no seed lists, so a real LEI is stopped. An ISIN that is
+ * not listed is only flagged (V11, a WARNING {@code REFDATA_UNKNOWN} or {@code
+ * REFDATA_LAG_EXPECTED}) and the record is still reported; and the MIC seed holds two real MICs
+ * (XPAR and XAMS), so a trade on either passes V12. Nothing here stops real ISINs or a real trade
+ * on those two venues: V11 and V12 are not a real-data stop, and neither is any other rule of this
+ * class.
  */
 public final class Validator {
   /**
@@ -96,7 +104,9 @@ public final class Validator {
     /** A snapshot older than its maximum age raises no flag. */
     NO_STALE_FLAG,
     /** Lookups are anchored at the date of receipt, not at the trade date. */
-    SUBMISSION_ANCHOR
+    SUBMISSION_ANCHOR,
+    /** A report whose delivery is IN_DOUBT or FILE_REJECTED counts as dead (it is live). */
+    IN_DOUBT_COUNTS_AS_DEAD
   }
 
   private static final String DERIVED_PREFIX = "report.";
@@ -361,7 +371,9 @@ public final class Validator {
         // zeros at the end of the fraction are not digits of the value
         BigDecimal plain = number.signum() == 0 ? BigDecimal.ZERO : number.stripTrailingZeros();
         int fraction = Math.max(0, plain.scale());
-        int integer = plain.signum() == 0 ? 0 : Math.max(0, plain.precision() - plain.scale());
+        // in long: precision minus a very negative scale does not fit an int
+        long integer =
+            plain.signum() == 0 ? 0L : Math.max(0L, (long) plain.precision() - plain.scale());
         if (maxInteger.isPresent() && integer > maxInteger.get()) {
           hits.fail("DECIMAL_INTEGER_DIGITS");
         }
@@ -510,7 +522,16 @@ public final class Validator {
     }
   }
 
-  private static boolean isDead(DeliveryState state) {
+  /**
+   * Dead for V15: the delivery is rejected, in repair, withdrawn or written off. Every other state
+   * is live, SUPERSEDED, IN_DOUBT and FILE_REJECTED included: an unresolved delivery of the key
+   * keeps its report in the chain.
+   */
+  private boolean isDead(DeliveryState state) {
+    if (flaw == Flaw.IN_DOUBT_COUNTS_AS_DEAD
+        && (state == DeliveryState.IN_DOUBT || state == DeliveryState.FILE_REJECTED)) {
+      return true;
+    }
     return state == DeliveryState.REJECTED
         || state == DeliveryState.IN_REPAIR
         || state == DeliveryState.WITHDRAWN
