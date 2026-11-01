@@ -430,6 +430,24 @@ A derive table (`derive/report.yaml`, listed under `derive_tables` of a report) 
 | `DERIVE_DOES_NOT_COMPILE` | a `when` or a `value` that does not compile (syntax, undeclared path, over the parse cap, or not one expression) |
 | `DERIVE_OVER_CEILING` | a derive expression with more nodes than `rule_nodes` |
 
+### 6.13 Enrichment plans
+
+An enrichment plan (`enrich/plan.yaml`) is read by `EnrichmentPlan.parse` in `regpack-pack` (task T8 of the W1a plan, spec 7.5). The file is `fields`, a list of entries `{field, needed_by, sources, on_miss}`; a source is `{source, key, max_staleness}` and the sources are in precedence order. Only `needed_by: SCOPE` is built, the miss behaviour of a scope field is `UNDETERMINED` or `QUARANTINE`, and `max_staleness` is a positive ISO-8601 duration in days, hours, minutes and seconds (`P30D`, `PT1H`; a month or a year has no fixed length and is refused). An empty list of fields is a plan that enriches nothing. The words are read by exact name; none is a problem code.
+
+| code | meaning |
+|---|---|
+| `ENRICH_PLAN_SHAPE` | the plan file, `fields`, an entry, a source or a value has the wrong shape (not a mapping, list or single value) |
+| `ENRICH_PLAN_KEY_UNKNOWN` | a key that the plan file, an entry or a source does not know |
+| `ENRICH_PLAN_KEY_MISSING` | a required key is missing (`fields`; in an entry `field`, `needed_by`, `sources`, `on_miss`; in a source `source`, `key`, `max_staleness`) |
+| `ENRICH_PLAN_FIELD_INVALID` | a target field is not a dotted name such as `client.lei`, or a source name or lookup key is not `[A-Za-z][A-Za-z0-9_.-]{0,63}` |
+| `ENRICH_PLAN_FIELD_DUPLICATE` | a target field planned twice |
+| `ENRICH_PLAN_NEEDED_BY_INVALID` | `needed_by` is none of `SCOPE`, `DERIVE`, `VALIDATE` |
+| `ENRICH_PLAN_PHASE_NOT_BUILT` | `needed_by` is `DERIVE` or `VALIDATE`: the second enrichment phase (spec 7.5) is not built, so the entry is refused and not ignored; its `on_miss` is then not judged |
+| `ENRICH_PLAN_SOURCES_EMPTY` | an entry with an empty `sources` list |
+| `ENRICH_PLAN_ON_MISS` | `on_miss` of a scope field is not `UNDETERMINED` or `QUARANTINE` (`FLAG` and `HOLD` apply only to derive and validate fields, spec 7.5) |
+| `ENRICH_PLAN_STALENESS_INVALID` | `max_staleness` is not a positive ISO-8601 duration of days, hours, minutes and seconds |
+| `ENRICH_PLAN_BAD_CHARACTER` | a plan cell with a character the pack text policy refuses (a line feed included) |
+
 ## 7. Hand-offs
 
 - **P3:** the decision schema needs `attributes` (JSON, nullable) and the stored `engine_build` text; the leg type is closed until BRK-12 is decided; `lifecycle.yaml` content is reserved. BRK-04 and BRK-10 are ledger contracts that block the schema freeze: when a pack declares a status model, `state.status` is part of `input_digest` and `decision_context` (P2a reads it only through `Bindings` and adds no field); `attributes{}` is `DecisionBody.attributes`. The `unsigned` stamp of spec 6.5 step 6 is not produced by P2a. Every decision with reason `EXEC_CIRCUIT_OPEN` (flag `circuit=open`) must be enumerable per rule and pack digest, raise a data-quality item (spec 7.3) and be re-evaluated when the circuit closes; until then they are open UNDETERMINED items for I7. **The model as built does NOT supersede such a decision by itself:** nothing in the decision context or in the input digest changes between an `EXEC_CIRCUIT_OPEN` decision and the re-evaluation of the same record after `RuleCircuit.close`, so under the unique key (event_identity, decision_context_id, input_digest) of spec 6.3 the re-evaluation is a `NOOP_REDELIVERY` and the open decision stays current (`PackScopeEngineTest#aReEvaluationAfterCloseHasTheSameContextAndDigestSoTheLedgerTreatsItAsARedelivery` pins this). P3 must add one of two things before it freezes the decision schema: either a circuit epoch (a generation that `close` increments) stamped into the decision context, so that the re-evaluation has a new `decision_context_id`; or a re-evaluation ordinal (or the reason code) in the unique key. It also adds a ledger contract test that a re-evaluation of an `EXEC_CIRCUIT_OPEN` decision is `INSERTED`, not `NOOP_REDELIVERY`. Only a new pack digest changes the context today. They are to be counted and excluded from the determinism sample (no determinism-sample class exists at P2a).
