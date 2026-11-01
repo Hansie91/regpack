@@ -67,12 +67,14 @@ import java.util.stream.Stream;
  * <p>The check of the bytes and the move are not one atomic step. Before the source is deleted the
  * connector checks that the name still holds the file it linked (a hard link: the same file) and,
  * for a CSV, that the linked or copied bytes are the delivered bytes; if not, it removes only its
- * own link or copy and leaves the source in the inbox, to be delivered again with a new number. Two
- * windows remain. One is between that last check and the delete: a file that a producer puts under
- * the name between the check and the delete is deleted unread. The other is a marker's own: a
- * marker has no delivered digest, so a marker that a producer swaps in during its own copy (the
- * fallback where no hard link can be made) is deleted unread, and its CSV then waits without a
- * marker and is reported.
+ * own link or copy and leaves the source in the inbox, to be delivered again with a new number.
+ * Three windows remain. One is between that last check and the delete: a file that a producer puts
+ * under the name between the check and the delete is deleted unread. The second is a marker's own:
+ * a marker has no delivered digest, so a marker that a producer swaps in during its own copy (the
+ * fallback where no hard link can be made) is deleted unread, and the CSV that marker belongs to,
+ * if one was dropped, then waits without a marker and is reported. The third is the retry of a
+ * stuck marker (below): a CSV that a producer re-drops with the same bytes between the listing of
+ * the open and that retry is moved as the delivered file.
  *
  * <p>A failure of one file never stalls the others (SF9): a CSV or marker that cannot be looked at
  * or read waits as {@link Reason#UNREADABLE} and the next file is read; a move that fails (the
@@ -82,7 +84,7 @@ import java.util.stream.Stream;
  * left, no later acknowledge covers the file (the next tick opens a new stream and the CSV is no
  * longer listed): the open of a new stream retries that marker, the file stays listed as {@link
  * Reason#MOVE_FAILED} while the retry fails, and after a retry that succeeds it is no longer in
- * flight. The retry never touches a file whose CSV is still in the inbox, nor a marker whose file
+ * flight. The retry never touches a file whose CSV is still in the listing, nor a marker whose file
  * had no failed move (a marker with no CSV is not a file that waits). Only a failure of the inbox
  * as a whole (it cannot be listed) is an {@link IllegalStateException}.
  *

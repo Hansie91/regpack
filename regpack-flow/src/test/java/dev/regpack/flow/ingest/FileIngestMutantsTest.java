@@ -168,8 +168,7 @@ class FileIngestMutantsTest {
   @Test
   void acknowledgingBeforeTheItemsOfARedeliveryFailsTheFailedRedeliveryItemScenarios() {
     // the same bytes come again, the source is acknowledged and the file moves, then the note of
-    // the
-    // redelivery cannot be written: the file is gone from the inbox and the gap stays open
+    // the redelivery cannot be written: the file is gone from the inbox and the gap stays open
     assertThatThrownBy(
             () ->
                 FileIngestTest.failedRedeliveredNote(
