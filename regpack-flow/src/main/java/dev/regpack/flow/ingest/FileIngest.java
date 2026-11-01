@@ -20,6 +20,7 @@ import dev.regpack.ports.evidence.journal.JournalSchemas;
 import dev.regpack.ports.evidence.journal.JournalScope;
 import dev.regpack.ports.evidence.journal.JournalType;
 import dev.regpack.ports.ledger.IngestLedger;
+import dev.regpack.ports.ledger.IngestLedger.Disposition;
 import dev.regpack.ports.ledger.LedgerException;
 import dev.regpack.ports.ledger.LedgerStore;
 import dev.regpack.ports.ledger.ManifestLedger;
@@ -36,6 +37,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.IntSupplier;
 
 /**
  * The ingest stage (plan T7, D-W2, spec 7.2): the files of a source become batches in the ledger.
@@ -64,8 +66,26 @@ import java.util.TreeMap;
  * <p>Every refusal that is final for the bytes carries the note {@code RELEASE_NEEDS_NEW_BYTES}:
  * the batch id is the digest of the bytes, so the same bytes are the same batch. The one exception
  * is a file refused before anything was landed (a marker that does not say {@code SYNTHETIC}): it
- * is committed under an id that also covers the marker, so the same bytes with a corrected marker
- * are a new batch and are not taken for a redelivery.
+ * is committed under an id that also covers the marker (its bytes, its record count and its
+ * totals), so the same bytes with a corrected marker are a new batch and are not taken for a
+ * redelivery.
+ *
+ * <p>The same bytes again with a marker that says {@code SYNTHETIC}, whatever else the marker now
+ * says (another record count, another sum), are a redelivery and a recorded no-op. The ledger is
+ * asked for the stored result as soon as the batch id is known, and when it holds one nothing is
+ * landed, admitted or committed, and nothing that comes from the parse or the marker is written
+ * again: the items of the first delivery stand byte for byte (a second marker with other totals
+ * would otherwise put other bytes under the key of an item that exists, and the file would never
+ * move). What is written is the items that the stored result calls for (the same items on the same
+ * keys, so a gap left by a crash is closed) and one {@code FILE_REDELIVERED} note, and then the
+ * source is acknowledged. The report shows what the first delivery committed and not what the new
+ * parse says: {@code PROCESSED} when records were committed; when none were, the verdict of the new
+ * reading, except that a reading that would commit records the first delivery did not (a defect
+ * that was fixed, a marker that was corrected) is {@code REJECTED} with nothing ingested, because
+ * the batch is final for these bytes. <b>A defect that was fixed, or a marker that was corrected,
+ * needs new bytes</b> ({@code RELEASE_NEEDS_NEW_BYTES}, the note of the redelivery item too). A
+ * batch that was landed and admitted but never committed (a crash) has no stored result and takes
+ * the normal path.
  *
  * <p>The stage sees the evidence tier through the {@link EvidenceWriter} only. Messages and items
  * carry fixed texts, codes, rule ids and coordinates, never a value of a record. Not thread-safe
@@ -183,7 +203,17 @@ public final class FileIngest {
     /** A repeated key in one file is handed to the ledger. */
     NO_DUPLICATE_CHECK,
     /** A defect of reading or mapping propagates instead of refusing the batch. */
-    NO_DEFECT_HANDLER
+    NO_DEFECT_HANDLER,
+    /**
+     * The ledger is not asked for a stored result before the landing: the same bytes again are
+     * landed, admitted and read once more, and write the items of the parse and the marker again.
+     */
+    SKIP_REDELIVERY_CHECK,
+    /**
+     * A redelivery takes its verdict, and so the folder of the move, and its counts from the new
+     * parse and not from what the first delivery committed.
+     */
+    VERDICT_FROM_NEW_PARSE
   }
 
   /** The file being ingested: where it came from and what it is called. */
@@ -347,6 +377,16 @@ public final class FileIngest {
     }
 
     BatchId batchId = BatchId.of(digest, SLICE);
+    String scope = digest.hex();
+    if (flaw != Flaw.SKIP_REDELIVERY_CHECK) {
+      // the same bytes are the same batch: when the ledger holds a result, this is a redelivery and
+      // the first delivery wrote everything the bytes give (a crash after the landing and the
+      // admission, before the commit, has no result and takes the normal path)
+      Optional<IngestLedger.Result> stored = ledger.ingestResult(batchId);
+      if (stored.isPresent()) {
+        return redeliver(delivery, batchId, scope, stored.get(), defects);
+      }
+    }
     writer.put(
         landingKey(digest),
         bytes,
@@ -355,6 +395,37 @@ public final class FileIngest {
         ManifestLedger.ObjectClass.LANDING_BATCH);
     admit(batchId);
 
+    Analysis analysis = analyze(bytes, manifest, scope, defects);
+    return conclude(
+        delivery,
+        batchId,
+        scope,
+        analysis.verdict(),
+        analysis.items(),
+        analysis.toCommit(),
+        analysis.ingested(),
+        analysis.quarantined());
+  }
+
+  /**
+   * What the landed bytes and the marker say about a batch, with no ledger and no write.
+   *
+   * @param verdict what would become of the file
+   * @param items the data-quality items that come from the bytes and the marker
+   * @param read the bytes as read, when they could be read as a table of this mapping
+   * @param toCommit the rows the ledger would be given; empty commits an empty batch
+   * @param ingested the rows that would be handed to the ledger
+   * @param quarantined the rows that would not be (all rows of a batch that is held back)
+   */
+  private record Analysis(
+      Verdict verdict,
+      List<Dq> items,
+      Optional<ParsedBatch> read,
+      Optional<ParsedBatch> toCommit,
+      int ingested,
+      int quarantined) {}
+
+  private Analysis analyze(byte[] bytes, Manifest manifest, String scope, List<String> defects) {
     ParsedBatch parsed;
     try {
       parsed = parseLanded(bytes);
@@ -363,26 +434,21 @@ public final class FileIngest {
         throw e;
       }
       defects.add(e.getClass().getName());
-      return conclude(
-          delivery,
-          batchId,
-          digest.hex(),
+      return new Analysis(
           Verdict.REJECTED,
-          List.of(rejectedItem(digest.hex(), 0, "", "INGEST_DEFECT")),
+          List.of(rejectedItem(scope, 0, "", "INGEST_DEFECT")),
+          Optional.empty(),
           Optional.empty(),
           0,
           0);
     }
 
-    String scope = digest.hex();
     if (parsed.refusal().isPresent()) {
       Refusal refusal = parsed.refusal().get();
-      return conclude(
-          delivery,
-          batchId,
-          scope,
+      return new Analysis(
           Verdict.REJECTED,
           List.of(rejectedItem(scope, refusal.line(), refusal.column(), refusal.code())),
+          Optional.empty(),
           Optional.empty(),
           0,
           0);
@@ -402,8 +468,8 @@ public final class FileIngest {
               LAYER,
               BLOCKER));
       items.add(summary(scope, manifest.recordCount(), 0, parsed.rows()));
-      return conclude(
-          delivery, batchId, scope, Verdict.QUARANTINED, items, Optional.empty(), 0, parsed.rows());
+      return new Analysis(
+          Verdict.QUARANTINED, items, Optional.of(parsed), Optional.empty(), 0, parsed.rows());
     }
     for (Quarantine q : parsed.quarantined()) {
       items.add(
@@ -420,15 +486,86 @@ public final class FileIngest {
     int ingested = parsed.accepted().size();
     int quarantined = parsed.rows() - ingested;
     items.add(summary(scope, manifest.recordCount(), ingested, quarantined));
-    return conclude(
-        delivery,
+    return new Analysis(
+        Verdict.PROCESSED, items, Optional.of(parsed), Optional.of(parsed), ingested, quarantined);
+  }
+
+  /** The verdict and counts a redelivery is reported with. */
+  private record Outcome(Verdict verdict, int ingested, int quarantined) {}
+
+  /**
+   * The same bytes again (plan D-W2: a redelivery is a recorded no-op). The bytes are read once
+   * more, but only to learn the verdict and the lines of the entries of the stored result; nothing
+   * that comes from the parse or the marker is written. The items that the stored result calls for
+   * are written (the same items on the same keys as the first delivery, so the ones a crash left
+   * unwritten are closed and the others are not written twice), then the note of the redelivery,
+   * and only then is the source acknowledged.
+   */
+  private BatchReport redeliver(
+      Delivery delivery,
+      BatchId batchId,
+      String scope,
+      IngestLedger.Result stored,
+      List<String> defects) {
+    Batch batch = delivery.batch();
+    Manifest manifest = batch.payload().manifest();
+    Analysis again = analyze(batch.payload().bytes(), manifest, scope, defects);
+    Outcome outcome = redeliveryOutcome(stored, again);
+    for (IngestLedger.EntryResult entry : stored.entries()) {
+      dispositionItem(
+          entry,
+          scope,
+          () -> again.read().map(p -> p.lines().getOrDefault(entry.key(), 0)).orElse(0));
+    }
+    dq.write(redeliveredItem(delivery.file()));
+    acknowledge(delivery, outcome.verdict());
+    return new BatchReport(
         batchId,
-        scope,
-        Verdict.PROCESSED,
-        items,
-        Optional.of(parsed),
-        ingested,
-        quarantined);
+        delivery.file(),
+        outcome.verdict(),
+        true,
+        manifest.recordCount(),
+        outcome.ingested(),
+        outcome.quarantined(),
+        List.of(),
+        stored.outboxId());
+  }
+
+  /**
+   * What the first delivery committed decides, not the new reading: when it committed records they
+   * are in the ledger whatever this delivery's marker says (PROCESSED, the counts from the stored
+   * entries). When it committed none, the new reading gives the verdict unless it would commit
+   * records: those were never in the ledger and cannot be (the batch is final for these bytes), so
+   * the file is REJECTED with nothing ingested. A batch that was held back stays held back when the
+   * new reading holds it back too.
+   */
+  private Outcome redeliveryOutcome(IngestLedger.Result stored, Analysis again) {
+    if (flaw == Flaw.VERDICT_FROM_NEW_PARSE) {
+      return new Outcome(again.verdict(), again.ingested(), again.quarantined());
+    }
+    int rows = again.ingested() + again.quarantined();
+    if (!stored.entries().isEmpty()) {
+      int ingested = stored.entries().size();
+      return new Outcome(Verdict.PROCESSED, ingested, Math.max(0, rows - ingested));
+    }
+    boolean wouldCommit = again.toCommit().map(p -> !p.accepted().isEmpty()).orElse(false);
+    if (wouldCommit) {
+      return new Outcome(Verdict.REJECTED, 0, 0);
+    }
+    return new Outcome(again.verdict(), again.ingested(), again.quarantined());
+  }
+
+  /** The note that a file came again: about the file name, never about a value. */
+  private static Dq redeliveredItem(String file) {
+    return new Dq(
+        Dq.Kind.FILE_REDELIVERED,
+        Sha256.ofUtf8(file).hex(),
+        0,
+        "",
+        "REDELIVERED",
+        Dq.RELEASE_NEEDS_NEW_BYTES,
+        LAYER,
+        WARNING);
   }
 
   /**
@@ -526,35 +663,20 @@ public final class FileIngest {
       acknowledge(delivery, verdict);
     }
 
+    // a replay has no new versions: what still needs deciding is the state of the outbox item
+    // (D-W2), not a list in the report
     List<Accepted> newVersions = new ArrayList<>();
     for (IngestLedger.EntryResult entry : result.entries()) {
       Accepted accepted = byKey.get(entry.key());
-      switch (entry.disposition()) {
-        case NEW_VERSION -> {
-          if (accepted != null) {
-            newVersions.add(accepted);
-          }
-        }
-        case NOOP_SAME_VERSION_SAME_HASH -> {}
-        case STALE -> dispositionItem(Dq.Kind.STALE_VERSION, scope, parsed, entry, "STALE");
-        case CONFLICT_SAME_VERSION_DIFFERENT_HASH ->
-            dispositionItem(
-                Dq.Kind.VERSION_CONFLICT, scope, parsed, entry, "CONFLICT_SAME_VERSION");
-        case SOURCE_CONFLICT ->
-            dispositionItem(Dq.Kind.SOURCE_CONFLICT, scope, parsed, entry, "SOURCE_CONFLICT");
+      if (entry.disposition() == Disposition.NEW_VERSION
+          && accepted != null
+          && !result.redelivery()) {
+        newVersions.add(accepted);
       }
+      dispositionItem(entry, scope, () -> parsed.map(p -> p.lineOf(entry.key())).orElse(0));
     }
     if (result.redelivery()) {
-      dq.write(
-          new Dq(
-              Dq.Kind.FILE_REDELIVERED,
-              Sha256.ofUtf8(delivery.file()).hex(),
-              0,
-              "",
-              "REDELIVERED",
-              "",
-              LAYER,
-              WARNING));
+      dq.write(redeliveredItem(delivery.file()));
     }
     return new BatchReport(
         batchId,
@@ -568,14 +690,49 @@ public final class FileIngest {
         result.outboxId());
   }
 
+  /**
+   * Writes the item that the ledger's answer for one entry calls for, if it calls for one: a stale
+   * version, a conflict of versions, a conflict of sources. A new version and a repeat of a stored
+   * version need none. The item is keyed by the line, which is asked only when there is an item.
+   */
   private void dispositionItem(
-      Dq.Kind kind,
-      String scope,
-      Optional<ParsedBatch> parsed,
-      IngestLedger.EntryResult entry,
-      String code) {
-    int line = parsed.map(p -> p.lineOf(entry.key())).orElse(0);
-    dq.write(new Dq(kind, scope, line, "", code, "", LAYER, WARNING));
+      IngestLedger.EntryResult entry, String scope, IntSupplier lineOfTheEntry) {
+    switch (entry.disposition()) {
+      case NEW_VERSION, NOOP_SAME_VERSION_SAME_HASH -> {}
+      case STALE ->
+          dq.write(
+              new Dq(
+                  Dq.Kind.STALE_VERSION,
+                  scope,
+                  lineOfTheEntry.getAsInt(),
+                  "",
+                  "STALE",
+                  "",
+                  LAYER,
+                  WARNING));
+      case CONFLICT_SAME_VERSION_DIFFERENT_HASH ->
+          dq.write(
+              new Dq(
+                  Dq.Kind.VERSION_CONFLICT,
+                  scope,
+                  lineOfTheEntry.getAsInt(),
+                  "",
+                  "CONFLICT_SAME_VERSION",
+                  "",
+                  LAYER,
+                  WARNING));
+      case SOURCE_CONFLICT ->
+          dq.write(
+              new Dq(
+                  Dq.Kind.SOURCE_CONFLICT,
+                  scope,
+                  lineOfTheEntry.getAsInt(),
+                  "",
+                  "SOURCE_CONFLICT",
+                  "",
+                  LAYER,
+                  WARNING));
+    }
   }
 
   /** Tells the connector the verdict (the folder of the move), then acknowledges the source. */
@@ -610,12 +767,13 @@ public final class FileIngest {
 
   /**
    * Puts the {@code BatchAdmitted} object of the batch (control scope, epoch 0, ordinal 1) and
-   * records the stored object in the manifest. When the key holds an object with the same payload
-   * hash nothing is put (the clock instant of the stored object stays), and the manifest row and
-   * the retention claim are completed from the stored object, never from the newly built bytes.
-   *
-   * @throws dev.regpack.ports.evidence.EvidenceIntegrityException the key holds an object with
-   *     another payload (the batch was admitted under another pack or mapping)
+   * records the stored object in the manifest. The key is the batch id, the digest of the bytes.
+   * When the key holds an object, that object stands as the admission of the batch and nothing is
+   * put (the clock instant of the stored object stays), whatever its payload says: it is
+   * write-once, and a payload that differs (the pack or the mapping changed between a crash and the
+   * bytes coming again) is no reason to refuse the batch, because the decide stage stamps the pack
+   * it runs with. The manifest row and the retention claim are completed from the stored object,
+   * never from the newly built bytes.
    */
   private void admit(BatchId batchId) {
     if (flaw == Flaw.SKIP_ADMITTED_PUT) {
@@ -630,8 +788,7 @@ public final class FileIngest {
     payload.put("context_digests", List.of(mapping.digest().hex()));
     JournalObject planned =
         new JournalObject(key, JournalType.BATCH_ADMITTED, JournalSchemas.V1, clock.now(), payload);
-    Optional<JournalObject> stored = writer.journal().read(key);
-    if (stored.isEmpty() || !stored.get().payloadSha256().equals(planned.payloadSha256())) {
+    if (writer.journal().read(key).isEmpty()) {
       writer.journal().write(planned);
     }
     writer.recordStored(key.evidenceKey(), ManifestLedger.ObjectClass.JOURNAL_A);

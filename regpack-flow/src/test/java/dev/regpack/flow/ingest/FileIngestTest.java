@@ -228,10 +228,12 @@ class FileIngestTest {
 
     BatchReport batch = only(fx.run());
 
-    // the first call stored the batch and lost the answer; the re-issue is a replay
+    // the first call stored the batch and lost the answer; the re-issue is a replay, which the
+    // report shows as one (and a replay has no new versions: the outbox item decides, D-W2)
     assertThat(fx.commits).hasSize(2);
     assertThat(batch.redelivery()).isTrue();
-    assertThat(batch.newVersions()).hasSize(2);
+    assertThat(batch.newVersions()).isEmpty();
+    assertThat(batch.ingested()).isEqualTo(2);
     assertThat(fx.ledgerStore.pendingOutbox(OutboxKind.DECIDE_BATCH, 10)).hasSize(1);
     assertThat(fx.names(fx.inbox.processed)).containsExactly("a.csv", "a.csv.done");
   }
@@ -288,12 +290,19 @@ class FileIngestTest {
     fx.drop("a.csv", csv, 2, "20");
     BatchReport first = only(fx.run());
     IngestLedger.Result stored = fx.ledgerStore.ingestResult(first.batchId()).orElseThrow();
+    assertThat(first.newVersions()).hasSize(2);
 
     fx.drop("a.csv", csv, 2, "20");
     BatchReport second = only(fx.run());
 
     assertThat(second.batchId()).isEqualTo(first.batchId());
     assertThat(second.redelivery()).isTrue();
+    // the outbox item, not the report, says what still needs deciding (D-W2)
+    assertThat(second.newVersions()).isEmpty();
+    assertThat(second.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(second.ingested()).isEqualTo(2);
+    assertThat(second.quarantined()).isZero();
+    assertThat(second.outbox()).isEqualTo(first.outbox());
     assertThat(fx.ledgerStore.ingestResult(first.batchId()).orElseThrow().entries())
         .isEqualTo(stored.entries());
     assertThat(fx.ledgerStore.pendingOutbox(OutboxKind.DECIDE_BATCH, 10)).hasSize(1);
@@ -312,6 +321,332 @@ class FileIngestTest {
     assertThat(fx.manifest("")).hasSize(manifest);
     assertThat(fx.retention("")).hasSize(retention);
     assertThat(items(fx, Kind.FILE_REDELIVERED)).hasSize(1);
+  }
+
+  // ------------------------------------------------------------------ the same bytes again
+
+  private static byte[] followingFile() {
+    return IngestFixture.csv(IngestFixture.row("T-9", 1, "EX-9", "10"));
+  }
+
+  /**
+   * {@code a.csv} is delivered, then the same bytes are dropped again under another marker next to
+   * a good {@code b.csv}, and one call reads both. The second delivery is a recorded no-op: no
+   * exception leaves the call, nothing is landed or admitted, no item that comes from the parse or
+   * the marker is written (the items of the first delivery stand byte for byte), one
+   * FILE_REDELIVERED item is, the file and its marker move, and {@code b.csv} is read in the same
+   * call.
+   *
+   * @return the report of the second delivery of {@code a.csv}
+   */
+  static BatchReport sameBytesUnderAnotherMarker(
+      IngestFixture fx,
+      byte[] csv,
+      int firstRecords,
+      String firstSum,
+      Verdict firstVerdict,
+      int secondRecords,
+      String secondSum) {
+    fx.drop("a.csv", csv, firstRecords, firstSum);
+    BatchReport first = only(fx.run());
+    assertThat(first.verdict()).isEqualTo(firstVerdict);
+    IngestLedger.Result stored = fx.ledgerStore.ingestResult(first.batchId()).orElseThrow();
+    Map<String, String> dqBefore = fx.dqObjects();
+
+    fx.drop("a.csv", csv, secondRecords, secondSum);
+    byte[] following = followingFile();
+    fx.drop("b.csv", following, 1, "10");
+    IngestReport report = fx.run();
+
+    assertThat(report.batches()).extracting(BatchReport::file).containsExactly("a.csv", "b.csv");
+    BatchReport again = report.batches().get(0);
+    assertThat(again.batchId()).isEqualTo(first.batchId());
+    assertThat(again.redelivery()).isTrue();
+    assertThat(again.declaredRecords()).isEqualTo(secondRecords);
+    assertThat(again.newVersions()).isEmpty();
+    assertThat(again.outbox()).isEqualTo(stored.outboxId());
+    assertThat(report.defects()).isEmpty();
+    BatchReport next = report.batches().get(1);
+    assertThat(next.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(next.redelivery()).isFalse();
+    assertThat(next.ingested()).isEqualTo(1);
+
+    // what the first delivery committed stands
+    assertThat(fx.ledgerStore.ingestResult(first.batchId())).contains(stored);
+    // every item of the first delivery is there byte for byte, and the only new item that is not
+    // of b.csv is the one about the file name
+    Map<String, String> dqAfter = fx.dqObjects();
+    assertThat(dqAfter).containsAllEntriesOf(dqBefore);
+    Set<String> added = new TreeSet<>(dqAfter.keySet());
+    added.removeAll(dqBefore.keySet());
+    added.removeIf(path -> path.startsWith("dq/" + Sha256.of(following).hex() + "/"));
+    assertThat(added)
+        .containsExactly("dq/" + hexOfName("a.csv") + "/FILE_REDELIVERED-0-REDELIVERED");
+    List<Dq> redelivered = items(fx, Kind.FILE_REDELIVERED);
+    assertThat(redelivered).hasSize(1);
+    assertThat(redelivered.getFirst().rule()).isEqualTo(Dq.RELEASE_NEEDS_NEW_BYTES);
+    // nothing was landed or admitted for the second delivery of a.csv: a and b only
+    assertThat(fx.keys("landing/")).hasSize(2);
+    assertThat(fx.keys("journal/")).hasSize(2);
+    // the file and its marker are moved, and so are those of b.csv
+    assertThat(fx.names(fx.inbox.inbox)).isEmpty();
+    assertThat(fx.names(fx.inbox.processed)).contains("b.csv", "b.csv.done");
+    return again;
+  }
+
+  @Test
+  void theSameBytesWithAnotherRecordCountAfterAProcessedDeliveryAreARecordedNoOp() {
+    anotherCountAfterProcessed(new IngestFixture(root));
+  }
+
+  static void anotherCountAfterProcessed(IngestFixture fx) {
+    BatchReport again =
+        sameBytesUnderAnotherMarker(fx, twoRows(), 2, "20", Verdict.PROCESSED, 3, "20");
+
+    assertThat(again.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(again.ingested()).isEqualTo(2);
+    assertThat(again.quarantined()).isZero();
+    assertThat(fx.names(fx.inbox.processed)).hasSize(6);
+  }
+
+  @Test
+  void theSameBytesWithAnotherSumAfterAProcessedDeliveryAreARecordedNoOp() {
+    anotherSumAfterProcessed(new IngestFixture(root));
+  }
+
+  static void anotherSumAfterProcessed(IngestFixture fx) {
+    BatchReport again =
+        sameBytesUnderAnotherMarker(fx, twoRows(), 2, "20", Verdict.PROCESSED, 2, "25");
+
+    assertThat(again.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(again.ingested()).isEqualTo(2);
+    assertThat(fx.names(fx.inbox.processed)).hasSize(6);
+    assertThat(fx.names(fx.inbox.quarantine)).isEmpty();
+  }
+
+  @Test
+  void aRedeliveryReportsWhatTheFirstDeliveryCommittedAndAddsNoItemOfTheParse() {
+    IngestFixture fx = new IngestFixture(root);
+    byte[] csv =
+        IngestFixture.csv(
+            IngestFixture.row("T-1", 1, "EX-1", "10"),
+            IngestFixture.row("T-2", 1, "EX-2", "abc"),
+            IngestFixture.row("T-3", 1, "EX-3", "10"));
+
+    // two records of three were committed; the second marker declares four
+    BatchReport again = sameBytesUnderAnotherMarker(fx, csv, 3, "20", Verdict.PROCESSED, 4, "20");
+
+    assertThat(again.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(again.ingested()).isEqualTo(2);
+    assertThat(again.quarantined()).isEqualTo(1);
+    assertThat(items(fx, Kind.RECORD_QUARANTINED)).hasSize(1);
+    assertThat(items(fx, Kind.BATCH_SUMMARY).stream().map(Dq::rule))
+        .contains("control_total_records=3;ingested=2;quarantined=1")
+        .doesNotContain("control_total_records=4;ingested=2;quarantined=1");
+  }
+
+  @Test
+  void theSameBytesWithACorrectedMarkerAfterAQuarantinedDeliveryAreARecordedNoOp() {
+    correctedMarkerAfterQuarantine(new IngestFixture(root));
+  }
+
+  static void correctedMarkerAfterQuarantine(IngestFixture fx) {
+    // the marker declared three records for two rows: the batch was held back as a whole
+    BatchReport again =
+        sameBytesUnderAnotherMarker(fx, twoRows(), 3, "20", Verdict.QUARANTINED, 2, "20");
+
+    // the first delivery committed no record, so the records that the corrected marker would
+    // release were never in the ledger: the report must not say they were
+    assertThat(again.verdict()).isEqualTo(Verdict.REJECTED);
+    assertThat(again.ingested()).isZero();
+    assertThat(again.quarantined()).isZero();
+    assertThat(fx.names(fx.inbox.quarantine)).containsExactly("a.csv", "a.csv.done");
+    assertThat(fx.names(fx.inbox.rejected)).hasSize(2);
+    assertThat(fx.ledgerStore.findIngest(new IngestKey(IngestFixture.SOURCE, "T-1", 1))).isEmpty();
+    assertThat(fx.ledgerStore.findIngest(new IngestKey(IngestFixture.SOURCE, "T-2", 1))).isEmpty();
+  }
+
+  @Test
+  void theSameBytesWithAnotherWrongTotalAfterAQuarantinedDeliveryStayQuarantined() {
+    // the same wrong marker, another wrong count, and a total of another kind that does not hold
+    // (the held item of the first delivery names the column of the count)
+    List<Integer> counts = List.of(3, 5, 2);
+    List<String> sums = List.of("20", "20", "25");
+    for (int i = 0; i < counts.size(); i++) {
+      IngestFixture fx = new IngestFixture(root.resolve("q" + i));
+      BatchReport again =
+          sameBytesUnderAnotherMarker(
+              fx, twoRows(), 3, "20", Verdict.QUARANTINED, counts.get(i), sums.get(i));
+
+      assertThat(again.verdict()).isEqualTo(Verdict.QUARANTINED);
+      assertThat(again.ingested()).isZero();
+      assertThat(again.quarantined()).isEqualTo(2);
+      assertThat(fx.names(fx.inbox.quarantine)).contains("a.csv", "a.csv.done");
+      assertThat(fx.names(fx.inbox.rejected)).isEmpty();
+      assertThat(fx.names(fx.inbox.processed)).containsExactly("b.csv", "b.csv.done");
+      assertThat(items(fx, Kind.BATCH_QUARANTINED)).hasSize(1);
+      assertThat(items(fx, Kind.BATCH_QUARANTINED).getFirst().column()).isEqualTo("records");
+    }
+  }
+
+  @Test
+  void aRedeliveryWritesTheItemOfTheStoredResultAtTheLineOfTheFirstDelivery() {
+    IngestFixture fx = new IngestFixture(root);
+    fx.drop("a.csv", IngestFixture.csv(IngestFixture.row("T-1", 2, "EX-1", "10")), 1, "10");
+    fx.run();
+    byte[] stale = IngestFixture.csv(IngestFixture.row("T-1", 1, "EX-1", "10"));
+    fx.drop("b.csv", stale, 1, "10");
+    assertThat(only(fx.run()).newVersions()).isEmpty();
+    Dq item = items(fx, Kind.STALE_VERSION).getFirst();
+    Map<String, String> before = fx.dqObjects();
+
+    fx.drop("b.csv", stale, 2, "10");
+    BatchReport again = only(fx.run());
+
+    assertThat(again.redelivery()).isTrue();
+    assertThat(again.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(again.ingested()).isEqualTo(1);
+    // the stale version of the first delivery: the same item on the same key, not a second one
+    assertThat(items(fx, Kind.STALE_VERSION)).containsExactly(item);
+    assertThat(item.line()).isEqualTo(2);
+    assertThat(fx.dqObjects()).containsAllEntriesOf(before);
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).hasSize(1);
+  }
+
+  @Test
+  void aDefectThatWasFixedStillNeedsNewBytesAndTheRedeliveryIsRejected() {
+    redeliveryAfterAFixedDefect(root, FileIngest.Flaw.NONE);
+  }
+
+  static void redeliveryAfterAFixedDefect(Path root, FileIngest.Flaw flaw) {
+    Mapper real = new Mapper(IngestFixture.sampleMapping());
+    boolean[] broken = {true};
+    FileIngest.RowMapper mapper =
+        (line, header, cells) -> {
+          if (broken[0]) {
+            throw new IllegalStateException("secret value 4711");
+          }
+          return real.map(line, header, cells);
+        };
+    IngestFixture fx = new IngestFixture(root, flaw, 1_048_576L, mapper);
+    byte[] csv = twoRows();
+    fx.drop("a.csv", csv, 2, "20");
+    BatchReport first = only(fx.run());
+    assertThat(first.verdict()).isEqualTo(Verdict.REJECTED);
+    assertThat(items(fx, Kind.BATCH_REJECTED))
+        .extracting(Dq::code)
+        .containsExactly("INGEST_DEFECT");
+    Map<String, String> dqBefore = fx.dqObjects();
+
+    // the defect is fixed and the same bytes are dropped again, a good file behind them
+    broken[0] = false;
+    fx.drop("a.csv", csv, 2, "20");
+    byte[] following = followingFile();
+    fx.drop("b.csv", following, 1, "10");
+    IngestReport report = fx.run();
+
+    assertThat(report.batches()).extracting(BatchReport::file).containsExactly("a.csv", "b.csv");
+    BatchReport again = report.batches().get(0);
+    assertThat(again.batchId()).isEqualTo(first.batchId());
+    assertThat(again.redelivery()).isTrue();
+    // the first delivery committed no record, and a fixed defect does not change that
+    assertThat(again.verdict()).isEqualTo(Verdict.REJECTED);
+    assertThat(again.ingested()).isZero();
+    assertThat(again.quarantined()).isZero();
+    assertThat(again.newVersions()).isEmpty();
+    assertThat(report.defects()).isEmpty();
+    assertThat(report.batches().get(1).verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(fx.ledgerStore.ingestResult(first.batchId()).orElseThrow().entries()).isEmpty();
+    assertThat(fx.ledgerStore.findIngest(new IngestKey(IngestFixture.SOURCE, "T-1", 1))).isEmpty();
+    assertThat(fx.ledgerStore.findIngest(new IngestKey(IngestFixture.SOURCE, "T-2", 1))).isEmpty();
+    // the file is in rejected/ (both deliveries carry the same marker, so the pair keeps its name),
+    // never in processed/
+    assertThat(fx.names(fx.inbox.rejected)).containsExactly("a.csv", "a.csv.done");
+    assertThat(fx.names(fx.inbox.processed)).containsExactly("b.csv", "b.csv.done");
+    assertThat(fx.names(fx.inbox.inbox)).isEmpty();
+    // no item of the parse is written for the redelivery; the item says that new bytes are needed
+    Map<String, String> dqAfter = fx.dqObjects();
+    assertThat(dqAfter).containsAllEntriesOf(dqBefore);
+    Set<String> added = new TreeSet<>(dqAfter.keySet());
+    added.removeAll(dqBefore.keySet());
+    added.removeIf(path -> path.startsWith("dq/" + Sha256.of(following).hex() + "/"));
+    assertThat(added)
+        .containsExactly("dq/" + hexOfName("a.csv") + "/FILE_REDELIVERED-0-REDELIVERED");
+    assertThat(items(fx, Kind.FILE_REDELIVERED).getFirst().rule())
+        .isEqualTo(Dq.RELEASE_NEEDS_NEW_BYTES);
+    assertThat(items(fx, Kind.RECORD_QUARANTINED)).isEmpty();
+  }
+
+  @Test
+  void aBatchAdmittedUnderAnotherPackStandsAndTheNextFileIsStillRead() {
+    IngestFixture fx = new IngestFixture(root);
+    byte[] csv = twoRows();
+    fx.drop("a.csv", csv, 2, "20");
+    fx.failNextCommitWith = new SimulatedCrash("commit");
+    assertThatThrownBy(fx::run).isInstanceOf(SimulatedCrash.class);
+    BatchId id = idOf(csv);
+    EvidenceKey admitted = admittedKey(id).evidenceKey();
+    byte[] admittedBytes = fx.evidenceStore.get(admitted).orElseThrow().bytes();
+    assertThat(fx.ledgerStore.ingestResult(id)).isEmpty();
+    assertThat(fx.keys("journal/")).containsExactly(admitted.path());
+
+    // the pack was upgraded before the bytes came again, and another file waits behind them
+    byte[] following = followingFile();
+    fx.drop("b.csv", following, 1, "10");
+    Sha256 upgraded = Sha256.ofUtf8("w1a test pack two");
+    IngestReport report = fx.run(fx.withPack(upgraded));
+
+    assertThat(report.batches()).extracting(BatchReport::file).containsExactly("a.csv", "b.csv");
+    assertThat(report.batches()).allMatch(b -> b.verdict() == Verdict.PROCESSED && !b.redelivery());
+    assertThat(fx.ledgerStore.ingestResult(id)).isPresent();
+    // the admission that is stored stands, whatever its payload says: it is never written again
+    assertThat(fx.evidenceStore.get(admitted).orElseThrow().bytes()).isEqualTo(admittedBytes);
+    assertThat(fx.writer.journal().read(admittedKey(id)).orElseThrow().payload())
+        .containsEntry("pack_digest", IngestFixture.PACK_DIGEST.hex());
+    // the object count grows by the object of the next batch only, which is under the new pack
+    assertThat(fx.keys("journal/")).hasSize(2);
+    assertThat(
+            fx.writer
+                .journal()
+                .read(admittedKey(idOf(following)))
+                .orElseThrow()
+                .payload()
+                .get("pack_digest"))
+        .isEqualTo(upgraded.hex());
+    assertThat(fx.manifest("journal/")).hasSize(2);
+    assertThat(fx.retention(admitted.path())).hasSize(1);
+    assertThat(fx.names(fx.inbox.processed))
+        .containsExactly("a.csv", "a.csv.done", "b.csv", "b.csv.done");
+  }
+
+  @Test
+  void twoNonSyntheticRefusalsThatDifferOnlyInTheMarkerTotalsAreTwoBatches() {
+    IngestFixture fx = new IngestFixture(root);
+    byte[] csv = twoRows();
+    dropWithoutDataClass(fx, csv, 2, "20");
+    BatchReport first = only(fx.run());
+    dropWithoutDataClass(fx, csv, 2, "21");
+    BatchReport second = only(fx.run());
+
+    assertThat(first.verdict()).isEqualTo(Verdict.REJECTED);
+    assertThat(second.verdict()).isEqualTo(Verdict.REJECTED);
+    // the same bytes and the same count, another sum: another refusal, not a redelivery
+    assertThat(second.batchId()).isNotEqualTo(first.batchId());
+    assertThat(second.redelivery()).isFalse();
+
+    // the same claim again is the same refusal
+    dropWithoutDataClass(fx, csv, 2, "21");
+    BatchReport third = only(fx.run());
+    assertThat(third.batchId()).isEqualTo(second.batchId());
+    assertThat(third.redelivery()).isTrue();
+  }
+
+  private static void dropWithoutDataClass(
+      IngestFixture fx, byte[] csv, int records, String sumQuantity) {
+    fx.inbox.write("a.csv", csv);
+    fx.inbox.write(
+        "a.csv.done",
+        IngestFixture.markerFor("a.csv", csv, records, sumQuantity, false).getBytes(UTF_8));
   }
 
   @Test

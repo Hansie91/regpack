@@ -36,6 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 
 /**
  * Test helper: the whole ingest stage over in-memory ports in a temporary directory. The evidence
@@ -266,6 +267,11 @@ final class IngestFixture {
     return new FileIngest(clock, writer, ledger, mapping, PACK_DIGEST, sourceId, dq, DEADLINE);
   }
 
+  /** A second stage for another pack digest (the pack was upgraded), sharing everything else. */
+  FileIngest withPack(Sha256 packDigest) {
+    return new FileIngest(clock, writer, ledger, mapping, packDigest, SOURCE, dq, DEADLINE);
+  }
+
   /** Logs the acknowledge and whether the file had left the inbox when it returned. */
   private final class LoggingStream implements BatchStream {
     private final BatchStream delegate;
@@ -429,6 +435,16 @@ final class IngestFixture {
     return evidenceStore.list(prefix, Optional.empty(), 1000).stream()
         .map(EvidenceKey::path)
         .toList();
+  }
+
+  /** The stored data-quality objects: the key path to the text of the object, sorted by path. */
+  Map<String, String> dqObjects() {
+    Map<String, String> objects = new TreeMap<>();
+    for (String path : keys("dq/")) {
+      objects.put(
+          path, new String(evidenceStore.get(new EvidenceKey(path)).orElseThrow().bytes(), UTF_8));
+    }
+    return objects;
   }
 
   List<ManifestRow> manifest(String prefix) {

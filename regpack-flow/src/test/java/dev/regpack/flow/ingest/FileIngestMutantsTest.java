@@ -28,6 +28,10 @@ class FileIngestMutantsTest {
     FileIngestTest.brokenHeader(new IngestFixture(root.resolve("c"), Flaw.NONE));
     FileIngestTest.duplicateKey(new IngestFixture(root.resolve("d"), Flaw.NONE));
     FileIngestTest.mapperDefect(root.resolve("e"), Flaw.NONE);
+    FileIngestTest.anotherCountAfterProcessed(new IngestFixture(root.resolve("f"), Flaw.NONE));
+    FileIngestTest.anotherSumAfterProcessed(new IngestFixture(root.resolve("g"), Flaw.NONE));
+    FileIngestTest.correctedMarkerAfterQuarantine(new IngestFixture(root.resolve("h"), Flaw.NONE));
+    FileIngestTest.redeliveryAfterAFixedDefect(root.resolve("i"), Flaw.NONE);
   }
 
   @Test
@@ -79,6 +83,54 @@ class FileIngestMutantsTest {
   }
 
   @Test
+  void skippingTheRedeliveryCheckFailsTheSameBytesUnderAnotherMarkerScenarios() {
+    // the items of the second marker are put under the keys of the first marker's items: the call
+    // throws, the file never moves and the file behind it is never read
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.anotherCountAfterProcessed(
+                    new IngestFixture(root.resolve("a"), Flaw.SKIP_REDELIVERY_CHECK)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("DQ item key");
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.anotherSumAfterProcessed(
+                    new IngestFixture(root.resolve("b"), Flaw.SKIP_REDELIVERY_CHECK)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("DQ item key");
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.correctedMarkerAfterQuarantine(
+                    new IngestFixture(root.resolve("c"), Flaw.SKIP_REDELIVERY_CHECK)))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("DQ item key");
+  }
+
+  @Test
+  void takingTheVerdictOfARedeliveryFromTheNewParseFailsTheFixedDefectAndTheCorrectedMarker() {
+    // the defect is fixed, the same bytes come again: the new parse says PROCESSED with two
+    // records that the ledger never had, and the file would move to processed/
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.redeliveryAfterAFixedDefect(
+                    root.resolve("a"), Flaw.VERDICT_FROM_NEW_PARSE))
+        .isInstanceOf(AssertionError.class);
+    // a corrected marker after a held batch has the same shape
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.correctedMarkerAfterQuarantine(
+                    new IngestFixture(root.resolve("b"), Flaw.VERDICT_FROM_NEW_PARSE)))
+        .isInstanceOf(AssertionError.class);
+    // and a marker with a wrong total after a processed delivery would hold the file back
+    // although its records are in the ledger
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.anotherCountAfterProcessed(
+                    new IngestFixture(root.resolve("c"), Flaw.VERDICT_FROM_NEW_PARSE)))
+        .isInstanceOf(AssertionError.class);
+  }
+
+  @Test
   void everyFlawIsNamedHere() {
     assertThat(Flaw.values())
         .extracting(Flaw::name)
@@ -88,6 +140,8 @@ class FileIngestMutantsTest {
             "VERDICT_AFTER_ACKNOWLEDGE",
             "SKIP_ADMITTED_PUT",
             "NO_DUPLICATE_CHECK",
-            "NO_DEFECT_HANDLER");
+            "NO_DEFECT_HANDLER",
+            "SKIP_REDELIVERY_CHECK",
+            "VERDICT_FROM_NEW_PARSE");
   }
 }
