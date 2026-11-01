@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.regpack.flow.enrich.Enricher.Enriched;
 import dev.regpack.flow.enrich.Enricher.EnrichedRecord;
 import dev.regpack.flow.evidence.EvidenceWriter;
+import dev.regpack.flow.evidence.TwoCopyEvidenceStore;
 import dev.regpack.flow.ingest.FileIngest.Accepted;
 import dev.regpack.flow.ingest.MappedRecord;
 import dev.regpack.inmemory.InMemoryEvidenceStore;
@@ -874,6 +875,53 @@ class EnricherTest {
     for (var row : ledger.manifestRows("", Optional.empty(), 100)) {
       assertThat(row.entry().key().path()).doesNotContain("ACC-").doesNotContain("SYNT00");
     }
+  }
+
+  @Test
+  void aSnapshotThatOnlyOneCopyHoldsIsCompletedByTheNextCallAndNoSourceIsAsked() {
+    TwoCopyEvidenceStore tier = new TwoCopyEvidenceStore(clock);
+    EvidenceWriter twoCopyWriter =
+        new EvidenceWriter(
+            tier,
+            ledger,
+            claim -> {
+              claims.add(claim);
+              ledger.recordRetention(List.of(claim));
+            },
+            RetentionPolicy.fixedDays(1826),
+            clock,
+            REGIME);
+    EvidenceKey key = Enricher.snapshotKey(BATCH);
+    List<Accepted> batch = List.of(legal("T-002", "ACC-2"));
+    // the first call seals the snapshot on the first copy and then the tier fails: no row, no claim
+    tier.halfWriteNextPut(key.path());
+    assertThatThrownBy(
+            () ->
+                new Enricher(clock, twoCopyWriter, Map.of("static-data", staticData()))
+                    .enrich(BATCH, batch, demoPlan("P30D")))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    assertThat(tier.copies(key)).isEqualTo(1);
+    assertThat(ledger.manifestRow(key)).isEmpty();
+    assertThat(claims).isEmpty();
+    EvidenceStore.StoredObject first = tier.firstVolume().get(key).orElseThrow();
+
+    // the next call, at a later instant, finds the snapshot and must complete it before it returns
+    clock.advance(Duration.ofHours(3));
+    RecordingSource asked = new RecordingSource(staticData());
+    Enriched out =
+        new Enricher(clock, twoCopyWriter, Map.of("static-data", asked))
+            .enrich(BATCH, batch, demoPlan("P30D"));
+
+    assertThat(asked.requests()).as("the sealed snapshot answers, not the source").isEmpty();
+    assertThat(out.snapshotId()).isEqualTo(Sha256.of(first.bytes()).hex());
+    assertThat(tier.copies(key)).isEqualTo(2);
+    EvidenceStore.StoredObject second = tier.secondVolume().get(key).orElseThrow();
+    assertThat(second.bytes()).isEqualTo(first.bytes());
+    assertThat(second.retention()).isEqualTo(first.retention());
+    assertThat(ledger.manifestRow(key).orElseThrow().entry().sha256())
+        .isEqualTo(Sha256.of(first.bytes()));
+    assertThat(claims).hasSize(1);
+    assertThat(claims.getFirst().retainUntil()).contains(first.retention().retainUntil());
   }
 
   @Test

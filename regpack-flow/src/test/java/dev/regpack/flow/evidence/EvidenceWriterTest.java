@@ -14,6 +14,7 @@ import dev.regpack.ports.evidence.EvidenceStore.PutOutcome;
 import dev.regpack.ports.evidence.EvidenceStore.PutRequest;
 import dev.regpack.ports.evidence.EvidenceStore.Retention;
 import dev.regpack.ports.evidence.EvidenceStore.RetentionClass;
+import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.ports.evidence.RetentionPolicy;
 import dev.regpack.ports.ledger.ManifestConflictException;
 import dev.regpack.ports.ledger.ManifestLedger.ObjectClass;
@@ -160,6 +161,105 @@ class EvidenceWriterTest {
     assertThat(ledger.manifestRows("", Optional.empty(), 10)).hasSize(1);
     assertThat(ledger.retentionRows("", Optional.empty(), 10)).hasSize(1);
     assertThat(claims.getFirst().retentionClass()).isEqualTo("journal");
+  }
+
+  private EvidenceWriter writerOver(EvidenceStore tier) {
+    return new EvidenceWriter(
+        tier,
+        ledger,
+        claim -> {
+          claims.add(claim);
+          ledger.recordRetention(List.of(claim));
+        },
+        RetentionPolicy.fixedDays(1826),
+        clock,
+        REGIME);
+  }
+
+  @Test
+  void aReplayPutsTheStoredObjectAgainSoThatAMissingSecondCopyIsCompleted() {
+    TwoCopyEvidenceStore tier = new TwoCopyEvidenceStore(clock);
+    EvidenceWriter twoCopyWriter = writerOver(tier);
+    // the first copy is stored, then the tier cannot write the second: the put fails, no row
+    tier.halfWriteNextPut(KEY.path());
+    assertThatThrownBy(
+            () -> twoCopyWriter.put(KEY, BYTES, "text/csv", "landing", ObjectClass.LANDING_BATCH))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    assertThat(tier.copies(KEY)).isEqualTo(1);
+    assertThat(ledger.manifestRow(KEY)).isEmpty();
+    assertThat(claims).isEmpty();
+    EvidenceStore.StoredObject first = tier.firstVolume().get(KEY).orElseThrow();
+
+    clock.advance(Duration.ofHours(1));
+    PutOutcome outcome =
+        twoCopyWriter.put(KEY, BYTES, "text/csv", "landing", ObjectClass.LANDING_BATCH);
+
+    // the replay acknowledges only after the second copy exists, and it is the first copy's object
+    assertThat(outcome).isEqualTo(PutOutcome.ALREADY_PRESENT_IDENTICAL);
+    assertThat(tier.copies(KEY)).isEqualTo(2);
+    EvidenceStore.StoredObject second = tier.secondVolume().get(KEY).orElseThrow();
+    assertThat(second.bytes()).isEqualTo(BYTES);
+    assertThat(second.mediaType()).isEqualTo(first.mediaType());
+    assertThat(second.retention()).isEqualTo(first.retention());
+    assertThat(ledger.manifestRow(KEY).orElseThrow().entry().sha256()).isEqualTo(Sha256.of(BYTES));
+    assertThat(claims).hasSize(1);
+    assertThat(claims.getFirst().retainUntil()).contains(first.retention().retainUntil());
+  }
+
+  @Test
+  void recordStoredPutsTheStoredObjectAgainBeforeItWritesTheRowAndTheClaim() {
+    TwoCopyEvidenceStore tier = new TwoCopyEvidenceStore(clock);
+    EvidenceWriter twoCopyWriter = writerOver(tier);
+    Retention retention =
+        new Retention(new RetentionClass("journal"), Instant.parse("2031-01-01T00:00:00Z"));
+    // another writer (the journal writer) put the object; its second copy is missing
+    tier.halfWriteNextPut(KEY.path());
+    assertThatThrownBy(() -> tier.put(new PutRequest(KEY, BYTES, "application/json", retention)))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    assertThat(tier.copies(KEY)).isEqualTo(1);
+
+    // the tier still cannot complete the copy: nothing is recorded, the call fails
+    tier.halfWriteNextPut(KEY.path());
+    assertThatThrownBy(() -> twoCopyWriter.recordStored(KEY, ObjectClass.JOURNAL_A))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    assertThat(ledger.manifestRow(KEY)).isEmpty();
+    assertThat(claims).isEmpty();
+
+    // the tier is back: the record completes the copy first, then writes the row and the claim
+    twoCopyWriter.recordStored(KEY, ObjectClass.JOURNAL_A);
+
+    assertThat(tier.copies(KEY)).isEqualTo(2);
+    EvidenceStore.StoredObject second = tier.secondVolume().get(KEY).orElseThrow();
+    assertThat(second.bytes()).isEqualTo(BYTES);
+    assertThat(second.mediaType()).isEqualTo("application/json");
+    assertThat(second.retention()).isEqualTo(retention);
+    assertThat(ledger.manifestRow(KEY).orElseThrow().entry().objectClass())
+        .isEqualTo(ObjectClass.JOURNAL_A);
+    assertThat(claims).hasSize(1);
+    assertThat(claims.getFirst().retainUntil()).contains(retention.retainUntil());
+  }
+
+  @Test
+  void recordWrittenRecordsTheRowAndTheClaimAndPutsNothingAgain() {
+    TwoCopyEvidenceStore tier = new TwoCopyEvidenceStore(clock);
+    EvidenceWriter twoCopyWriter = writerOver(tier);
+    Retention retention =
+        new Retention(new RetentionClass("journal"), Instant.parse("2031-01-01T00:00:00Z"));
+    tier.put(new PutRequest(KEY, BYTES, "application/json", retention));
+    // a second put would fail now; recordWritten makes none, recordStored makes one
+    tier.halfWriteNextPut(KEY.path());
+
+    twoCopyWriter.recordWritten(KEY, ObjectClass.JOURNAL_A);
+
+    assertThat(ledger.manifestRow(KEY).orElseThrow().entry().sha256()).isEqualTo(Sha256.of(BYTES));
+    assertThat(claims).hasSize(1);
+    assertThat(claims.getFirst().retainUntil()).contains(retention.retainUntil());
+    assertThatThrownBy(() -> twoCopyWriter.recordStored(KEY, ObjectClass.JOURNAL_A))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    assertThatThrownBy(
+            () -> writer.recordWritten(EvidenceKey.of("landing", "none", "0"), ObjectClass.OTHER))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageNotContaining("none");
   }
 
   @Test

@@ -3,6 +3,7 @@ package dev.regpack.flow.ingest;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import dev.regpack.flow.evidence.EvidenceWriter;
+import dev.regpack.flow.evidence.TwoCopyEvidenceStore;
 import dev.regpack.flow.ingest.FileIngest.Flaw;
 import dev.regpack.flow.ingest.FileIngest.IngestReport;
 import dev.regpack.inmemory.InMemoryEvidenceStore;
@@ -96,6 +97,10 @@ final class IngestFixture {
   final ManualClock clock;
   final InMemoryLedgerStore ledgerStore;
   final InMemoryEvidenceStore evidenceStore;
+
+  /** The tier of two copies when the fixture was made by {@link #twoCopies}, else null. */
+  final TwoCopyEvidenceStore twoCopy;
+
   final LedgerStore ledger;
   final EvidenceStore evidence;
   final List<String> log = new ArrayList<>();
@@ -146,10 +151,25 @@ final class IngestFixture {
   }
 
   IngestFixture(Path root, Flaw flaw, long maxBytes, FileIngest.RowMapper rowMapper) {
+    this(root, flaw, maxBytes, rowMapper, false);
+  }
+
+  /**
+   * A fixture over an evidence tier of two copies (see {@link TwoCopyEvidenceStore}); {@link
+   * #evidenceStore} is its first copy, which holds every key the tier holds.
+   */
+  static IngestFixture twoCopies(Path root) {
+    return new IngestFixture(root, Flaw.NONE, 1_048_576L, null, true);
+  }
+
+  private IngestFixture(
+      Path root, Flaw flaw, long maxBytes, FileIngest.RowMapper rowMapper, boolean twoCopies) {
     this.inbox = new InboxFixture(root);
     this.clock = inbox.clock;
     this.ledgerStore = new InMemoryLedgerStore(clock);
-    this.evidenceStore = new InMemoryEvidenceStore(clock);
+    this.twoCopy = twoCopies ? new TwoCopyEvidenceStore(clock) : null;
+    this.evidenceStore = twoCopies ? twoCopy.firstVolume() : new InMemoryEvidenceStore(clock);
+    EvidenceStore backing = twoCopies ? twoCopy : evidenceStore;
     this.ledger =
         logged(
             LedgerStore.class,
@@ -190,7 +210,7 @@ final class IngestFixture {
     this.evidence =
         logged(
             EvidenceStore.class,
-            evidenceStore,
+            backing,
             (method, args) -> {
               if (method.equals("put")) {
                 EvidenceKey key = ((EvidenceStore.PutRequest) args[0]).key();

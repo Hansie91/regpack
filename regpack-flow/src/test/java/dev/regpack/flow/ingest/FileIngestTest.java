@@ -19,7 +19,9 @@ import dev.regpack.ports.connector.SourceConnector.Manifest;
 import dev.regpack.ports.connector.SourceConnector.ReadLimits;
 import dev.regpack.ports.connector.SourceConnector.ReadRequest;
 import dev.regpack.ports.crypto.KeyUnavailableException;
+import dev.regpack.ports.evidence.EvidenceIntegrityException;
 import dev.regpack.ports.evidence.EvidenceKey;
+import dev.regpack.ports.evidence.EvidenceStore;
 import dev.regpack.ports.evidence.EvidenceStore.StoredObject;
 import dev.regpack.ports.evidence.EvidenceUnavailableException;
 import dev.regpack.ports.evidence.journal.JournalKey;
@@ -42,6 +44,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -217,6 +220,39 @@ class FileIngestTest {
     assertThat(fx.log).doesNotContain("acknowledge", "moved");
     assertThat(fx.names(fx.inbox.inbox)).containsExactly("a.csv", "a.csv.done");
     assertThat(fx.ledgerStore.ingestResult(idOf(csv))).isEmpty();
+  }
+
+  @Test
+  void aStreamIsClosedByAFailedCallSoReusingItMovesNoFileThatWasNeverCommitted() {
+    IngestFixture fx = new IngestFixture(root);
+    byte[] first = twoRows();
+    fx.drop("a.csv", first, 2, "20");
+    fx.drop("b.csv", IngestFixture.csv(IngestFixture.row("T-3", 1, "EX-3", "10")), 1, "10");
+    ReadRequest request = new ReadRequest(Optional.empty(), new ReadLimits(100, 1_000_000L));
+
+    try (BatchStream stream = fx.connector.read(request)) {
+      fx.failCommits = true;
+      assertThatThrownBy(() -> fx.ingest.ingest(stream, fx.connector, 1))
+          .isInstanceOf(LedgerException.class);
+      assertThat(fx.names(fx.inbox.inbox)).contains("a.csv");
+
+      // the ledger recovers, and the caller wrongly passes the same stream again: a.csv was read
+      // from it and never committed, so the cumulative acknowledge of b.csv must not reach it
+      fx.failCommits = false;
+      assertThatThrownBy(() -> fx.ingest.ingest(stream, fx.connector, 100))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessage("Stream is closed");
+    }
+
+    assertThat(fx.names(fx.inbox.inbox))
+        .containsExactly("a.csv", "a.csv.done", "b.csv", "b.csv.done");
+    assertThat(fx.names(fx.inbox.processed)).isEmpty();
+    assertThat(fx.ledgerStore.ingestResult(idOf(first))).isEmpty();
+
+    // a new stream with no checkpoint reads both files, as the convention says
+    assertThat(fx.run().batches()).hasSize(2);
+    assertThat(fx.names(fx.inbox.processed))
+        .containsExactly("a.csv", "a.csv.done", "b.csv", "b.csv.done");
   }
 
   @Test
@@ -753,6 +789,76 @@ class FileIngestTest {
     assertThat(three.names(three.inbox.processed)).containsExactly("a.csv", "a.csv.done");
   }
 
+  @Test
+  void aBatchAdmittedObjectOnOneCopyIsCompletedByTheRedeliveryBeforeTheCommitAndTheMove() {
+    byte[] csv = twoRows();
+    BatchId id = idOf(csv);
+    EvidenceKey admitted = admittedKey(id).evidenceKey();
+    IngestFixture fx = IngestFixture.twoCopies(root);
+    fx.drop("a.csv", csv, 2, "20");
+    // the first copy of the BatchAdmitted object is stored, then the store cannot write the second
+    fx.twoCopy.halfWriteNextPut("journal/");
+
+    assertThatThrownBy(fx::run).isInstanceOf(EvidenceUnavailableException.class);
+
+    assertThat(fx.twoCopy.copies(landingKey(csv))).isEqualTo(2);
+    assertThat(fx.twoCopy.copies(admitted)).isEqualTo(1);
+    assertThat(fx.log).doesNotContain("commitIngest", "acknowledge");
+    assertThat(fx.names(fx.inbox.inbox)).containsExactly("a.csv", "a.csv.done");
+    byte[] storedBytes = fx.evidenceStore.get(admitted).orElseThrow().bytes();
+
+    // the redelivery finds the object (served from the first copy) and must complete the second
+    // one before it commits and moves the file
+    fx.clock.advance(Duration.ofHours(3));
+    fx.log.clear();
+    assertThat(only(fx.run()).verdict()).isEqualTo(Verdict.PROCESSED);
+
+    assertThat(fx.log.stream().filter(ORDER_EVENTS::contains).toList())
+        .containsExactly("put:landing", "put:journal", "commitIngest", "acknowledge", "moved");
+    assertThat(fx.twoCopy.copies(admitted)).isEqualTo(2);
+    StoredObject onFirst = fx.twoCopy.firstVolume().get(admitted).orElseThrow();
+    StoredObject onSecond = fx.twoCopy.secondVolume().get(admitted).orElseThrow();
+    assertThat(onSecond.bytes()).isEqualTo(storedBytes).isEqualTo(onFirst.bytes());
+    assertThat(onSecond.mediaType()).isEqualTo(onFirst.mediaType());
+    assertThat(onSecond.retention()).isEqualTo(onFirst.retention());
+    assertThat(fx.manifest("journal/")).hasSize(1);
+    assertThat(fx.retention(admitted.path())).hasSize(1);
+    assertThat(fx.ledgerStore.ingestResult(id)).isPresent();
+    assertThat(fx.names(fx.inbox.processed)).containsExactly("a.csv", "a.csv.done");
+  }
+
+  @Test
+  void aLandingObjectWithOtherBytesUnderTheDigestKeyStopsTheBatchWithAnAlarm() {
+    IngestFixture fx = new IngestFixture(root);
+    byte[] csv = twoRows();
+    fx.drop("a.csv", csv, 2, "20");
+    byte[] other = "other synthetic bytes".getBytes(UTF_8);
+    fx.evidenceStore.put(
+        new EvidenceStore.PutRequest(
+            landingKey(csv),
+            other,
+            "text/csv",
+            new EvidenceStore.Retention(
+                new EvidenceStore.RetentionClass("landing"),
+                Instant.parse("2031-01-01T00:00:00Z"))));
+
+    // not a verdict and not a silent PROCESSED: an alarm of the tier, with a fixed text
+    assertThatThrownBy(fx::run)
+        .isInstanceOf(EvidenceIntegrityException.class)
+        .hasMessageNotContaining(Sha256.of(csv).hex())
+        .hasMessageNotContaining("landing/");
+
+    assertThat(fx.log).doesNotContain("commitIngest", "acknowledge");
+    assertThat(fx.keys("journal/")).isEmpty();
+    assertThat(fx.keys("dq/")).isEmpty();
+    assertThat(fx.ledgerStore.ingestResult(idOf(csv))).isEmpty();
+    assertThat(fx.names(fx.inbox.inbox)).containsExactly("a.csv", "a.csv.done");
+    assertThat(fx.evidenceStore.get(landingKey(csv)).orElseThrow().bytes()).isEqualTo(other);
+    // and it stays an alarm: the next tick stops the same way
+    assertThatThrownBy(fx::run).isInstanceOf(EvidenceIntegrityException.class);
+    assertThat(fx.names(fx.inbox.processed)).isEmpty();
+  }
+
   // ------------------------------------------------------------------ whole-file refusals
 
   @Test
@@ -1232,6 +1338,84 @@ class FileIngestTest {
 
     assertThat(conflict.newVersions()).isEmpty();
     assertThat(items(fx, Kind.VERSION_CONFLICT)).hasSize(1);
+  }
+
+  // ------------------------------------------------------------------ a disposition item that
+  // cannot be written (A4: the file moves only after the items that the answer of the ledger calls
+  // for are written)
+
+  @Test
+  void aFailedDispositionItemLeavesTheFileInTheInboxAndTheReplayWritesIt() {
+    failedStaleItem(new IngestFixture(root));
+  }
+
+  static void failedStaleItem(IngestFixture fx) {
+    fx.drop("a.csv", IngestFixture.csv(IngestFixture.row("T-1", 2, "EX-1", "10")), 1, "10");
+    fx.run();
+    byte[] stale = IngestFixture.csv(IngestFixture.row("T-1", 1, "EX-1", "10"));
+    fx.drop("b.csv", stale, 1, "10");
+    dispositionPutFails(fx, fx.ingest, stale, Kind.STALE_VERSION);
+  }
+
+  @Test
+  void aFailedVersionConflictItemLeavesTheFileInTheInboxAndTheReplayWritesIt() {
+    failedVersionConflictItem(new IngestFixture(root));
+  }
+
+  static void failedVersionConflictItem(IngestFixture fx) {
+    fx.drop("a.csv", IngestFixture.csv(IngestFixture.row("T-1", 1, "EX-1", "10")), 1, "10");
+    fx.run();
+    byte[] conflict = IngestFixture.csv(IngestFixture.row("T-1", 1, "EX-1", "11"));
+    fx.drop("b.csv", conflict, 1, "11");
+    dispositionPutFails(fx, fx.ingest, conflict, Kind.VERSION_CONFLICT);
+  }
+
+  @Test
+  void aFailedSourceConflictItemLeavesTheFileInTheInboxAndTheReplayWritesIt() {
+    IngestFixture fx = new IngestFixture(root);
+    fx.drop("a.csv", IngestFixture.csv(IngestFixture.row("T-1", 1, "EX-1", "10")), 1, "10");
+    fx.run();
+    // the same event from another source
+    byte[] other = IngestFixture.csv(IngestFixture.row("T-9", 1, "EX-1", "10"));
+    fx.drop("b.csv", other, 1, "10");
+    dispositionPutFails(fx, fx.otherSource("other-csv"), other, Kind.SOURCE_CONFLICT);
+  }
+
+  /**
+   * The ledger takes the batch in {@code b.csv} and answers with a disposition whose item cannot be
+   * written. The file must stay in the inbox, and the next tick (the redelivery path: the ledger
+   * holds the result) must write the item once, add the note of the redelivery, commit nothing and
+   * move the file.
+   */
+  private static void dispositionPutFails(
+      IngestFixture fx, FileIngest stage, byte[] csv, Kind kind) {
+    String scope = Sha256.of(csv).hex();
+    int commitsBefore = fx.commits.size();
+    int logBefore = fx.log.size();
+    fx.failNextPut = new EvidenceUnavailableException("outage");
+    fx.failNextPutPrefix = "dq/" + scope + "/" + kind.name();
+
+    assertThatThrownBy(() -> fx.run(stage)).isInstanceOf(EvidenceUnavailableException.class);
+
+    // the ledger has the batch, its item is not written, and so the file has not been moved
+    assertThat(fx.commits).hasSize(commitsBefore + 1);
+    assertThat(fx.ledgerStore.ingestResult(idOf(csv))).isPresent();
+    assertThat(fx.log.subList(logBefore, fx.log.size())).doesNotContain("acknowledge", "moved");
+    assertThat(fx.names(fx.inbox.inbox)).containsExactly("b.csv", "b.csv.done");
+    assertThat(fx.names(fx.inbox.processed)).doesNotContain("b.csv");
+    assertThat(items(fx, kind)).isEmpty();
+
+    BatchReport again = only(fx.run(stage));
+
+    assertThat(again.redelivery()).isTrue();
+    assertThat(again.verdict()).isEqualTo(Verdict.PROCESSED);
+    assertThat(fx.commits).as("the replay commits nothing").hasSize(commitsBefore + 1);
+    assertThat(fx.keys("dq/" + scope + "/" + kind.name())).hasSize(1);
+    assertThat(items(fx, kind)).hasSize(1);
+    // the accepted side effect of a recovery: the replay also notes that the file came again
+    assertThat(items(fx, Kind.FILE_REDELIVERED)).hasSize(1);
+    assertThat(fx.names(fx.inbox.inbox)).isEmpty();
+    assertThat(fx.names(fx.inbox.processed)).contains("b.csv", "b.csv.done");
   }
 
   // ------------------------------------------------------------------ evidence and values

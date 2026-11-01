@@ -20,11 +20,13 @@ import java.util.Optional;
  *
  * <p>A replay writes nothing new and never fails because a key is already there (SF1). When the
  * store already holds the key, the stored object stays (its bytes, media type and retention), the
- * stored object is put again so that a store of several copies completes a missing one, and the
- * manifest row and the retention claim are completed from what is stored: from the stored hash and
- * the stored retention, never from the bytes of this call. So an attempt that stopped between the
- * put and the row is finished by the next attempt, at any later instant, with no object, row or
- * date more than the first attempt made. A caller that must know that the bytes are the same
+ * stored object is put again so that a store of several copies completes a missing one (also in
+ * {@link #recordStored}, which the callers of the journal writer use: a half-written put of such a
+ * store leaves the object served from one copy), and the manifest row and the retention claim are
+ * completed from what is stored: from the stored hash and the stored retention, never from the
+ * bytes of this call. So an attempt that stopped between the put and the row, or between the first
+ * copy and the second, is finished by the next attempt, at any later instant, with no object, row
+ * or date more than the first attempt made. A caller that must know that the bytes are the same
  * compares them with {@link #get} first.
  *
  * <p>The order is the object, then the manifest row, then the claim: a failure in between leaves an
@@ -103,10 +105,14 @@ public final class EvidenceWriter {
 
   /**
    * Records an object that another writer put (a journal object is put by {@link #journal()}): the
-   * manifest row from the stored hash and size, and the retention claim from the stored retention.
-   * Idempotent.
+   * stored object is put again with its own bytes, media type and retention, which completes a
+   * missing copy of a store that keeps several (and fails, with nothing recorded, when the store
+   * cannot complete it); then the manifest row from the stored hash and size, and the retention
+   * claim from the stored retention. Idempotent.
    *
    * @throws IllegalStateException the store does not hold the key
+   * @throws dev.regpack.ports.evidence.EvidenceUnavailableException the store cannot complete every
+   *     copy
    */
   public void recordStored(EvidenceKey key, ManifestLedger.ObjectClass objectClass) {
     Objects.requireNonNull(key, "key");
@@ -114,7 +120,28 @@ public final class EvidenceWriter {
     EvidenceStore.StoredObject stored =
         store.get(key).orElseThrow(() -> new IllegalStateException(MISSING));
     byte[] storedBytes = stored.bytes();
+    // as put does on its present branch: the row and the claim follow the completed copies
+    store.put(
+        new EvidenceStore.PutRequest(key, storedBytes, stored.mediaType(), stored.retention()));
     complete(key, objectClass, Sha256.of(storedBytes), storedBytes.length, stored.retention());
+  }
+
+  /**
+   * Records an object that the journal writer has just written in this call: the manifest row and
+   * the retention claim from the stored object, as {@link #recordStored} does, but without the
+   * second put, because {@link JournalWriter#write} returns only after every copy exists (so a
+   * first delivery puts the object once). An object that was found in the store, and not written by
+   * the caller, is recorded with {@link #recordStored}, which completes a missing copy.
+   *
+   * @throws IllegalStateException the store does not hold the key
+   */
+  public void recordWritten(EvidenceKey key, ManifestLedger.ObjectClass objectClass) {
+    Objects.requireNonNull(key, "key");
+    Objects.requireNonNull(objectClass, "objectClass");
+    EvidenceStore.StoredObject stored =
+        store.get(key).orElseThrow(() -> new IllegalStateException(MISSING));
+    complete(
+        key, objectClass, Sha256.of(stored.bytes()), stored.bytes().length, stored.retention());
   }
 
   /** The stored object, if any (plaintext when the tier is encrypted). */

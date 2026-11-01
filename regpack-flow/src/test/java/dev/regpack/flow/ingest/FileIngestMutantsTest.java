@@ -32,6 +32,8 @@ class FileIngestMutantsTest {
     FileIngestTest.anotherSumAfterProcessed(new IngestFixture(root.resolve("g"), Flaw.NONE));
     FileIngestTest.correctedMarkerAfterQuarantine(new IngestFixture(root.resolve("h"), Flaw.NONE));
     FileIngestTest.redeliveryAfterAFixedDefect(root.resolve("i"), Flaw.NONE);
+    FileIngestTest.failedStaleItem(new IngestFixture(root.resolve("j"), Flaw.NONE));
+    FileIngestTest.failedVersionConflictItem(new IngestFixture(root.resolve("k"), Flaw.NONE));
   }
 
   @Test
@@ -131,6 +133,23 @@ class FileIngestMutantsTest {
   }
 
   @Test
+  void acknowledgingBeforeTheDispositionItemsFailsTheFailedItemScenarios() {
+    // the file moves right after the commit, then the item of the stale version cannot be written:
+    // the file is gone from the inbox and nothing ever turns the stored result into an item
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.failedStaleItem(
+                    new IngestFixture(root.resolve("a"), Flaw.ACKNOWLEDGE_BEFORE_DISPOSITIONS)))
+        .isInstanceOf(AssertionError.class);
+    // and a conflict of versions is the same
+    assertThatThrownBy(
+            () ->
+                FileIngestTest.failedVersionConflictItem(
+                    new IngestFixture(root.resolve("b"), Flaw.ACKNOWLEDGE_BEFORE_DISPOSITIONS)))
+        .isInstanceOf(AssertionError.class);
+  }
+
+  @Test
   void everyFlawIsNamedHere() {
     assertThat(Flaw.values())
         .extracting(Flaw::name)
@@ -142,6 +161,7 @@ class FileIngestMutantsTest {
             "NO_DUPLICATE_CHECK",
             "NO_DEFECT_HANDLER",
             "SKIP_REDELIVERY_CHECK",
-            "VERDICT_FROM_NEW_PARSE");
+            "VERDICT_FROM_NEW_PARSE",
+            "ACKNOWLEDGE_BEFORE_DISPOSITIONS");
   }
 }
