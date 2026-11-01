@@ -18,7 +18,8 @@ class NoWallClockRandomLocaleTest {
     Path classes = Path.of(System.getProperty("regpack.classes.dir"));
     // non-vacuity: an empty or misplaced classes directory would make the scan pass on nothing
     try (Stream<Path> walk = Files.walk(classes)) {
-      assertThat(walk.filter(p -> p.getFileName().toString().equals("Mapper.class")).count())
+      assertThat(
+              walk.filter(p -> p.endsWith(Path.of("dev/regpack/flow/ingest/Mapper.class"))).count())
           .as("the classes directory holds the flow Mapper class")
           .isEqualTo(1);
     }

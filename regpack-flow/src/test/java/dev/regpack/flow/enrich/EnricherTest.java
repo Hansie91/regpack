@@ -1,6 +1,7 @@
 package dev.regpack.flow.enrich;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -1206,10 +1207,11 @@ class EnricherTest {
         .isEqualTo(Sha256.of(winner.bytes()));
     // the sink may be asked twice (the put and the replay), for the same claim and stored date
     assertThat(ledger.retentionRows("", Optional.empty(), 100)).hasSize(1);
-    assertThat(claims)
-        .isNotEmpty()
-        .allSatisfy(
-            claim -> assertThat(claim.retainUntil()).contains(winner.retention().retainUntil()));
+    // the number of calls stays unpinned; on the distinct claims the stored date is the only date
+    List<RetentionClaim> distinct = claims.stream().distinct().toList();
+    assertThat(distinct).as("the distinct claims").hasSize(1);
+    assertThat(distinct.stream().map(RetentionClaim::retainUntil).collect(toSet()))
+        .containsExactly(Optional.of(winner.retention().retainUntil()));
   }
 
   @Test

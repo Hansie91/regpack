@@ -344,13 +344,12 @@ class SampleFilesTest {
     assertThat(shaped).as("the scan sees the synthetic identifiers").isGreaterThan(40);
 
     // Convention 5 reaches the mapping, the demo pack and the test resources of this module too
-    int scanned = 0;
     assertThat(unknownIdentifiers(text(MAPPING))).as(MAPPING).isEmpty();
-    scanned++;
+    int packFiles = 0;
+    int resourceFiles = 0;
     Path root = Path.of(System.getProperty("regpack.repo.root"));
-    for (Path dir :
-        List.of(
-            root.resolve("packs/demo.tr.s1"), root.resolve("regpack-flow/src/test/resources"))) {
+    Path packDir = root.resolve("packs/demo.tr.s1");
+    for (Path dir : List.of(packDir, root.resolve("regpack-flow/src/test/resources"))) {
       List<Path> files;
       try (Stream<Path> walk = Files.walk(dir)) {
         files = walk.filter(Files::isRegularFile).sorted().toList();
@@ -360,12 +359,16 @@ class SampleFilesTest {
         assertThat(unknownIdentifiers(Files.readString(file, UTF_8)))
             .as(root.relativize(file).toString())
             .isEmpty();
-        scanned++;
+        if (dir.equals(packDir)) {
+          packFiles++;
+        } else {
+          resourceFiles++;
+        }
       }
     }
-    assertThat(scanned)
-        .as("the mapping, the 24 pack files and the test resources")
-        .isGreaterThan(25);
+    // counted apart: a walk that silently skips pack files must not pass on the resources alone
+    assertThat(packFiles).as("the 24 files of packs/demo.tr.s1, CHECKSUMS included").isEqualTo(24);
+    assertThat(resourceFiles).as("the test resources of regpack-flow").isGreaterThanOrEqualTo(1);
 
     // the scan can fail: the published examples (unit tests only) and a one-character change
     assertThat(unknownIdentifiers("a,US0378331005,b")).containsExactly("US0378331005");

@@ -4,7 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -64,7 +66,7 @@ class IsinTest {
   void shapeRefusesWhatIsNotTwoLettersNineAlphanumericsAndADigit() {
     String good = "US0378331005";
     assertThat(Isin.hasShape(good)).isTrue();
-    assertThat(Isin.hasShape(good.toLowerCase(java.util.Locale.ROOT))).isFalse();
+    assertThat(Isin.hasShape(good.toLowerCase(Locale.ROOT))).isFalse();
     assertThat(Isin.hasShape(good.substring(0, 11))).isFalse();
     assertThat(Isin.hasShape(good + "0")).isFalse();
     assertThat(Isin.hasShape("")).isFalse();
@@ -76,7 +78,7 @@ class IsinTest {
     assertThat(Isin.hasShape(good.substring(0, 11) + "５")).isFalse();
     assertThat(Isin.isValid(null)).isFalse();
     assertThat(Isin.isValid("")).isFalse();
-    assertThat(Isin.isValid(good.toLowerCase(java.util.Locale.ROOT))).isFalse();
+    assertThat(Isin.isValid(good.toLowerCase(Locale.ROOT))).isFalse();
   }
 
   @Test
@@ -117,8 +119,8 @@ class IsinTest {
   @Test
   void withCheckDigitFindsEveryCheckDigitFromZeroToNine() {
     String[] found = new String[10];
-    for (int i = 0; i < 1000 && java.util.Arrays.asList(found).contains(null); i++) {
-      String base = "ZZ00000" + String.format(java.util.Locale.ROOT, "%04d", i);
+    for (int i = 0; i < 1000 && Arrays.asList(found).contains(null); i++) {
+      String base = "ZZ00000" + String.format(Locale.ROOT, "%04d", i);
       char expected = luhnCheckDigit(base);
       if (found[expected - '0'] == null) {
         found[expected - '0'] = base;

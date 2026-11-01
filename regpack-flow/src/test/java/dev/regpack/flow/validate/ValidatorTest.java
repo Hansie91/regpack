@@ -3,10 +3,12 @@ package dev.regpack.flow.validate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.regpack.flow.enrich.RefDataSeed;
 import dev.regpack.flow.validate.Validator.Flaw;
 import dev.regpack.flow.validate.Validator.ValidationResult;
 import dev.regpack.flow.validate.ValidatorFixture.Exec;
 import dev.regpack.model.Leg;
+import dev.regpack.model.Sha256;
 import dev.regpack.model.canonical.LifecycleKind;
 import dev.regpack.pack.check.ProblemSink;
 import dev.regpack.pack.report.ValidationRules;
@@ -14,18 +16,24 @@ import dev.regpack.pack.report.ValidationRules.Layer;
 import dev.regpack.pack.report.ValidationRules.Rule;
 import dev.regpack.pack.report.ValidationRules.Severity;
 import dev.regpack.pack.yaml.StrictYaml;
+import dev.regpack.ports.ledger.DeliveryLedger.AttemptIntent;
 import dev.regpack.ports.ledger.DeliveryLedger.DeliveryState;
+import dev.regpack.ports.ledger.DeliveryLedger.SendingStatus;
+import dev.regpack.ports.ledger.LeaseLedger.LeaseResult.Granted;
 import dev.regpack.ports.refdata.ReferenceData.DatasetId;
 import dev.regpack.testkit.ident.SyntheticIds;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
@@ -120,7 +128,7 @@ class ValidatorTest {
     // the firm's LEI is ACTIVE on the trade date 2026-10-30 and no longer on 2026-10-31
     f.refs.load(
         new DatasetId("lei-status"),
-        dev.regpack.flow.enrich.RefDataSeed.parse(
+        RefDataSeed.parse(
             "key,status,valid_from,valid_to\n"
                 + SyntheticIds.FIRM_LEI
                 + ",ACTIVE,2020-01-01,2026-10-31\n"
@@ -133,12 +141,28 @@ class ValidatorTest {
   }
 
   /** The states a delivery can be in whose report no longer counts for V15 (plan V15, content). */
-  private static final java.util.Set<DeliveryState> DEAD =
-      java.util.EnumSet.of(
+  private static final Set<DeliveryState> DEAD =
+      EnumSet.of(
           DeliveryState.REJECTED,
           DeliveryState.IN_REPAIR,
           DeliveryState.WITHDRAWN,
           DeliveryState.WRITTEN_OFF);
+
+  /** A NEWT of the execution in SENDING: the ledger allows that only through beginSending. */
+  private static void sendingNewt(ValidatorFixture f, String id) {
+    var delivery = f.commitVersion(id, "NEWT");
+    f.setState(delivery, DeliveryState.QUEUED);
+    var granted =
+        (Granted)
+            f.ledger.acquire(ValidatorFixture.ENDPOINT, "validator-test", Duration.ofMinutes(5));
+    var sending =
+        f.ledger.beginSending(
+            delivery,
+            f.ledger.allocateAttemptId(),
+            granted.grant().token(),
+            new AttemptIntent(Sha256.ofUtf8("sealed"), "demo-file.xml"));
+    assertThat(sending.status()).isEqualTo(SendingStatus.APPLIED);
+  }
 
   /**
    * D-03: for every delivery state, a NEWT of a fresh execution in that state. A dead state accepts
@@ -151,22 +175,7 @@ class ValidatorTest {
       if (state == DeliveryState.PREPARED) {
         f.commitVersion(id, "NEWT"); // a committed version has the state PREPARED already
       } else if (state == DeliveryState.SENDING) {
-        // the ledger lets a delivery into SENDING only through beginSending, under a lease
-        var delivery = f.commitVersion(id, "NEWT");
-        f.setState(delivery, DeliveryState.QUEUED);
-        var granted =
-            (dev.regpack.ports.ledger.LeaseLedger.LeaseResult.Granted)
-                f.ledger.acquire(
-                    ValidatorFixture.ENDPOINT, "validator-test", Duration.ofMinutes(5));
-        var sending =
-            f.ledger.beginSending(
-                delivery,
-                f.ledger.allocateAttemptId(),
-                granted.grant().token(),
-                new dev.regpack.ports.ledger.DeliveryLedger.AttemptIntent(
-                    dev.regpack.model.Sha256.ofUtf8("sealed"), "demo-file.xml"));
-        assertThat(sending.status())
-            .isEqualTo(dev.regpack.ports.ledger.DeliveryLedger.SendingStatus.APPLIED);
+        sendingNewt(f, id);
       } else {
         f.newt(id, state);
       }
@@ -226,13 +235,13 @@ class ValidatorTest {
     ValidatorFixture f = world();
     for (int scale : List.of(Integer.MIN_VALUE + 1, Integer.MIN_VALUE, -2_000_000_000, -13)) {
       Exec e = exec();
-      e.quantity = new BigDecimal(java.math.BigInteger.ONE, scale);
+      e.quantity = new BigDecimal(BigInteger.ONE, scale);
       ValidationResult r = f.run(e);
       assertThat(findings(r)).as("scale " + scale).contains("V01:DECIMAL_INTEGER_DIGITS");
       assertThat(r.pass()).isFalse();
     }
     Exec edge = exec();
-    edge.quantity = new BigDecimal(java.math.BigInteger.ONE, -11); // 1E+11: twelve digits
+    edge.quantity = new BigDecimal(BigInteger.ONE, -11); // 1E+11: twelve digits
     assertPasses(f.run(edge));
   }
 
@@ -393,7 +402,7 @@ class ValidatorTest {
     ValidatorFixture f = world();
     f.refs.load(
         new DatasetId("lei-status"),
-        dev.regpack.flow.enrich.RefDataSeed.parse(
+        RefDataSeed.parse(
             "key,status,valid_from,valid_to\n"
                 + SyntheticIds.FIRM_LEI
                 + ",,2020-01-01,\n"

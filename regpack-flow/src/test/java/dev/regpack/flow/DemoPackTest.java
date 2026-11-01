@@ -46,6 +46,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -211,7 +212,7 @@ class DemoPackTest {
         .as("the pack declares every path the bindings bind")
         .isEqualTo(CanonicalBindings.VARIABLES.keySet());
     assertThat(input.variables()).hasSize(17);
-    Set<String> optional = new java.util.TreeSet<>();
+    Set<String> optional = new TreeSet<>();
     input
         .variables()
         .forEach(
@@ -517,7 +518,7 @@ class DemoPackTest {
                 StrictYaml.parse(source.text("derive/report.yaml")),
                 ProblemSink.forFile())
             .orElseThrow();
-    Set<String> deriveFields = new java.util.TreeSet<>();
+    Set<String> deriveFields = new TreeSet<>();
     derive.rows().forEach(row -> deriveFields.add(row.field()));
     String fixture;
     try (InputStream in = DemoPackTest.class.getResourceAsStream("/fixtures/rules.yaml")) {
@@ -527,12 +528,13 @@ class DemoPackTest {
     PackRegime regime = demoRegime();
     Map<String, String> onNew = derivedFields(regime, "GC-N08-1");
     Map<String, String> onCancel = derivedFields(regime, "GC-N08-3");
+    String packRules = source.text("validate/rules.yaml");
 
-    for (String text : List.of(source.text("validate/rules.yaml"), fixture)) {
+    for (String text : List.of(packRules, fixture)) {
       ValidationRules rules =
           ValidationRules.parse("rules.yaml", StrictYaml.parse(text), ProblemSink.forFile())
               .orElseThrow();
-      Set<String> named = new java.util.TreeSet<>();
+      Set<String> named = new TreeSet<>();
       for (ValidationRules.Rule rule : rules.rules()) {
         for (String field : rule.list("fields")) {
           if (field.startsWith("report.")) {
@@ -545,11 +547,24 @@ class DemoPackTest {
       assertThat(deriveFields)
           .as("every report.<name> of the rules is a derive field")
           .containsAll(named);
-      // V09 (the closed-world check of the executing LEI) must see its field on every report
-      assertThat(named).contains("executing_lei");
-      assertThat(onNew).containsKey("executing_lei");
-      assertThat(onCancel).containsKey("executing_lei");
     }
+
+    // V09 (the closed-world check of the executing LEI) must see each report field it names on
+    // the derived map of a NEW and of a CANCEL
+    ValidationRules pack =
+        ValidationRules.parse("rules.yaml", StrictYaml.parse(packRules), ProblemSink.forFile())
+            .orElseThrow();
+    ValidationRules.Rule v09 =
+        pack.rules().stream().filter(r -> r.id().equals("V09")).findFirst().orElseThrow();
+    Set<String> v09Fields = new TreeSet<>();
+    for (String field : v09.list("fields")) {
+      if (field.startsWith("report.")) {
+        v09Fields.add(field.substring("report.".length()));
+      }
+    }
+    assertThat(v09Fields).as("the report fields of V09").contains("executing_lei");
+    assertThat(onNew.keySet()).as("derived on a NEW").containsAll(v09Fields);
+    assertThat(onCancel.keySet()).as("derived on a CANCEL").containsAll(v09Fields);
   }
 
   @Test

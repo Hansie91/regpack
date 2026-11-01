@@ -9,6 +9,7 @@ import dev.regpack.flow.ingest.MappingPack.MappingException;
 import dev.regpack.model.Sha256;
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -265,6 +266,38 @@ class MappingPackTest {
                 "  - {column: price, to: trade.price, cast: DECIMAL}\n",
                 "  - {column: quantity, to: trade.price, cast: DECIMAL}\n"));
     assertThat(twice.controlTotals().sumColumn()).isEqualTo("quantity");
+
+    // and it is run: the mapper and the control-total pass of FileIngest (the first column of
+    // that source name, converted alone) give the same quantity for every row of the day-1 sample
+    byte[] day1;
+    try (InputStream in =
+        MappingPackTest.class.getResourceAsStream("/dev/regpack/flow/samples/trades-day1.csv")) {
+      assertThat(in).as("the day-1 sample").isNotNull();
+      day1 = in.readAllBytes();
+    }
+    CsvReader.Table table = CsvReader.read(day1, 256, 10_000, 64);
+    MappingPack.Column sumColumn =
+        twice.columns().stream()
+            .filter(c -> c.column().equals(Optional.of("quantity")))
+            .findFirst()
+            .orElseThrow();
+    assertThat(sumColumn.to()).isEqualTo("trade.quantity");
+    Mapper mapper = new Mapper(twice);
+    int quantityIndex = table.header().indexOf("quantity");
+    assertThat(table.rows()).isNotEmpty();
+    for (CsvReader.Row row : table.rows()) {
+      Mapper.Result result = mapper.map(row.line(), table.header(), row.cells());
+      assertThat(result).as("line " + row.line()).isInstanceOf(Mapper.Mapped.class);
+      Mapper.Mapped mapped = (Mapper.Mapped) result;
+      Mapper.Conv pass = Mapper.convert(sumColumn, row.cells().get(quantityIndex));
+      assertThat(pass).isInstanceOf(Mapper.Ok.class);
+      assertThat(mapped.quantity())
+          .as("line " + row.line() + " quantity")
+          .isEqualByComparingTo((BigDecimal) ((Mapper.Ok) pass).value());
+      assertThat(mapped.record().execution().quantity()).isEqualByComparingTo(mapped.quantity());
+      // the price target holds the same number: the second mapping of the column did not differ
+      assertThat(mapped.record().execution().price()).isEqualByComparingTo(mapped.quantity());
+    }
   }
 
   @Test

@@ -23,6 +23,8 @@ import org.junit.jupiter.api.Test;
 /** The derive program: rows to text values (plan W1a, task T5, decision D-W5). */
 class DeriveProgramTest {
   private static final MeteredExecutor EXECUTOR = new MeteredExecutor();
+  // observed runs of the cost model: a change of the cost of a literal or of string() changes
+  // ONE_ROW_UNITS and TWO_ROW_UNITS on purpose (the difference of the two stays one row)
   private static final long ONE_ROW_UNITS = 4;
   private static final long TWO_ROW_UNITS = 8;
 
@@ -343,6 +345,9 @@ class DeriveProgramTest {
 
   @Test
   void roundingToFourAndSixPlacesGoesToTheEvenDigitOnATie() {
+    // The rows below are written in this test: it pins the round function, not the places or the
+    // mode of a row of the pack. Those rows are pinned by
+    // DemoPackTest#quantityRoundsToFourPlacesAndPriceToSixHalfEvenAndKeepsExactValues.
     // D-W5: HALF_EVEN. 12.34565 and 1.2345665 are ties that go down (the kept digit 6 is even);
     // 12.34575 and 1.2345675 are ties that go up (7 is odd); HALF_UP would move the first two
     DeriveProgram program =
