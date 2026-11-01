@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.regpack.flow.enrich.Enricher.Enriched;
 import dev.regpack.flow.enrich.Enricher.EnrichedRecord;
+import dev.regpack.flow.evidence.ClaimSink;
 import dev.regpack.flow.evidence.EvidenceWriter;
 import dev.regpack.flow.evidence.TwoCopyEvidenceStore;
 import dev.regpack.flow.ingest.FileIngest.Accepted;
@@ -38,6 +39,8 @@ import dev.regpack.testkit.enrichment.ScriptedEnrichmentSource;
 import dev.regpack.testkit.ident.SyntheticIds;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
@@ -46,6 +49,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -195,6 +199,97 @@ class EnricherTest {
     }
   }
 
+  /**
+   * A test-scope decorator of the store: the first read of the snapshot key finds nothing and then
+   * another run seals the batch (the {@code race} runs), which is what the second run meets between
+   * its get and its put.
+   */
+  private static final class RacingStore implements EvidenceStore {
+    private final EvidenceStore inner;
+    private final EvidenceKey raceKey;
+    private final Runnable race;
+    private boolean raced;
+
+    RacingStore(EvidenceStore inner, EvidenceKey raceKey, Runnable race) {
+      this.inner = inner;
+      this.raceKey = raceKey;
+      this.race = race;
+    }
+
+    @Override
+    public Grade grade() {
+      return inner.grade();
+    }
+
+    @Override
+    public Durability durability() {
+      return inner.durability();
+    }
+
+    @Override
+    public PutOutcome put(PutRequest request) {
+      return inner.put(request);
+    }
+
+    @Override
+    public Optional<StoredObject> get(EvidenceKey key) {
+      Optional<StoredObject> found = inner.get(key);
+      if (!raced && key.equals(raceKey)) {
+        raced = true;
+        race.run();
+      }
+      return found;
+    }
+
+    @Override
+    public List<EvidenceKey> list(String prefix, Optional<EvidenceKey> after, int limit) {
+      return inner.list(prefix, after, limit);
+    }
+
+    @Override
+    public void extendRetention(EvidenceKey key, Instant newRetainUntil) {
+      inner.extendRetention(key, newRetainUntil);
+    }
+
+    @Override
+    public void setLegalHold(EvidenceKey key, boolean hold) {
+      inner.setLegalHold(key, hold);
+    }
+  }
+
+  /** The manifest ledger of the test, which fails the first {@code recordObjects} once armed. */
+  private ManifestLedger manifestThatFailsOnce(AtomicBoolean armed) {
+    return (ManifestLedger)
+        Proxy.newProxyInstance(
+            ManifestLedger.class.getClassLoader(),
+            new Class<?>[] {ManifestLedger.class},
+            (proxy, method, args) -> {
+              if (method.getName().equals("recordObjects") && armed.getAndSet(false)) {
+                throw new EvidenceUnavailableException("the manifest cannot be written");
+              }
+              try {
+                return method.invoke(ledger, args);
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
+  }
+
+  /** The claim sink of the test: it keeps the claims and records them, and fails once if armed. */
+  private ClaimSink claimSinkThatFailsOnce(AtomicBoolean armed) {
+    return claim -> {
+      if (armed.getAndSet(false)) {
+        throw new EvidenceUnavailableException("the claim cannot be registered");
+      }
+      claims.add(claim);
+      ledger.recordRetention(List.of(claim));
+    };
+  }
+
+  private EvidenceWriter writerOver(EvidenceStore tier, ManifestLedger manifest, ClaimSink sink) {
+    return new EvidenceWriter(tier, manifest, sink, RetentionPolicy.fixedDays(1826), clock, REGIME);
+  }
+
   /** The lookups of the sealed snapshot, as parsed JSON, in snapshot order. */
   private List<Map<String, Object>> snapshotLookups() {
     @SuppressWarnings("unchecked")
@@ -290,6 +385,50 @@ class EnricherTest {
         .containsEntry("field", "client.lei")
         .containsEntry("sourceValue", SyntheticIds.CLIENT1_LEI)
         .containsEntry("hitValue", SyntheticIds.CLIENT2_LEI);
+  }
+
+  @Test
+  void twoRecordsWithTheSameDisagreementGiveOneWarningInTheSnapshot() {
+    Accepted one =
+        accepted("T-A", "ACC-2", PartyKind.LEGAL_ENTITY, Optional.of(SyntheticIds.CLIENT1_LEI));
+    Accepted two =
+        accepted("T-B", "ACC-2", PartyKind.LEGAL_ENTITY, Optional.of(SyntheticIds.CLIENT1_LEI));
+
+    Enriched out = enricher(staticData()).enrich(BATCH, List.of(one, two), demoPlan("P30D"));
+
+    assertThat(out.records().get(0).warnings()).containsExactly("ENRICH_DISAGREES");
+    assertThat(out.records().get(1).warnings()).containsExactly("ENRICH_DISAGREES");
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> warnings = (List<Map<String, Object>>) snapshot().get("warnings");
+    assertThat(warnings).as("listed once").hasSize(1);
+    assertThat(warnings.get(0))
+        .containsEntry("key", "ACC-2")
+        .containsEntry("sourceValue", SyntheticIds.CLIENT1_LEI)
+        .containsEntry("hitValue", SyntheticIds.CLIENT2_LEI);
+  }
+
+  @Test
+  void aSourceThatRepeatsAKeyIsReadFirstWins() {
+    ScriptedEnrichmentSource scripted =
+        scripted("static-data").hit("ACC-1", Map.of("lei", SyntheticIds.CLIENT1_LEI)).build();
+    byte[] otherCanonical = Json.canonical(Map.of("lei", SyntheticIds.LAPSED_LEI)).getBytes(UTF_8);
+    EnrichmentSource repeating =
+        new Rewriting(
+            scripted,
+            (request, result) -> {
+              List<EnrichmentSource.KeyOutcome> outcomes = new ArrayList<>(result.outcomes());
+              outcomes.add(
+                  new EnrichmentSource.KeyOutcome.Hit(
+                      "ACC-1", NOW, otherCanonical, Sha256.of(otherCanonical)));
+              return new EnrichmentSource.Result(outcomes);
+            });
+
+    Enriched out =
+        enricher(repeating).enrich(BATCH, List.of(legal("T-1", "ACC-1")), demoPlan("P30D"));
+
+    assertThat(lei(out.records().get(0))).contains(SyntheticIds.CLIENT1_LEI);
+    assertThat(snapshotLookups()).hasSize(1);
+    assertThat(snapshotLookups().get(0)).containsEntry("value", SyntheticIds.CLIENT1_LEI);
   }
 
   @Test
@@ -413,6 +552,27 @@ class EnricherTest {
     assertThat(scripted.requestCount()).as("not even an empty request").isZero();
     assertThat(lei(out.records().get(0))).isEmpty();
     assertThat(out.records().get(0).record()).isEqualTo(person.record());
+  }
+
+  @Test
+  void aNaturalPersonThatSharesAnAccountKeyWithALegalEntityIsNotFilled() {
+    // the lookup is keyed by account: the hit that the legal entity asked for is also found under
+    // the key of the natural person, which must not take it (two guards, this is the second)
+    ScriptedEnrichmentSource scripted =
+        scripted("static-data").hit("ACC-1", Map.of("lei", SyntheticIds.CLIENT1_LEI)).build();
+    RecordingSource source = new RecordingSource(scripted);
+    Accepted entity = legal("T-1", "ACC-1");
+    Accepted person = accepted("T-2", "ACC-1", PartyKind.NATURAL_PERSON, Optional.empty());
+
+    Enriched out = enricher(source).enrich(BATCH, List.of(entity, person), demoPlan("P30D"));
+
+    assertThat(source.requestedKeys()).containsExactly(List.of("ACC-1"));
+    assertThat(lei(out.records().get(0))).contains(SyntheticIds.CLIENT1_LEI);
+    EnrichedRecord natural = out.records().get(1);
+    assertThat(lei(natural)).isEmpty();
+    assertThat(natural.provenance()).isEmpty();
+    assertThat(natural.warnings()).isEmpty();
+    assertThat(natural.record()).isEqualTo(person.record());
   }
 
   @Test
@@ -922,6 +1082,134 @@ class EnricherTest {
         .isEqualTo(Sha256.of(first.bytes()));
     assertThat(claims).hasSize(1);
     assertThat(claims.getFirst().retainUntil()).contains(first.retention().retainUntil());
+  }
+
+  /**
+   * The run stopped after the snapshot was stored and before its rows: the next call, at a later
+   * instant, with a source that is not asked, completes what is missing from what is stored.
+   */
+  private void assertTheNextCallCompletesAStoredSnapshot(
+      EvidenceWriter failingOnce, Runnable assertTheHalfDoneState) {
+    List<Accepted> batch = List.of(legal("T-002", "ACC-2"));
+    EvidenceKey key = Enricher.snapshotKey(BATCH);
+    assertThatThrownBy(
+            () ->
+                new Enricher(clock, failingOnce, Map.of("static-data", staticData()))
+                    .enrich(BATCH, batch, demoPlan("P30D")))
+        .isInstanceOf(EvidenceUnavailableException.class);
+    EvidenceStore.StoredObject stored = store.get(key).orElseThrow();
+    assertTheHalfDoneState.run();
+    assertThat(ledger.retentionRows("", Optional.empty(), 100)).isEmpty();
+
+    clock.advance(Duration.ofHours(3));
+    RecordingSource asked = new RecordingSource(staticData());
+    Enriched out =
+        new Enricher(clock, failingOnce, Map.of("static-data", asked))
+            .enrich(BATCH, batch, demoPlan("P30D"));
+
+    assertThat(asked.requests()).as("the stored snapshot answers, not the source").isEmpty();
+    assertThat(out.snapshotId()).isEqualTo(Sha256.of(stored.bytes()).hex());
+    assertThat(lei(out.records().get(0))).contains(SyntheticIds.CLIENT2_LEI);
+    assertThat(store.list("", Optional.empty(), 100)).containsExactly(key);
+    assertThat(store.get(key).orElseThrow()).isEqualTo(stored);
+    assertThat(ledger.manifestRow(key).orElseThrow().entry().sha256())
+        .isEqualTo(Sha256.of(stored.bytes()));
+    assertThat(claims).hasSize(1);
+    assertThat(ledger.retentionRows("", Optional.empty(), 100)).hasSize(1);
+    Instant sealedUntil = stored.retention().retainUntil();
+    assertThat(claims.getFirst().retainUntil())
+        .as("the date of the first write, not one counted from the later clock")
+        .contains(sealedUntil);
+    assertThat(sealedUntil).isBefore(clock.now().plus(Duration.ofDays(1826)));
+  }
+
+  @Test
+  void aSnapshotStoredBeforeItsManifestRowAndClaimIsCompletedByTheNextCall() {
+    AtomicBoolean armed = new AtomicBoolean(true);
+    EvidenceWriter failing =
+        writerOver(
+            store, manifestThatFailsOnce(armed), claimSinkThatFailsOnce(new AtomicBoolean()));
+    EvidenceKey key = Enricher.snapshotKey(BATCH);
+
+    assertTheNextCallCompletesAStoredSnapshot(
+        failing,
+        () -> {
+          assertThat(armed).as("the manifest was asked and failed").isFalse();
+          assertThat(ledger.manifestRow(key)).isEmpty();
+          assertThat(claims).isEmpty();
+        });
+  }
+
+  @Test
+  void aSnapshotStoredBeforeItsClaimIsCompletedByTheNextCall() {
+    AtomicBoolean armed = new AtomicBoolean(true);
+    EvidenceWriter failing = writerOver(store, ledger, claimSinkThatFailsOnce(armed));
+    EvidenceKey key = Enricher.snapshotKey(BATCH);
+
+    assertTheNextCallCompletesAStoredSnapshot(
+        failing,
+        () -> {
+          assertThat(armed).as("the sink was asked and failed").isFalse();
+          assertThat(ledger.manifestRow(key)).isPresent();
+          assertThat(claims).isEmpty();
+        });
+  }
+
+  @Test
+  void aRunThatLosesTheRaceUsesTheSnapshotThatAnotherRunSealedFirst() {
+    EvidenceKey key = Enricher.snapshotKey(BATCH);
+    List<Accepted> batch = List.of(legal("T-1", "ACC-1"));
+    // the winner: another run whose source said LAPSED, sealed in a tier of its own
+    InMemoryEvidenceStore scratch = new InMemoryEvidenceStore(clock);
+    EvidenceWriter scratchWriter = writerOver(scratch, new InMemoryLedgerStore(clock), claim -> {});
+    new Enricher(
+            clock,
+            scratchWriter,
+            Map.of(
+                "static-data",
+                scripted("static-data")
+                    .hit("ACC-1", Map.of("lei", SyntheticIds.LAPSED_LEI))
+                    .build()))
+        .enrich(BATCH, batch, demoPlan("P30D"));
+    EvidenceStore.StoredObject winner = scratch.get(key).orElseThrow();
+    // the loser reads nothing, asks its source (client 1), and meets the winner at its put
+    RacingStore racing =
+        new RacingStore(
+            store,
+            key,
+            () ->
+                store.put(
+                    new EvidenceStore.PutRequest(
+                        key, winner.bytes(), winner.mediaType(), winner.retention())));
+    RecordingSource asked =
+        new RecordingSource(
+            scripted("static-data").hit("ACC-1", Map.of("lei", SyntheticIds.CLIENT1_LEI)).build());
+    EvidenceWriter loserWriter =
+        writerOver(racing, ledger, claimSinkThatFailsOnce(new AtomicBoolean()));
+
+    Enriched out =
+        new Enricher(clock, loserWriter, Map.of("static-data", asked))
+            .enrich(BATCH, batch, demoPlan("P30D"));
+
+    assertThat(asked.requests()).as("asked once, before the put, and never again").hasSize(1);
+    assertThat(out.snapshotId()).isEqualTo(Sha256.of(winner.bytes()).hex());
+    assertThat(lei(out.records().get(0)))
+        .as("the stored lookups fill")
+        .contains(SyntheticIds.LAPSED_LEI);
+    byte[] storedAnswer = Json.canonical(Map.of("lei", SyntheticIds.LAPSED_LEI)).getBytes(UTF_8);
+    assertThat(out.records().get(0).provenance())
+        .extracting(Enricher.Provenance::responseHash)
+        .containsExactly(Sha256.of(storedAnswer));
+    assertThat(store.list("", Optional.empty(), 100)).containsExactly(key);
+    assertThat(store.get(key).orElseThrow().bytes()).isEqualTo(winner.bytes());
+    assertThat(ledger.manifestRow(key).orElseThrow().entry().sha256())
+        .isEqualTo(Sha256.of(winner.bytes()));
+    // the sink may be asked twice (the put and the replay), for the same claim and stored date
+    assertThat(ledger.retentionRows("", Optional.empty(), 100)).hasSize(1);
+    assertThat(claims)
+        .isNotEmpty()
+        .allSatisfy(
+            claim -> assertThat(claim.retainUntil()).contains(winner.retention().retainUntil()));
   }
 
   @Test
