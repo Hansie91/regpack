@@ -1,0 +1,31 @@
+# Mapping of the CSV trade export of the slice. Synthetic, NON-PRODUCTION, format provisional.
+# A mapping names where each canonical field comes from and how its text is read; it holds no
+# business logic. Strict YAML: a flow mapping or list is written on one line.
+mapping: {id: csv-trades-v1}
+format: csv
+source_record_id: record_id
+source_version: version
+event_identity: [firm.lei, venue.mic, venue.executionId]
+control_totals: {records_key: records, sum_column: quantity, sum_key: sum_quantity}
+expected_population: none
+absence: {empty_cell: absent}
+time: {zone: UTC, format: iso-instant-micros}
+columns:
+  - {constant: SYNT00FIRM0000000152, to: firm.lei}
+  - {constant: EQUITY, to: instrument.assetClass}
+  - {column: event, to: event.kind, enum: [NEW, CANCEL, NOVATION, ASSIGNMENT, AMEND, CORRECTION]}
+  - {column: venue_mic, to: venue.mic}
+  - {column: exec_id, to: venue.executionId}
+  - {column: traded_at, to: event.tradedAt, cast: INSTANT_UTC}
+  - {column: isin, to: instrument.isin}
+  - {column: on_venue, to: instrument.tradedOnVenue, cast: BOOLEAN}
+  - {column: account, to: attribute.account}
+  - {column: client_lei, to: client.lei}
+  - {column: client_type, to: client.kind, enum: [LEGAL_ENTITY, NATURAL_PERSON]}
+  - {column: side, to: trade.side, enum: [BUY, SELL]}
+  - {column: capacity, to: trade.capacity, enum: [AOTC, MTCH, DEAL]}
+  - {column: quantity, to: trade.quantity, cast: DECIMAL}
+  - {column: price, to: trade.price, cast: DECIMAL}
+  - {column: currency, to: trade.currency}
+  - {column: counterparty, to: trade.counterparty}
+  - {column: exec_within, to: trade.executionWithin, enum: [ALGO-1, ALGO-2, ALGO-3]}

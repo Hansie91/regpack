@@ -33,6 +33,23 @@ public interface SourceConnectorContract {
    */
   void armFailureOnNextRead();
 
+  /**
+   * The media type every batch of the connector under test carries. The default is the NDJSON type
+   * of the in-memory adapter; an adapter of another format overrides it.
+   */
+  default String mediaType() {
+    return "application/x-ndjson";
+  }
+
+  /**
+   * The record count in the manifest of every batch that {@link #connector(int)} builds. The
+   * default is the one line of the in-memory adapter; an adapter whose batches hold a different
+   * number overrides it.
+   */
+  default int expectedRecordCount() {
+    return 1;
+  }
+
   private static ReadRequest fromStart() {
     return new ReadRequest(Optional.empty(), new ReadLimits(100, 1_000_000L));
   }
@@ -77,10 +94,10 @@ public interface SourceConnectorContract {
       List<Batch> batches = stream.next(10);
       assertThat(batches).hasSize(3);
       for (Batch batch : batches) {
-        assertThat(batch.payload().mediaType()).isEqualTo("application/x-ndjson");
+        assertThat(batch.payload().mediaType()).isEqualTo(mediaType());
         assertThat(batch.payload().manifest().sha256())
             .isEqualTo(Sha256.of(batch.payload().bytes()));
-        assertThat(batch.payload().manifest().recordCount()).isEqualTo(1);
+        assertThat(batch.payload().manifest().recordCount()).isEqualTo(expectedRecordCount());
       }
     }
   }
